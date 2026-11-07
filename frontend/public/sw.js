@@ -6,12 +6,13 @@ const APP_SHELL = [
   "/index.html",
   "/offline.html",
   "/manifest.webmanifest",
-  "/kikoto-icon-64.png",
-  "/kikoto-icon-192.png",
+  "/kikoto-sara-icon-64.png",
+  "/kikoto-sara-icon-192.png",
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
+  // Sara fork: activate new builds immediately instead of waiting for all clients to close.
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", (event) => {
@@ -52,14 +53,15 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // Sara fork: network-first so replaced assets (icons, cover art) show up on the
+  // next load; the cache only serves as an offline fallback.
   event.respondWith(
-    caches.match(request).then((cached) => {
-      const network = fetch(request).then((response) => {
+    fetch(request)
+      .then((response) => {
         if (response.ok && response.type === "basic")
           void caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone()));
         return response;
-      });
-      return cached ?? network;
-    }),
+      })
+      .catch(() => caches.match(request)),
   );
 });

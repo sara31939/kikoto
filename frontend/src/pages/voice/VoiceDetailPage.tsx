@@ -1,4 +1,4 @@
-import { ArrowUpRight, CircleAlert, Heart, Image, Loader2, RefreshCw, Rss, SlidersHorizontal } from "lucide-react";
+import { ArrowUpRight, CircleAlert, Heart, Image, Loader2, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
@@ -24,8 +24,7 @@ import { useCreatorWorksBrowse } from "@/pages/creator/useCreatorWorksBrowse";
 import { LibrarySortButton } from "@/pages/library/LibrarySortButton";
 import { creatorWorkPageSizeOptions } from "@/lib/creatorWorksBrowse";
 import { useMobileNavigationLayout } from "@/hooks/useMobileNavigationLayout";
-import { openWorkflowPath, workflowActivityRunPath, workflowRunFormPath } from "@/features/workflows/workflowLinks";
-import { SubscribeButton } from "@/features/subscriptions/SubscribeButton";
+import { openWorkflowPath, workflowActivityRunPath } from "@/features/workflows/workflowLinks";
 import { useAuth } from "@/auth/AuthProvider";
 import { REMOTE_TRACK_PERMISSIONS, usePermissionGate } from "@/auth/usePermissionGate";
 import { NotFoundPage } from "@/app/NotFoundPage";
@@ -412,7 +411,6 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
   const canOpenWorkflows = auth.hasPermission("workflows:run") && !auth.demoMode;
   // Demo lists the covers and the catalog sync form for inspection and saves or runs neither.
   const canChangeCover = auth.demoMode || auth.hasPermission("favorites:write");
-  const canOpenCatalogSync = auth.demoMode || canOpenWorkflows;
   const [coverDialogOpen, setCoverDialogOpen] = useState(false);
   const openRefreshRun = (runId: number) => openWorkflowPath(workflowActivityRunPath(runId));
   const runAction = (runId?: number) =>
@@ -504,17 +502,7 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
       { catalogRefresh: "stored", metadataRefresh: "missing" },
       t("creatorBrowse.voiceMetadataQueued"),
     );
-  const refreshVoice = () =>
-    void refreshVoiceCatalog(
-      { catalogRefresh: "incremental", metadataRefresh: "missing" },
-      t("creatorBrowse.voiceRefreshQueued"),
-    );
   const firstPull = detail?.syncState === "never";
-  const firstPullVoiceCatalog = () =>
-    void refreshVoiceCatalog(
-      { catalogRefresh: "full", metadataRefresh: "missing" },
-      t("creatorBrowse.firstVoiceCatalogQueued"),
-    );
 
   const failedRemoteSources = remoteMatches.filter(remoteSourceFailed).length;
   const totalPages = Math.max(1, Math.ceil(totalWorks / pageSize));
@@ -744,14 +732,6 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
               <Heart className={`h-4 w-4 ${detail.favorite ? "fill-current" : ""}`} />
               <span className="hidden lg:inline">{t("detailActions.favorite")}</span>
             </Button>
-            <SubscribeButton
-              target={{ kind: "voice", personId: detail.personId }}
-              subjectName={detail.displayName}
-              canSubscribe={!auth.demoMode && auth.hasPermission("favorites:write")}
-              canPullNow={!auth.demoMode && auth.hasPermission("metadata:sync")}
-              onOpenSubscriptions={() => openWorkflowPath("/discover?panel=subscriptions")}
-              className="h-[var(--control-icon-size)] w-[var(--control-icon-size)] lg:h-[var(--control-height-sm)] lg:w-auto lg:px-[var(--control-padding-sm-x)] lg:text-xs"
-            />
             {!firstPull && !catalogRefreshActive && (detail.metadataMissingWorks ?? 0) > 0 && (
               <Button
                 variant="outline"
@@ -767,7 +747,7 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
                 <span className="hidden lg:inline">{t("detailActions.retryMetadata")}</span>
               </Button>
             )}
-            {catalogRefreshActive ? (
+            {catalogRefreshActive && (
               <Button
                 variant="outline"
                 size="sm"
@@ -779,18 +759,6 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
               >
                 <Loader2 className="h-4 w-4 animate-spin" />
                 <span>{t("detailActions.refreshRunning")}</span>
-              </Button>
-            ) : (
-              <Button
-                variant={firstPull ? "default" : "outline"}
-                size="sm"
-                className="h-[var(--control-icon-size)] gap-1.5 px-2 lg:h-[var(--control-height-sm)] lg:gap-2 lg:px-[var(--control-padding-sm-x)] lg:text-xs"
-                aria-label={firstPull ? t("detailActions.firstPull") : t("detailActions.refreshVoice")}
-                disabled={!canForceRefreshCatalog || isRemoteLoading}
-                onClick={firstPull ? firstPullVoiceCatalog : refreshVoice}
-              >
-                {isRemoteLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                <span>{firstPull ? t("detailActions.firstPull") : t("detailActions.refreshVoice")}</span>
               </Button>
             )}
             <ActionMenu
@@ -804,19 +772,6 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
                         label: t("detailActions.changeCover"),
                         icon: <Image className="h-4 w-4" />,
                         onSelect: () => setCoverDialogOpen(true),
-                      },
-                    ]
-                  : []),
-                ...(canOpenCatalogSync
-                  ? [
-                      {
-                        key: "catalogSync",
-                        label: t("detailActions.syncVoiceCatalog"),
-                        icon: <Rss className="h-4 w-4" />,
-                        onSelect: () =>
-                          openWorkflowPath(
-                            workflowRunFormPath("voice_catalog_sync", { personId: String(detail.personId) }),
-                          ),
                       },
                     ]
                   : []),

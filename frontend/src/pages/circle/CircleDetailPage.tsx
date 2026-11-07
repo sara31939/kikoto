@@ -1,4 +1,4 @@
-import { CircleAlert, ExternalLink, Heart, Image, Loader2, RefreshCw, Rss, SlidersHorizontal } from "lucide-react";
+import { CircleAlert, ExternalLink, Heart, Image, Loader2, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
@@ -25,8 +25,7 @@ import {
 import { WorkCollectionPagination } from "@/components/work-collection/WorkCollectionPagination";
 import { LazyRemoteFetchWorkspaceDialog } from "@/features/work-detail/workflows/LazyRemoteFetchWorkspaceDialog";
 import { useRemoteFetchWorkspace } from "@/features/work-detail/workflows/useRemoteFetchWorkspace";
-import { openWorkflowPath, workflowActivityRunPath, workflowRunFormPath } from "@/features/workflows/workflowLinks";
-import { SubscribeButton } from "@/features/subscriptions/SubscribeButton";
+import { openWorkflowPath, workflowActivityRunPath } from "@/features/workflows/workflowLinks";
 import {
   api,
   ApiError,
@@ -310,9 +309,6 @@ export function CircleDetailPage({
   const canOpenWorkflows = auth.hasPermission("workflows:run") && !auth.demoMode;
   // Demo lists the covers and the catalog sync form for inspection and saves or runs neither.
   const canChangeCover = auth.demoMode || auth.hasPermission("favorites:write");
-  const canOpenCatalogSync = auth.demoMode || canOpenWorkflows;
-  const canSubscribe = auth.hasPermission("favorites:write") && !auth.demoMode;
-  const openSubscriptions = () => openWorkflowPath("/discover?panel=subscriptions");
   const openRefreshRun = (runId: number) => openWorkflowPath(workflowActivityRunPath(runId));
   const refreshRun = useCircleRefreshRun({
     run: detail?.refresh,
@@ -359,14 +355,6 @@ export function CircleDetailPage({
     }
   };
 
-  // An unknown circle is fetched by the circle catalog sync workflow, which adds it
-  // on success; the run form opens with this maker id filled in.
-  const canFetchMissingCircle = canRefreshCatalog && canOpenWorkflows;
-  const openCatalogSyncCircle = () =>
-    openWorkflowPath(
-      workflowRunFormPath("circle_catalog_sync", { circleId: detail?.externalId ?? externalId.toUpperCase() }),
-    );
-
   const firstPull = circle.syncState === "never";
   const catalogSyncedTime = circle.lastSyncedAt ? formatDateTime(circle.lastSyncedAt, resolvedLocale) : "";
   const catalogNote = firstPull
@@ -374,14 +362,6 @@ export function CircleDetailPage({
     : catalogSyncedTime
       ? t("detailActions.catalogSyncedAt", { time: catalogSyncedTime })
       : "";
-  // First pull reads the whole catalog and fills its metadata; Refresh also
-  // matches the circle's works on the remote sources.
-  const runPrimaryRefresh = () =>
-    void queueRefresh(
-      firstPull
-        ? { catalogRefresh: "full", metadataRefresh: "missing" }
-        : { catalogRefresh: "incremental", metadataRefresh: "missing", sourceCheck: true },
-    );
   const moreMenuItems = [
     ...(canChangeCover
       ? [
@@ -390,16 +370,6 @@ export function CircleDetailPage({
             label: t("detailActions.changeCover"),
             icon: <Image className="h-4 w-4" />,
             onSelect: () => setCoverDialogOpen(true),
-          },
-        ]
-      : []),
-    ...(canOpenCatalogSync
-      ? [
-          {
-            key: "catalogSync",
-            label: t("detailActions.syncCircleCatalog"),
-            icon: <Rss className="h-4 w-4" />,
-            onSelect: openCatalogSyncCircle,
           },
         ]
       : []),
@@ -554,17 +524,7 @@ export function CircleDetailPage({
         message={
           !missing
             ? t("creatorBrowse.circleUnavailable", { id: externalId })
-            : canFetchMissingCircle
-              ? t("creatorBrowse.circleFetchPrompt", { id: externalId })
-              : t("creatorBrowse.circleContactAdmin", { id: externalId })
-        }
-        primaryAction={
-          missing && canFetchMissingCircle ? (
-            <Button onClick={openCatalogSyncCircle}>
-              <Rss className="h-4 w-4" />
-              {t("creatorBrowse.circleFetch")}
-            </Button>
-          ) : undefined
+            : t("creatorBrowse.circleContactAdmin", { id: externalId })
         }
         onBack={navigateToList}
         onOpenLibrary={() => {
@@ -617,13 +577,6 @@ export function CircleDetailPage({
               <Heart className={`h-4 w-4 ${circle.favorite ? "fill-current" : ""}`} />
               <span className="hidden lg:inline">{t("detailActions.favorite")}</span>
             </Button>
-            <SubscribeButton
-              target={{ kind: "circle", circleId: circle.externalId }}
-              subjectName={circle.displayName}
-              canSubscribe={canSubscribe}
-              canPullNow={canRefreshCatalog}
-              onOpenSubscriptions={openSubscriptions}
-            />
             {!firstPull && !refreshRun.active && catalogOnlyCount > 0 && (
               <Button
                 variant="outline"
@@ -639,7 +592,7 @@ export function CircleDetailPage({
                 <span className="hidden lg:inline">{t("detailActions.retryMetadata")}</span>
               </Button>
             )}
-            {refreshRun.active && detail?.refresh ? (
+            {refreshRun.active && detail?.refresh && (
               <Button
                 variant="outline"
                 size="sm"
@@ -651,25 +604,6 @@ export function CircleDetailPage({
               >
                 <Loader2 className="h-4 w-4 animate-spin" />
                 <span>{t("detailActions.refreshRunning")}</span>
-              </Button>
-            ) : (
-              <Button
-                variant={firstPull ? "default" : "outline"}
-                size="sm"
-                className="h-[var(--control-icon-size)] gap-1.5 px-2 lg:h-[var(--control-height-sm)] lg:gap-2 lg:px-[var(--control-padding-sm-x)]"
-                aria-label={firstPull ? t("detailActions.firstPull") : t("detailActions.refreshCircle")}
-                disabled={!canRefreshCatalog || isLoading || refreshBusy}
-                onClick={runPrimaryRefresh}
-              >
-                {queueingRefresh ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                {firstPull ? (
-                  <span>{t("detailActions.firstPull")}</span>
-                ) : (
-                  <>
-                    <span className="lg:hidden">{t("detailActions.refreshShort")}</span>
-                    <span className="hidden lg:inline">{t("detailActions.refreshCircle")}</span>
-                  </>
-                )}
               </Button>
             )}
             <ActionMenu
@@ -842,18 +776,6 @@ export function CircleDetailPage({
                 selectedSeries={selectedSeries}
                 selectedSeriesCode={selectedSeries?.titleId ?? null}
                 allCount={activeSeriesCount}
-                subscribe={
-                  selectedSeries && (
-                    <SubscribeButton
-                      target={{ kind: "series", circleId: circle.externalId, seriesId: selectedSeries.titleId }}
-                      subjectName={selectedSeries.name}
-                      canSubscribe={canSubscribe}
-                      canPullNow={canRefreshCatalog}
-                      onOpenSubscriptions={openSubscriptions}
-                      className="shrink-0"
-                    />
-                  )
-                }
               />
               <div className="hidden flex-col gap-2 px-1 py-1 lg:flex lg:flex-row lg:items-center lg:justify-between">
                 <div className="min-w-0">
@@ -874,13 +796,6 @@ export function CircleDetailPage({
                 </div>
                 {selectedSeries && (
                   <div className="flex shrink-0 gap-2">
-                    <SubscribeButton
-                      target={{ kind: "series", circleId: circle.externalId, seriesId: selectedSeries.titleId }}
-                      subjectName={selectedSeries.name}
-                      canSubscribe={canSubscribe}
-                      canPullNow={canRefreshCatalog}
-                      onOpenSubscriptions={openSubscriptions}
-                    />
                     {selectedSeries.url && (
                       <Button variant="outline" size="sm" asChild>
                         <a href={selectedSeries.url} target="_blank" rel="noreferrer">

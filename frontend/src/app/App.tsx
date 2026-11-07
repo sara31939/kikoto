@@ -539,7 +539,7 @@ function AuthenticatedApp() {
           >
             <div className="flex min-w-0 items-center gap-2.5">
               <span className="grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-[var(--control-radius)] bg-primary/10 ring-1 ring-primary/15">
-                <img src="/kikoto-icon-64.png" alt="" className="h-7 w-7" />
+                <img src="/kikoto-sara-icon-64.png" alt="" className="h-7 w-7" />
               </span>
               {!sidebarCollapsed && (
                 <div className="truncate font-[family-name:var(--font-heading)] text-xl font-semibold tracking-tight">
@@ -877,7 +877,7 @@ function AppHeaderTitle({
   }
   return (
     <div className="flex min-w-0 items-center lg:flex-row lg:items-baseline lg:gap-3">
-      {!showMobileTitle && <img src="/kikoto-icon-64.png" alt="Kikoto" className="h-7 w-7 lg:hidden" />}
+      {!showMobileTitle && <img src="/kikoto-sara-icon-64.png" alt="Kikoto" className="h-7 w-7 lg:hidden" />}
       <h1 className={cx("truncate text-base font-semibold lg:text-2xl", !showMobileTitle && "hidden lg:block")}>
         {title}
       </h1>

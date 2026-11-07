@@ -21,6 +21,21 @@ export const builtInWorkflowOrder = [
   "voice_catalog_sync",
 ];
 
+/** Sara fork: workflows removed from this build (rankings, subscriptions, catalog sync, remote fetch). */
+export const hiddenWorkflowCodes: ReadonlySet<string> = new Set([
+  "remote_popular_collection",
+  "dlsite_popular_collection",
+  "creator_subscription_refresh",
+  "circle_catalog_sync",
+  "series_catalog_sync",
+  "voice_catalog_sync",
+  "remote_work_fetch",
+]);
+
+export function isHiddenWorkflowCode(code: string): boolean {
+  return hiddenWorkflowCodes.has(code);
+}
+
 const workflowCategoryByCode: Record<string, WorkflowCategory> = {
   local_library_scan: "basic",
   local_media_index: "basic",
@@ -52,7 +67,9 @@ export function groupWorkflowDefinitions(definitions: WorkflowDefinition[]): Wor
   return workflowCategories
     .map((category) => ({
       category,
-      definitions: definitions.filter((definition) => workflowCategory(definition.code) === category),
+      definitions: definitions.filter(
+        (definition) => !isHiddenWorkflowCode(definition.code) && workflowCategory(definition.code) === category,
+      ),
     }))
     .filter((group) => group.definitions.length > 0);
 }

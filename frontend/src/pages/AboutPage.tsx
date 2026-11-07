@@ -175,6 +175,9 @@ function Sleeve({ update }: { update: AppUpdate | null }) {
           <span className="rounded-[var(--badge-radius)] border bg-card px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground">
             {APP_CLIENT_VERSION}
           </span>
+          <span className="rounded-[var(--badge-radius)] border border-info-border bg-info-surface px-2 py-0.5 text-xs font-semibold text-info-foreground">
+            Sara fork
+          </span>
           {update?.releaseUrl && (
             <a
               href={update.releaseUrl}

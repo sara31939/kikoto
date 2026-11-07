@@ -29,6 +29,13 @@ type NavItem = {
 
 export const INSIGHTS_PATH = "/insights";
 
+/** Sara fork: features removed from this build — hidden from navigation and blocked as pages. */
+const hiddenNavIds: ReadonlySet<string> = new Set(["subscriptions", "translation", "insights"]);
+
+export function isHiddenNavItem(item: { id: string }): boolean {
+  return hiddenNavIds.has(item.id);
+}
+
 export const navItems = [
   {
     id: "library",
@@ -185,11 +192,12 @@ export function visibleNavigationItems({
   state: AuthViewState;
   hasPermission: (permission: string) => boolean;
 }) {
-  return navItems.filter((item) => canAccessNavigationItem(item, state, hasPermission));
+  return navItems.filter((item) => !isHiddenNavItem(item) && canAccessNavigationItem(item, state, hasPermission));
 }
 
 export function canAccessPage(page: PageID, state: AuthViewState, hasPermission: (permission: string) => boolean) {
   const item = navItems.find((navItem) => navItem.id === page);
+  if (item && isHiddenNavItem(item)) return false;
   return item ? canAccessNavigationItem(item, state, hasPermission) : true;
 }
 

@@ -17,7 +17,11 @@ import { WorkflowActivity } from "@/features/workflows/WorkflowActivity";
 import { useWorkflowOverview } from "@/features/workflows/useWorkflowOverview";
 import { WorkflowDetail } from "@/features/workflows/WorkflowDetail";
 import { workflowHistorySize } from "@/features/workflows/WorkflowDetailFrame";
-import { builtInWorkflowOrder, groupWorkflowDefinitions } from "@/features/workflows/workflowCategories";
+import {
+  builtInWorkflowOrder,
+  groupWorkflowDefinitions,
+  isHiddenWorkflowCode,
+} from "@/features/workflows/workflowCategories";
 import { WorkflowNavigator } from "@/features/workflows/WorkflowNavigator";
 import {
   configurableSystemWorkflowCodes,
@@ -196,8 +200,8 @@ export function WorkflowsPage({
 
   const presetByCode = useMemo(() => new Map(presets.map((preset) => [preset.code, preset])), [presets]);
   const visibleDefinitions = useMemo(() => {
-    const choices = [...definitions];
-    if (linkedCode && !choices.some((definition) => definition.code === linkedCode)) {
+    const choices = definitions.filter((definition) => !isHiddenWorkflowCode(definition.code));
+    if (linkedCode && !isHiddenWorkflowCode(linkedCode) && !choices.some((definition) => definition.code === linkedCode)) {
       choices.push({
         id: -(linkedRun?.definitionId ?? linkedRun?.id ?? 1),
         code: linkedCode,

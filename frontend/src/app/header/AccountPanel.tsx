@@ -2,7 +2,6 @@ import { useTranslation } from "react-i18next";
 import { Clipboard, LogIn, LogOut, RotateCcw, Server, Settings, Users } from "lucide-react";
 
 import { ActionItem, MenuSection } from "@/app/header/HeaderPopover";
-import { INSIGHTS_PATH, navItems } from "@/app/navigation";
 import { LanguageControls, type LanguageControl } from "@/app/header/LanguageControls";
 import { UserAvatar, userDisplayName } from "@/app/header/UserAvatar";
 import type { ServerConnection } from "@/app/header/useServerConnection";
@@ -17,7 +16,6 @@ import { PERSONAL_TAB_PERMISSION, personalTabPath, personalTabs } from "@/pages/
 // Discover, Insights, and Tags are one tap away on a phone, which has no
 // sidebar. Your data stays in Settings and Quick actions.
 const personalDestinations = [
-  ...navItems.filter((item) => item.id === "subscriptions" || item.path === INSIGHTS_PATH),
   ...personalTabs.filter((tab) => tab.id !== "data").map((tab) => ({ ...tab, path: personalTabPath(tab.id) })),
 ];
 

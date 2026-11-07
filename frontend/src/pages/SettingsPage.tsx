@@ -14,13 +14,11 @@ import {
   Eraser,
   FastForward,
   Folder,
-  Bot,
   KeyRound,
   LoaderCircle,
   Network,
   Save,
   Shield,
-  Sparkles,
   Tags,
   UserRound,
   type LucideIcon,
@@ -62,18 +60,18 @@ type SettingsTab =
 type SettingsSectionTarget = "data" | "time-zone";
 type SettingsLocation = { tab: SettingsTab; section?: SettingsSectionTarget };
 
-const adminSettingsTabs: SettingsTab[] = ["library", "cache", "proxy", "llm", "cleanup", "users"];
+const adminSettingsTabs: SettingsTab[] = ["library", "cache", "proxy", "cleanup", "users"];
 // Personal tags need library access; the other personal tabs do not.
 const libraryReaderTabs: SettingsTab[] = ["tags"];
-const allSettingsTabs: SettingsTab[] = ["account", "playback", "recommendation", "tags", ...adminSettingsTabs];
+const allSettingsTabs: SettingsTab[] = ["account", "playback", "tags", ...adminSettingsTabs];
 // Alias tab ids keep existing links valid; each opens the tab that holds its content.
 const settingsTabAliases: Record<string, SettingsLocation> = {
   data: { tab: "account", section: "data" },
   "time-zone": { tab: "account", section: "time-zone" },
   // The metadata tab id opens Library, which holds catalog freshness.
   metadata: { tab: "library" },
-  // ASR services share the LLM tab and its content safety policy.
-  asr: { tab: "llm" },
+  // Sara fork: the LLM tab is removed; legacy ASR links land on Account.
+  asr: { tab: "account" },
 };
 
 // Every tab shares one content width so switching tabs never shifts the layout.
@@ -82,12 +80,10 @@ const settingsPanelClassName = "w-full max-w-4xl space-y-8";
 const settingsTabs: Array<{ id: SettingsTab; labelKey: string; icon: LucideIcon }> = [
   { id: "account", labelKey: "settings.account", icon: UserRound },
   { id: "playback", labelKey: "settings.playback", icon: FastForward },
-  { id: "recommendation", labelKey: "settings.recommendations", icon: Sparkles },
   { id: "tags", labelKey: "nav.tags", icon: Tags },
   { id: "library", labelKey: "maintenance.tabs.library", icon: Folder },
   { id: "cache", labelKey: "maintenance.tabs.cache", icon: Download },
   { id: "proxy", labelKey: "maintenance.tabs.proxy", icon: Network },
-  { id: "llm", labelKey: "maintenance.tabs.llm", icon: Bot },
   { id: "cleanup", labelKey: "cleanup.tab", icon: Eraser },
   { id: "users", labelKey: "maintenance.tabs.users", icon: Shield },
 ];

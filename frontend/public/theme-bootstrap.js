@@ -8,7 +8,8 @@
       : storedPreset === "anthropic" ||
           storedPreset === "openai" ||
           storedPreset === "apple" ||
-          storedPreset === "google-md"
+          storedPreset === "google-md" ||
+          storedPreset === "noctessia"
         ? storedPreset
         : "anthropic";
   const storedPalette = localStorage.getItem("kikoto:theme-palette");
@@ -28,6 +29,7 @@
     openai: { light: "#fafafa", dark: "#141414" },
     apple: { light: "#f2f2f7", dark: "#111112" },
     "google-md": { light: "#f8fafd", dark: "#121316" },
+    noctessia: { light: "#f7f7f8", dark: "#252636" },
   };
   document.querySelector('meta[name="theme-color"]').content = themeColors[preset][dark ? "dark" : "light"];
 })();

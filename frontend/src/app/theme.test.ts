@@ -32,7 +32,7 @@ describe("theme preset preferences", () => {
   });
 
   it("lists the default preset first", () => {
-    expect(THEME_PRESET_OPTIONS.map((option) => option.value)).toEqual(["anthropic", "openai", "apple", "google-md"]);
+    expect(THEME_PRESET_OPTIONS.map((option) => option.value)).toEqual(["anthropic", "openai", "apple", "noctessia", "google-md"]);
   });
 
   it("provides light and dark browser chrome colors for every preset", () => {

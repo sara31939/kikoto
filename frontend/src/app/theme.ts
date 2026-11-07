@@ -1,5 +1,5 @@
 export type ThemeMode = "light" | "dark" | "system";
-export type ThemePreset = "anthropic" | "openai" | "apple" | "google-md";
+export type ThemePreset = "anthropic" | "openai" | "apple" | "google-md" | "noctessia";
 export type ThemePalette = "original" | "graphite" | "cobalt" | "iris";
 
 type ResolvedThemeMode = Exclude<ThemeMode, "system">;
@@ -42,6 +42,18 @@ export const THEME_PRESET_OPTIONS = [
       iris: "#5e5ce6",
     },
     themeColor: { light: "#f2f2f7", dark: "#111112" },
+  },
+  {
+    value: "noctessia",
+    label: "Noctessia",
+    swatches: ["#6c8bb7", "#f7f7f8", "#424663"],
+    previewAccents: {
+      original: "#6c8bb7",
+      graphite: "#68636d",
+      cobalt: "#424663",
+      iris: "#967785",
+    },
+    themeColor: { light: "#f7f7f8", dark: "#252636" },
   },
   {
     value: "google-md",

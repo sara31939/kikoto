@@ -1,4 +1,4 @@
-import { Circle, Feather, Layers3, Shapes, type LucideIcon } from "lucide-react";
+import { Circle, Feather, Layers3, Moon, Shapes, type LucideIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { THEME_PRESET_OPTIONS, type ThemePalette, type ThemePreset } from "@/app/theme";
@@ -9,6 +9,7 @@ const presetIcons: Record<ThemePreset, LucideIcon> = {
   openai: Circle,
   apple: Layers3,
   "google-md": Shapes,
+  noctessia: Moon,
 };
 
 export function ThemePresetPicker({

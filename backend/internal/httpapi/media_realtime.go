@@ -505,6 +505,18 @@ func (s *Server) serveAutomaticLocalPlayback(w http.ResponseWriter, r *http.Requ
 	capabilities := playbackCapabilities(r)
 	forceTranscode := forcePlaybackTranscode(r)
 	forceDirect := forcePlaybackDirect(r)
+	// A requested server-side loudness boost (media_boost.go) is delivered as
+	// a compatible-audio transcode with the gain folded in, even for a file
+	// the client could have played directly.
+	var boostGainDB float64
+	if profile == playbackProfileAudio && serverBoostRequested(r) && target.LocationID > 0 {
+		boostGainDB = s.storedBoostGainDB(r.Context(), target.LocationID, path)
+	}
+	if boostGainDB > 0 {
+		w.Header().Set("X-Kikoto-Playback-Delivery", "transcoded")
+		s.serveCompatibleAudio(w, r, path, info, boostGainDB)
+		return
+	}
 	if !forceTranscode {
 		if forceDirect {
 			// The current player deliberately trusts a known media extension first.
@@ -541,7 +553,7 @@ func (s *Server) serveAutomaticLocalPlayback(w http.ResponseWriter, r *http.Requ
 	}
 	w.Header().Set("X-Kikoto-Playback-Delivery", "transcoded")
 	if profile == playbackProfileAudio {
-		s.serveCompatibleAudio(w, r, path, info)
+		s.serveCompatibleAudio(w, r, path, info, 0)
 		return
 	}
 	if r.Method == http.MethodHead {

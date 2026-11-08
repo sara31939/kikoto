@@ -9,6 +9,7 @@ import (
 const mediaStreamTargetTTL = 2 * time.Minute
 
 type mediaStreamTarget struct {
+	LocationID   int64
 	LocationType string
 	RelativePath string
 	Availability string
@@ -65,6 +66,7 @@ func (s *Server) loadMediaStreamTarget(ctx context.Context, locationID int64) (m
 	); err != nil {
 		return mediaStreamTarget{}, false, err
 	}
+	target.LocationID = locationID
 	target.ExpiresAt = time.Now().Add(mediaStreamTargetTTL)
 	s.mediaStreamCache.Store(locationID, target)
 	return target, false, nil

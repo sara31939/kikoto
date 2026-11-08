@@ -32,7 +32,7 @@ func cachedAudioConcurrencyFixture(t *testing.T) (*Server, string, string, []byt
 	}
 	cacheRoot := t.TempDir()
 	encoded := bytes.Repeat([]byte("synthetic complete audio bytes "), 8)
-	output := writeCacheTestFile(t, cacheRoot, audioTranscodeCachePath(input, info), string(encoded), 2*time.Minute)
+	output := writeCacheTestFile(t, cacheRoot, audioTranscodeCachePath(input, info, 0), string(encoded), 2*time.Minute)
 	return NewServer(nil, config.Config{CacheRoot: cacheRoot}), input, output, encoded
 }
 

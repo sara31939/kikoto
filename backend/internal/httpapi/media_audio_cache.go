@@ -28,13 +28,23 @@ const (
 
 var errAudioTranscodeUnavailable = errors.New("audio transcoding is unavailable")
 
-func audioTranscodeCachePath(input string, info os.FileInfo) string {
-	revision := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%d", audioTranscodeProfileVersion, input, info.Size(), info.ModTime().UnixNano())))
+// audioTranscodeProfile names one encode variant of a source file. A boosted
+// variant (media_boost.go) is a different profile, so its cache entry never
+// mixes with the plain encode or another gain.
+func audioTranscodeProfile(gainDB float64) string {
+	if gainDB <= 0 {
+		return audioTranscodeProfileVersion
+	}
+	return audioTranscodeProfileVersion + "-boost" + boostGainSuffix(gainDB)
+}
+
+func audioTranscodeCachePath(input string, info os.FileInfo, gainDB float64) string {
+	revision := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%d", audioTranscodeProfile(gainDB), input, info.Size(), info.ModTime().UnixNano())))
 	return filepath.ToSlash(filepath.Join(transcodeCacheRootRelative, "audio", fmt.Sprintf("%x.mp3", revision)))
 }
 
-func (s *Server) serveCompatibleAudio(w http.ResponseWriter, r *http.Request, input string, inputInfo os.FileInfo) {
-	file, err := s.openCompatibleAudio(r.Context(), input, inputInfo)
+func (s *Server) serveCompatibleAudio(w http.ResponseWriter, r *http.Request, input string, inputInfo os.FileInfo, gainDB float64) {
+	file, err := s.openCompatibleAudio(r.Context(), input, inputInfo, gainDB)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
@@ -62,8 +72,8 @@ func (s *Server) serveCompatibleAudio(w http.ResponseWriter, r *http.Request, in
 	http.ServeContent(w, r, filepath.Base(file.Name()), inputInfo.ModTime(), file)
 }
 
-func (s *Server) openCompatibleAudio(ctx context.Context, input string, inputInfo os.FileInfo) (*os.File, error) {
-	relPath := audioTranscodeCachePath(input, inputInfo)
+func (s *Server) openCompatibleAudio(ctx context.Context, input string, inputInfo os.FileInfo, gainDB float64) (*os.File, error) {
+	relPath := audioTranscodeCachePath(input, inputInfo, gainDB)
 	output, err := safeCachePath(s.cfg.CacheRoot, relPath)
 	if err != nil {
 		return nil, err
@@ -110,7 +120,7 @@ func (s *Server) openCompatibleAudio(ctx context.Context, input string, inputInf
 		if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 			return nil, err
 		}
-		if err := s.generateCompatibleAudio(ctx, input, inputInfo, output, audioTranscodeMaximumBytes); err != nil {
+		if err := s.generateCompatibleAudio(ctx, input, inputInfo, output, audioTranscodeMaximumBytes, gainDB); err != nil {
 			if errors.Is(err, errAudioTranscodeUnavailable) {
 				s.mediaPreparationFailures.remember(failureKey)
 			}
@@ -144,7 +154,7 @@ func openCompleteAudio(path string) (*os.File, error) {
 	return file, nil
 }
 
-func (s *Server) generateCompatibleAudio(ctx context.Context, input string, inputInfo os.FileInfo, output string, maximumBytes int64) error {
+func (s *Server) generateCompatibleAudio(ctx context.Context, input string, inputInfo os.FileInfo, output string, maximumBytes int64, gainDB float64) error {
 	encodeContext, cancel := context.WithTimeout(ctx, audioTranscodeTimeout)
 	defer cancel()
 	release, err := s.acquireRealtimeTranscode(encodeContext)
@@ -166,7 +176,7 @@ func (s *Server) generateCompatibleAudio(ctx context.Context, input string, inpu
 		return err
 	}
 	defer func() { _ = os.Remove(temporaryPath) }()
-	command := exec.CommandContext(encodeContext, ffmpeg, compatibleAudioFFmpegArgs(input, temporaryPath, maximumBytes)...)
+	command := exec.CommandContext(encodeContext, ffmpeg, compatibleAudioFFmpegArgs(input, temporaryPath, maximumBytes, gainDB)...)
 	command.Stdout = io.Discard
 	diagnostics := &transcodeDiagnosticOutput{}
 	command.Stderr = diagnostics
@@ -202,15 +212,20 @@ func (s *Server) generateCompatibleAudio(ctx context.Context, input string, inpu
 	return os.Rename(temporaryPath, output)
 }
 
-func compatibleAudioFFmpegArgs(input string, output string, maximumBytes int64) []string {
-	return []string{
+func compatibleAudioFFmpegArgs(input string, output string, maximumBytes int64, gainDB float64) []string {
+	args := []string{
 		"-nostdin", "-hide_banner", "-loglevel", "error", "-y",
 		"-threads", "2", "-filter_threads", "1", "-max_alloc", "268435456",
 		"-protocol_whitelist", "file,pipe", "-i", input,
 		"-map", "0:a:0", "-map_metadata", "-1", "-vn", "-sn", "-dn",
+	}
+	if gainDB > 0 {
+		args = append(args, "-af", boostVolumeFilter(gainDB))
+	}
+	return append(args,
 		"-c:a", "libmp3lame", "-threads:a", "1", "-q:a", "4",
 		"-ac", "2", "-ar", "44100", "-write_xing", "1",
 		"-fs", strconv.FormatInt(maximumBytes-audioTranscodeLimitMargin/2, 10),
 		"-f", "mp3", output,
-	}
+	)
 }

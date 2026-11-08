@@ -111,4 +111,28 @@ describe("player audio sources", () => {
     };
     expect(playerTrackAudioSource(remote, true).delivery).toBe("direct");
   });
+
+  it("asks the server for a loudness boost on local sources only", () => {
+    stubBrowser({ mse: true });
+    const direct = playerTrackAudioSource(track, false, true);
+    expect(direct.delivery).toBe("direct");
+    expect(direct.url).toContain("boost=auto");
+    expect(playerTrackAudioSource(track, true, true)).toEqual({
+      delivery: "hls",
+      url: "/api/media/11/hls/index.m3u8?boost=auto",
+    });
+    stubBrowser({});
+    const prepared = playerTrackAudioSource(track, true, true);
+    expect(prepared.delivery).toBe("prepared");
+    expect(prepared.url).toContain("boost=auto");
+    const remote = {
+      ...track,
+      locationType: "remote_stream",
+      remoteSourceId: 3,
+      remoteWorkCode: "RJ00000000",
+      remotePath: "a.wma",
+    };
+    expect(playerTrackAudioSource(remote, true, true).url).not.toContain("boost");
+    expect(playerTrackAudioSource(track).url).not.toContain("boost");
+  });
 });

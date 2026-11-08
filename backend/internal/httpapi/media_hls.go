@@ -216,6 +216,17 @@ func (s *Server) serveMediaHLS(w http.ResponseWriter, r *http.Request) {
 		writeInvalidVideoAudioStream(w)
 		return
 	}
+	// A requested server-side loudness boost (media_boost.go) swaps the audio
+	// encodes for boosted variants under their own revision, so their segments
+	// never mix with the plain encode's. The playlist and its segments derive
+	// the same variant from the same request parameter.
+	boostRequested := serverBoostRequested(r)
+	if boostRequested && (source.Encode == &audioHLSProfile || source.Encode == &videoAudioHLSProfile) {
+		if gainDB := s.storedBoostGainDB(r.Context(), locationID, source.Path); gainDB > 0 {
+			source.Encode = boostedHLSProfile(source.Encode, gainDB)
+			source.Revision += "-" + boostGainSuffix(gainDB)
+		}
+	}
 	profile := source.Encode
 	playlistRevision, softwareRevision := source.Revision, source.Revision
 	var hardware *videoHardwareEncoder
@@ -259,6 +270,9 @@ func (s *Server) serveMediaHLS(w http.ResponseWriter, r *http.Request) {
 		segmentQuery := url.Values{"v": []string{playlistRevision}}
 		if requestedProfile != "" {
 			segmentQuery.Set("profile", requestedProfile)
+		}
+		if boostRequested {
+			segmentQuery.Set("boost", "auto")
 		}
 		if value := r.URL.Query().Get(videoAudioStreamQuery); value != "" {
 			segmentQuery.Set(videoAudioStreamQuery, value)

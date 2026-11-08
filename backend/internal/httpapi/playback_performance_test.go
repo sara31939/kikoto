@@ -110,7 +110,7 @@ func TestPlaybackStartupPerformance(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		file, err := server.openCompatibleAudio(context.Background(), input, info)
+		file, err := server.openCompatibleAudio(context.Background(), input, info, 0)
 		if err == nil {
 			err = file.Close()
 		}
@@ -182,7 +182,7 @@ func TestPlaybackStartupPerformance(t *testing.T) {
 				return
 			}
 			spanKind = "compatible-cold"
-			if validCachedAudio(filepath.Join(server.cfg.CacheRoot, filepath.FromSlash(audioTranscodeCachePath(input, info)))) {
+			if validCachedAudio(filepath.Join(server.cfg.CacheRoot, filepath.FromSlash(audioTranscodeCachePath(input, info, 0)))) {
 				spanKind = "compatible-warm"
 			}
 		}
@@ -274,7 +274,7 @@ func TestPlaybackStartupPerformance(t *testing.T) {
 	var cpu time.Duration
 	outputPath := filepath.Join(t.TempDir(), "prepared.mp3")
 	for range 12 {
-		command := exec.Command("ffmpeg", compatibleAudioFFmpegArgs(input, outputPath, audioTranscodeMaximumBytes)...)
+		command := exec.Command("ffmpeg", compatibleAudioFFmpegArgs(input, outputPath, audioTranscodeMaximumBytes, 0)...)
 		start := time.Now()
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("isolated preparation: %v %s", err, output)

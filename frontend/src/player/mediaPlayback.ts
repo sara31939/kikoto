@@ -205,9 +205,13 @@ function mediaSourceSupports(mime: string) {
  * The HLS VOD playlist of a local or cached location. The "audio" profile
  * plays only the audio of a video; the media kind is played otherwise.
  */
-export function mediaHlsPlaylistURL(locationId: number, profile?: PlaybackProfile) {
+export function mediaHlsPlaylistURL(locationId: number, profile?: PlaybackProfile, serverBoost = false) {
   const url = `/api/media/${encodeURIComponent(String(locationId))}/hls/index.m3u8`;
-  return profile ? `${url}?profile=${profile}` : url;
+  const query = new URLSearchParams();
+  if (profile) query.set("profile", profile);
+  if (serverBoost) query.set("boost", "auto");
+  const suffix = query.toString();
+  return suffix ? `${url}?${suffix}` : url;
 }
 
 function appendQuery(url: string, query: URLSearchParams) {
@@ -218,7 +222,13 @@ function appendQuery(url: string, query: URLSearchParams) {
   return `${base}${separator}${query.toString()}${hash}`;
 }
 
-export function playbackURL(url: string, profile: PlaybackProfile, forceTranscode = false, forceDirect = false) {
+export function playbackURL(
+  url: string,
+  profile: PlaybackProfile,
+  forceTranscode = false,
+  forceDirect = false,
+  serverBoost = false,
+) {
   if (!url) return "";
   const query = new URLSearchParams();
   query.set("profile", profile);
@@ -226,6 +236,7 @@ export function playbackURL(url: string, profile: PlaybackProfile, forceTranscod
   if (capabilities.length > 0) query.set("capabilities", capabilities.join(","));
   if (forceTranscode) query.set("forceTranscode", "1");
   if (forceDirect) query.set("forceDirect", "1");
+  if (serverBoost) query.set("boost", "auto");
   return appendQuery(url, query);
 }
 

@@ -55,7 +55,7 @@ func TestCompatibleAACHasDurationRangesAndReusableCompleteCache(t *testing.T) {
 	if head.Code != http.StatusOK || head.Body.Len() != 0 || head.Header().Get("Content-Type") != "audio/mpeg" || head.Header().Get("Accept-Ranges") != "bytes" || head.Header().Get("X-Kikoto-Playback-Delivery") != "transcoded" {
 		t.Fatalf("compatible HEAD = %d / %#v / %d bytes", head.Code, head.Header(), head.Body.Len())
 	}
-	outputPath := filepath.Join(cacheRoot, filepath.FromSlash(audioTranscodeCachePath(input, inputInfo)))
+	outputPath := filepath.Join(cacheRoot, filepath.FromSlash(audioTranscodeCachePath(input, inputInfo, 0)))
 	encoded, err := os.ReadFile(outputPath)
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +108,7 @@ func TestCompatibleAACHasDurationRangesAndReusableCompleteCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if audioTranscodeCachePath(input, changedInfo) == audioTranscodeCachePath(input, inputInfo) {
+	if audioTranscodeCachePath(input, changedInfo, 0) == audioTranscodeCachePath(input, inputInfo, 0) {
 		t.Fatal("changed source reuses stale audio cache")
 	}
 }
@@ -176,12 +176,12 @@ func TestCompatibleAudioNeverPublishesTruncatedOrCancelledOutput(t *testing.T) {
 	outputRoot := t.TempDir()
 	output := filepath.Join(outputRoot, "track.mp3")
 	server := NewServer(nil, config.Config{})
-	if err := server.generateCompatibleAudio(context.Background(), input, info, output, 96<<10); !errors.Is(err, errAudioTranscodeUnavailable) {
+	if err := server.generateCompatibleAudio(context.Background(), input, info, output, 96<<10, 0); !errors.Is(err, errAudioTranscodeUnavailable) {
 		t.Fatalf("oversized conversion error = %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := server.generateCompatibleAudio(ctx, input, info, output, audioTranscodeMaximumBytes); !errors.Is(err, context.Canceled) {
+	if err := server.generateCompatibleAudio(ctx, input, info, output, audioTranscodeMaximumBytes, 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled conversion error = %v", err)
 	}
 	entries, err := os.ReadDir(outputRoot)

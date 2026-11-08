@@ -26,11 +26,13 @@ export function usePlaybackSource(
     playbackRate,
     nextTrack,
     nextTrackCompatibility,
+    serverBoostEnabled,
   }: {
     compatibilityPlaybackEnabled: boolean;
     playbackRate: number;
     nextTrack: PlayerTrack | null;
     nextTrackCompatibility: boolean;
+    serverBoostEnabled: boolean;
   },
 ) {
   const {
@@ -57,8 +59,11 @@ export function usePlaybackSource(
   // Track objects are replaced by unrelated queue edits; the source strings only
   // change when the element really has to load something else.
   const currentSource = useMemo(
-    () => (currentTrack ? assetSource(playerTrackAudioSource(currentTrack, compatibilityPlaybackEnabled)) : null),
-    [compatibilityPlaybackEnabled, currentTrack],
+    () =>
+      currentTrack
+        ? assetSource(playerTrackAudioSource(currentTrack, compatibilityPlaybackEnabled, serverBoostEnabled))
+        : null,
+    [compatibilityPlaybackEnabled, currentTrack, serverBoostEnabled],
   );
   const currentSourceURL = currentSource?.url ?? null;
   const currentSourceIsHls = currentSource?.delivery === "hls";
@@ -227,7 +232,7 @@ export function usePlaybackSource(
     const windowSeconds = nextTrack
       ? nextTrackPreloadWindowSeconds(
           nextTrack.durationSeconds,
-          playerTrackAudioSource(nextTrack, nextTrackCompatibility).delivery === "prepared",
+          playerTrackAudioSource(nextTrack, nextTrackCompatibility, serverBoostEnabled).delivery === "prepared",
         )
       : undefined;
     if (
@@ -252,11 +257,15 @@ export function usePlaybackSource(
     nextTrackCompatibility,
     preloadArmed,
     refs,
+    serverBoostEnabled,
   ]);
 
   const nextSource = useMemo(
-    () => (preloadArmed && nextTrack ? assetSource(playerTrackAudioSource(nextTrack, nextTrackCompatibility)) : null),
-    [nextTrack, nextTrackCompatibility, preloadArmed],
+    () =>
+      preloadArmed && nextTrack
+        ? assetSource(playerTrackAudioSource(nextTrack, nextTrackCompatibility, serverBoostEnabled))
+        : null,
+    [nextTrack, nextTrackCompatibility, preloadArmed, serverBoostEnabled],
   );
   useNextTrackPreload(nextSource && nextSource.url !== currentSourceURL ? nextSource : null);
 }

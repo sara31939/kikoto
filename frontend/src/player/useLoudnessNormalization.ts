@@ -85,7 +85,8 @@ function rampElementLoudness(refs: PlaybackEngine["refs"], target: number, ramp:
 
 /**
  * Applies loudness normalization to the current track. Nothing is requested
- * while it is off. The current track is measured on demand, then the next one;
+ * while it is off and server boost is off; server boost needs the same
+ * measurements but applies no client gain to local tracks. The current track is measured on demand, then the next one;
  * a track plays at its own level until its measurement arrives, and then moves
  * to the new level smoothly. Returns whether the player keeps a standby
  * element, which replaces an element Web Audio holds once that element has
@@ -95,6 +96,7 @@ export function useLoudnessNormalization(
   engine: PlaybackEngine,
   mode: LoudnessNormalizationMode,
   nextTrack: PlayerTrack | null,
+  serverBoostEnabled = false,
 ) {
   const { refs, currentTrack, isPlaying, currentPlaybackInstanceKey, audioElementKey, replaceAudioElement } = engine;
   const knownRef = useRef(new Map<number, MediaLoudness>());
@@ -139,7 +141,9 @@ export function useLoudnessNormalization(
   // The server measures one file at a time, so the current track goes first
   // and the next one follows.
   useEffect(() => {
-    if (mode === "off") return;
+    // Server boost needs the same measurements, so they are fetched while
+    // either feature is on.
+    if (mode === "off" && !serverBoostEnabled) return;
     const pending = pendingRef.current;
     if (pending.size > 0) return;
     const id = [locationId, nextLocationId].find(
@@ -172,10 +176,13 @@ export function useLoudnessNormalization(
         pending.delete(id);
         setSettled((value) => value + 1);
       });
-  }, [locationId, mode, nextLocationId, settled]);
+  }, [locationId, mode, nextLocationId, serverBoostEnabled, settled]);
 
   const loudness = locationId === null ? undefined : knownRef.current.get(locationId);
-  const gain = loudnessGain(loudness, mode);
+  // With server boost on, the delivered audio of a local track already
+  // carries its raise, so the client applies no gain of its own to it.
+  const effectiveMode: LoudnessNormalizationMode = serverBoostEnabled && locationId !== null ? "off" : mode;
+  const gain = loudnessGain(loudness, effectiveMode);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -242,7 +249,7 @@ export function useLoudnessNormalization(
     appliedInstanceRef.current = currentPlaybackInstanceKey;
     const ramp = sameTrack && Boolean(audio && !audio.paused);
     const elementRouted = routeLoudnessGain(audio, gain, {
-      allowRouting: mode === "full" && !silencedRef.current,
+      allowRouting: effectiveMode === "full" && !silencedRef.current,
       currentGain: refs.loudnessVolumeRef.current,
       ramp,
       onRunning: () => setAudioReady((value) => value + 1),
@@ -255,7 +262,7 @@ export function useLoudnessNormalization(
     });
     setRouted(elementRouted);
     return rampElementLoudness(refs, elementRouted ? 1 : Math.min(1, gain), ramp && !elementRouted);
-  }, [audioElementKey, audioReady, currentPlaybackInstanceKey, gain, measured, mode, refs, replaceAudioElement]);
+  }, [audioElementKey, audioReady, currentPlaybackInstanceKey, effectiveMode, gain, measured, refs, replaceAudioElement]);
 
   // Leaving full normalization returns playback to an element's own output
   // without cutting into the current track: the routed element keeps playing
@@ -264,7 +271,7 @@ export function useLoudnessNormalization(
   useEffect(() => {
     // The routed state renders the standby element; the element itself tells
     // whether it still needs replacing.
-    if (mode === "full" || !isLoudnessRouted(refs.audioRef.current)) {
+    if (effectiveMode === "full" || !isLoudnessRouted(refs.audioRef.current)) {
       releaseInstanceRef.current = null;
       return;
     }
@@ -272,7 +279,7 @@ export function useLoudnessNormalization(
     if (isPlaying && releaseInstanceRef.current === currentPlaybackInstanceKey) return;
     releaseInstanceRef.current = null;
     replaceAudioElement();
-  }, [audioElementKey, currentPlaybackInstanceKey, isPlaying, mode, refs, replaceAudioElement, routed]);
+  }, [audioElementKey, currentPlaybackInstanceKey, effectiveMode, isPlaying, refs, replaceAudioElement, routed]);
 
-  return mode === "full" || routed;
+  return effectiveMode === "full" || routed;
 }

@@ -630,6 +630,12 @@ export const englishResource = {
         loudnessFull: "Turn loud tracks down and quiet tracks up",
         loudnessFullDescription:
           "Also raises quiet tracks through Web Audio. Raising does not apply in the mobile apps, and some browsers pause Web Audio in the background.",
+        serverBoost: "Server-side loudness boost",
+        serverBoostDescription:
+          "Raises quiet local tracks on the server while they are converted for playback, so they arrive louder on clients that cannot raise them, including the mobile apps, where playback follows the system volume. While it is on, loudness normalization does not also apply to local tracks.",
+        serverBoostRaise: "Raise quiet tracks on the server",
+        serverBoostRaiseDescription:
+          "Each local file is measured once; a quieter file is converted with a boost towards the normalization target, up to 12 dB and limited so its peak never clips. An unmeasured file plays at its own level the first time.",
         playbackSources: "Playback sources",
         playbackSourcesDescription:
           "Applies to tracks with more than one location, such as a local file and a remote stream. Both are off by default.",

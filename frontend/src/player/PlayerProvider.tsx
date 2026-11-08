@@ -22,6 +22,7 @@ import type {
 } from "./playerTypes";
 import { usePlaybackCompatibility } from "./usePlaybackCompatibility";
 import { useLoudnessNormalization, useLoudnessNormalizationMode } from "./useLoudnessNormalization";
+import { useServerBoostEnabled } from "./useServerBoost";
 import { usePlaybackEngine } from "./usePlaybackEngine";
 import { usePlaybackProgress } from "./usePlaybackProgress";
 import { usePlaybackRecovery } from "./usePlaybackRecovery";
@@ -196,15 +197,17 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   const nextTrackIndex = nextAutoAdvanceIndex(currentIndex, queue.length, mode);
   const nextTrack = nextTrackIndex === null || sleepTimer?.waitingForTrackEnd ? null : (queue[nextTrackIndex] ?? null);
+  const serverBoostEnabled = useServerBoostEnabled(principalID);
   usePlaybackSource(engine, {
     compatibilityPlaybackEnabled,
     playbackRate,
     nextTrack,
     nextTrackCompatibility: supportsCompatibilityPlayback(nextTrack) && queueWideCompatibilityEnabled,
+    serverBoostEnabled,
   });
   // After the source hook, so the element already holds the current source.
   const loudnessMode = useLoudnessNormalizationMode(principalID);
-  const standbyAudio = useLoudnessNormalization(engine, loudnessMode, nextTrack);
+  const standbyAudio = useLoudnessNormalization(engine, loudnessMode, nextTrack, serverBoostEnabled);
   useRemoteStreamCaching(currentTrack, auth.demoMode, {
     cacheLocation: auth.hasPermission("remote:fetch"),
     cacheRemoteWork: auth.hasPermission("remote:fetch") && auth.hasPermission("remote:track"),

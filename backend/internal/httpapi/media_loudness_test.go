@@ -115,12 +115,12 @@ func TestCompatibleAudioRemembersAFailedTranscode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := server.openCompatibleAudio(context.Background(), input, info); !errors.Is(err, errAudioTranscodeUnavailable) {
+	if _, err := server.openCompatibleAudio(context.Background(), input, info, 0); !errors.Is(err, errAudioTranscodeUnavailable) {
 		t.Fatalf("first transcode = %v", err)
 	}
 	// The second request is answered from memory without taking an encode slot.
 	occupyRealtimeResource(server, realtimeResourceTranscode, false)
-	if _, err := server.openCompatibleAudio(context.Background(), input, info); !errors.Is(err, errAudioTranscodeUnavailable) || !strings.Contains(err.Error(), "recently") {
+	if _, err := server.openCompatibleAudio(context.Background(), input, info, 0); !errors.Is(err, errAudioTranscodeUnavailable) || !strings.Contains(err.Error(), "recently") {
 		t.Fatalf("repeated transcode = %v, want the remembered failure", err)
 	}
 }

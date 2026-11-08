@@ -13,24 +13,30 @@ export type PlayerAudioSource = {
   url: string;
 };
 
-export function playerTrackAudioSource(track: PlayerTrack, compatibilityMode = false): PlayerAudioSource {
+export function playerTrackAudioSource(
+  track: PlayerTrack,
+  compatibilityMode = false,
+  serverBoost = false,
+): PlayerAudioSource {
   if (track.locationType === "remote_stream" && track.remoteSourceId && track.remoteWorkCode && track.remotePath) {
     return {
       delivery: "direct",
       url: remoteMediaPlaybackURL(track.remoteSourceId, track.remoteWorkCode, track.remotePath, "audio"),
     };
   }
+  // The server can only boost files it reads itself.
+  const boost = serverBoost && supportsCompatibilityPlayback(track);
   if (!supportsCompatibilityPlayback(track) || !audioNeedsConversion(track.title, compatibilityMode)) {
-    return { delivery: "direct", url: playbackURL(track.streamUrl, "audio", false, true) };
+    return { delivery: "direct", url: playbackURL(track.streamUrl, "audio", false, true, boost) };
   }
   // A video file plays only its audio, never video segments.
   if (track.locationId > 0 && audioHlsPlayback()) {
     return {
       delivery: "hls",
-      url: mediaHlsPlaylistURL(track.locationId, track.kind === "video" ? "audio" : undefined),
+      url: mediaHlsPlaylistURL(track.locationId, track.kind === "video" ? "audio" : undefined, boost),
     };
   }
-  return { delivery: "prepared", url: playbackURL(track.streamUrl, "audio", true, false) };
+  return { delivery: "prepared", url: playbackURL(track.streamUrl, "audio", true, false, boost) };
 }
 
 export function trackPlaybackKey(track: PlayerTrack | null) {

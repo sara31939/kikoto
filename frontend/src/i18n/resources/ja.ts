@@ -975,6 +975,12 @@ export const japaneseResource = {
         loudnessFull: "大きいトラックを下げ、小さいトラックを上げる",
         loudnessFullDescription:
           "Web Audio を使って小さいトラックも大きくします。モバイルアプリでは上げる処理は行われず、一部のブラウザはバックグラウンドで Web Audio を停止します。",
+        serverBoost: "サーバー側ラウドネスブースト",
+        serverBoostDescription:
+          "小さい音量のローカルトラックを、サーバー側の変換時に持ち上げて配信します。モバイルアプリのように端末の音量へ連動するクライアントでも大きく聴こえます。オンの間、ローカルトラックにはラウドネス正規化は重ねて適用されません。",
+        serverBoostRaise: "小さいトラックをサーバー側で上げる",
+        serverBoostRaiseDescription:
+          "各ローカルファイルを一度だけ測定し、正規化の目標に向けて最大 12dB まで、ピークがクリップしない範囲で持ち上げて変換します。未測定のファイルは、初回再生時は元の音量で再生されます。",
         playbackSources: "再生ソース",
         playbackSourcesDescription:
           "ローカルファイルとリモートストリームなど、複数の場所があるトラックに適用されます。既定ではオフです。",

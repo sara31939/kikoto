@@ -58,6 +58,8 @@ steps. The design contract includes:
   readable foreground, and border treatment.
 - A destructive action role reserved for irreversible commands. Error feedback
   is not automatically a destructive action.
+- A scrim role that darkens what lies behind a dialog, and the edges of a
+  picture under controls laid over video, so they read on any frame.
 - Place roles for the file workspace: `place-target` for the folder an edit
   changes, `place-local` for another local folder it only copies from, and
   `place-remote` for a read-only remote edition, each with a band, subtle
@@ -203,6 +205,12 @@ Use cards for repeated objects, not for every section. Settings tabs
 should share a consistent content width, section spacing, field rhythm,
 and destructive-action placement. Wide diagnostic tables may opt out of the
 content cap, but ordinary forms should not define their own page-local width.
+
+A settings switch or choice saves as soon as it changes, and a typed field
+saves when its edit finishes. Its section heading shows the save state. A
+Save button belongs only to a form whose fields must change together, such as
+a password change or a policy editor. A section with one field does not get a
+footer for its own button.
 
 ## Failure and Recovery
 

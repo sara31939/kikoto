@@ -17,29 +17,28 @@ func upsertDetectedMediaItem(ctx context.Context, tx *sql.Tx, workID int64, fold
 	}
 	durationValue := nullableDuration(file.DurationSeconds)
 	hasAudioValue := nullableBoolPointer(file.HasAudio)
-	result, err := tx.ExecContext(ctx, `
-		INSERT INTO media_item (
-			work_id,
-			kind,
-			title,
-			track_no,
-			duration_seconds,
-			has_audio,
-			size_bytes,
-			file_version,
-			fingerprint
-		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE NOT EXISTS (
-			SELECT 1 FROM media_item WHERE fingerprint = ?
-		)
-	`, workID, kind, file.Title, trackNoValue, durationValue, hasAudioValue, file.SizeBytes, file.FileVersion, fingerprint, fingerprint)
+	existingID, err := selectMediaItemIDByFingerprint(ctx, tx, workID, fingerprint)
 	if err != nil {
 		return 0, err
 	}
-	if affected, err := result.RowsAffected(); err != nil {
-		return 0, err
-	} else if affected > 0 {
+	if existingID == 0 {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO media_item (
+				work_id,
+				kind,
+				title,
+				track_no,
+				duration_seconds,
+				has_audio,
+				size_bytes,
+				file_version,
+				fingerprint
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, workID, kind, file.Title, trackNoValue, durationValue, hasAudioValue, file.SizeBytes, file.FileVersion, fingerprint)
+		if err != nil {
+			return 0, err
+		}
 		return result.LastInsertId()
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -50,12 +49,12 @@ func upsertDetectedMediaItem(ctx context.Context, tx *sql.Tx, workID int64, fold
 			duration_seconds = CASE WHEN file_version IS NOT ? OR size_bytes IS NOT ? THEN ? ELSE COALESCE(?, duration_seconds) END,
 			has_audio = CASE WHEN file_version IS NOT ? OR size_bytes IS NOT ? THEN ? ELSE COALESCE(?, has_audio) END,
 			size_bytes = ?, file_version = ?
-		WHERE fingerprint = ?
+		WHERE id = ?
 	`, kind, file.Title, trackNoValue, file.FileVersion, file.SizeBytes, durationValue, durationValue,
-		file.FileVersion, file.SizeBytes, hasAudioValue, hasAudioValue, file.SizeBytes, file.FileVersion, fingerprint); err != nil {
+		file.FileVersion, file.SizeBytes, hasAudioValue, hasAudioValue, file.SizeBytes, file.FileVersion, existingID); err != nil {
 		return 0, err
 	}
-	return sqlutil.SelectID(ctx, tx, "SELECT id FROM media_item WHERE fingerprint = ? ORDER BY id ASC LIMIT 1", fingerprint)
+	return existingID, nil
 }
 
 func upsertDetectedLocation(ctx context.Context, tx *sql.Tx, mediaItemID int64, fileSourceID int64, file localfs.LocalFile) (int64, error) {

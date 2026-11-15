@@ -221,10 +221,7 @@ func syncRemoteTrackNode(ctx context.Context, tx *sql.Tx, fileSourceID, workID i
 	if known := node.KnownSize(); known != nil && len(node.Children) == 0 && kind != "folder" {
 		size = *known
 	}
-	if err := upsertRemoteMediaItem(ctx, tx, workID, parent, kind, title, index, duration, hasAudio, size, fingerprint); err != nil {
-		return err
-	}
-	itemID, err := sqlutil.SelectID(ctx, tx, "SELECT id FROM media_item WHERE fingerprint = ?", fingerprint)
+	itemID, err := upsertRemoteMediaItem(ctx, tx, workID, parent, kind, title, index, duration, hasAudio, size, fingerprint)
 	if err != nil {
 		return err
 	}
@@ -236,21 +233,30 @@ func syncRemoteTrackNode(ctx context.Context, tx *sql.Tx, fileSourceID, workID i
 	return upsertRemoteTrackLocation(ctx, tx, fileSourceID, itemID, path, node, duration, size, state)
 }
 
-func upsertRemoteMediaItem(ctx context.Context, tx *sql.Tx, workID int64, parent any, kind, title string, index int, duration, hasAudio, size any, fingerprint string) error {
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO media_item (work_id, parent_id, kind, title, track_no, duration_seconds, has_audio, size_bytes, fingerprint)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE NOT EXISTS (SELECT 1 FROM media_item WHERE fingerprint = ?)
-	`, workID, parent, kind, title, index+1, duration, hasAudio, size, fingerprint, fingerprint); err != nil {
-		return err
+func upsertRemoteMediaItem(ctx context.Context, tx *sql.Tx, workID int64, parent any, kind, title string, index int, duration, hasAudio, size any, fingerprint string) (int64, error) {
+	existingID, err := selectMediaItemIDByFingerprint(ctx, tx, workID, fingerprint)
+	if err != nil {
+		return 0, err
 	}
-	_, err := tx.ExecContext(ctx, `
+	if existingID == 0 {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO media_item (work_id, parent_id, kind, title, track_no, duration_seconds, has_audio, size_bytes, fingerprint)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, workID, parent, kind, title, index+1, duration, hasAudio, size, fingerprint)
+		if err != nil {
+			return 0, err
+		}
+		return result.LastInsertId()
+	}
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE media_item
 		SET parent_id = ?, kind = ?, title = ?, track_no = ?, duration_seconds = ?,
 			has_audio = COALESCE(?, has_audio), size_bytes = ?
-		WHERE fingerprint = ?
-	`, parent, kind, title, index+1, duration, hasAudio, size, fingerprint)
-	return err
+		WHERE id = ?
+	`, parent, kind, title, index+1, duration, hasAudio, size, existingID); err != nil {
+		return 0, err
+	}
+	return existingID, nil
 }
 
 func syncRemoteTrackChildren(ctx context.Context, tx *sql.Tx, fileSourceID, workID int64, workCode string, parentID *int64, path string, children []kikoeru.Track, state *remoteTrackSyncState) error {

@@ -2,12 +2,15 @@ name: Build IPA (Sara fork)
 
 # Manual build of the unsigned iOS app from this branch. The IPA is
 # unsigned; sideloading tools re-sign it with the installing user's
-# identity, so no Apple signing secrets are involved.
+# identity, so no Apple signing secrets are involved. Each build is
+# uploaded as a run artifact and published to Releases under a fixed
+# file name, so the latest build is always available at
+# releases/latest/download/kikoto-sara.ipa.
 on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build_ipa:
@@ -36,3 +39,18 @@ jobs:
           name: kikoto-ios-ipa
           path: frontend/ios/App/build/*.ipa
           if-no-files-found: error
+
+      - name: Publish IPA to Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ipa_path="$(ls frontend/ios/App/build/*.ipa | head -n 1)"
+          cp "$ipa_path" kikoto-sara.ipa
+          tag="ipa-${{ github.run_number }}"
+          title="Kikoto IPA (build ${{ github.run_number }})"
+          notes="Unsigned IPA built from ${{ github.ref_name }}@${{ github.sha }}. Install with SideStore or another sideloading tool."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" kikoto-sara.ipa --clobber
+          else
+            gh release create "$tag" kikoto-sara.ipa --title "$title" --notes "$notes"
+          fi

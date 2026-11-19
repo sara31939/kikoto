@@ -1,0 +1,38 @@
+name: Build IPA (Sara fork)
+
+# Manual build of the unsigned iOS app from this branch. The IPA is
+# unsigned; sideloading tools re-sign it with the installing user's
+# identity, so no Apple signing secrets are involved.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build_ipa:
+    name: Build and upload IPA
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: ./.github/actions/setup-node
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build unsigned IPA
+        run: make ios-build
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: kikoto-ios-ipa
+          path: frontend/ios/App/build/*.ipa
+          if-no-files-found: error

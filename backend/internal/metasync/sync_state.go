@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
 
 	"github.com/yexca/kikoto/backend/internal/dlsite"
 	"github.com/yexca/kikoto/backend/internal/sqlutil"
@@ -139,6 +140,15 @@ func (s *DLsiteSyncer) recordCodeOutcome(ctx context.Context, code, component st
 		status = "unavailable"
 	} else if outcome != nil {
 		status = "failed"
+		// Sara fork: a cover file the provider catalog declares but its
+		// file server answers 404 for is missing, not a transient
+		// failure. Record it as unavailable so it can be dismissed like
+		// a delisted product instead of blocking acknowledgement as a
+		// retryable failure forever.
+		var statusErr dlsite.HTTPStatusError
+		if component == "cover" && errors.As(outcome, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
+			status = "unavailable"
+		}
 	}
 	if err := recordSyncOutcome(ctx, tx, workID, providerID, component, status); err != nil {
 		return err

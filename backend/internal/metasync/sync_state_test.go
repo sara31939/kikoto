@@ -174,3 +174,58 @@ func TestMetadataFailuresDoNotMaterializeUnknownWorksOrRecordCancellation(t *tes
 		t.Fatalf("works=%d issues=%d", works, issues)
 	}
 }
+
+// Sara fork: a cover download answered 404 is recorded as unavailable so it
+// can be dismissed; other cover failures and non-cover 404s stay retryable.
+func TestCoverNotFoundRecordsUnavailable(t *testing.T) {
+	db := openTestDB(t)
+	s := NewDLsiteSyncer(db, fakeDLsiteClient{})
+	code := testfixture.WorkCode(testfixture.PrefixRJ, 5)
+	if _, err := db.Exec(`INSERT INTO work(primary_code,title) VALUES (?, 'Local title')`, code); err != nil {
+		t.Fatal(err)
+	}
+	var workID int64
+	if err := db.QueryRow(`SELECT id FROM work WHERE primary_code = ?`, code).Scan(&workID); err != nil {
+		t.Fatal(err)
+	}
+	stateStatus := func(component string) string {
+		t.Helper()
+		var status string
+		if err := db.QueryRow(`SELECT state.status FROM work_metadata_sync_state AS state
+			JOIN metadata_provider AS provider ON provider.id = state.provider_id
+			WHERE state.work_id = ? AND provider.code = 'dlsite' AND state.component = ?`, workID, component).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		return status
+	}
+	ctx := context.Background()
+	cover404 := dlsite.HTTPStatusError{Operation: "cover download", Status: "404 Not Found", StatusCode: 404}
+	if err := s.recordCodeOutcome(ctx, code, "cover", cover404); err != nil {
+		t.Fatal(err)
+	}
+	if got := stateStatus("cover"); got != "unavailable" {
+		t.Fatalf("cover 404 state = %q, want unavailable", got)
+	}
+	store := NewIssueStore(db)
+	dismissed, err := store.DismissNotFound(ctx, workID)
+	if err != nil || !dismissed {
+		t.Fatalf("dismiss unavailable cover = %v, %v", dismissed, err)
+	}
+	cover500 := dlsite.HTTPStatusError{Operation: "cover download", Status: "500 Internal Server Error", StatusCode: 500}
+	if err := s.recordCodeOutcome(ctx, code, "cover", cover500); err != nil {
+		t.Fatal(err)
+	}
+	if got := stateStatus("cover"); got != "failed" {
+		t.Fatalf("cover 500 state = %q, want failed", got)
+	}
+	if dismissed, err := store.DismissNotFound(ctx, workID); err != nil || dismissed {
+		t.Fatalf("dismiss retryable cover = %v, %v", dismissed, err)
+	}
+	product404 := dlsite.HTTPStatusError{Operation: "product fetch", Status: "404 Not Found", StatusCode: 404}
+	if err := s.recordCodeOutcome(ctx, code, "metadata", product404); err != nil {
+		t.Fatal(err)
+	}
+	if got := stateStatus("metadata"); got != "failed" {
+		t.Fatalf("metadata 404 state = %q, want failed", got)
+	}
+}

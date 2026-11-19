@@ -5,7 +5,8 @@ name: Build IPA (Sara fork)
 # identity, so no Apple signing secrets are involved. Each build is
 # uploaded as a run artifact and published to Releases under a fixed
 # file name, so the latest build is always available at
-# releases/latest/download/kikoto-sara.ipa.
+# releases/latest/download/kikoto-sara.ipa. Only the three newest
+# IPA releases are kept; older ones are deleted with their tags.
 on:
   workflow_dispatch:
 
@@ -54,3 +55,15 @@ jobs:
           else
             gh release create "$tag" kikoto-sara.ipa --title "$title" --notes "$notes"
           fi
+
+      - name: Prune old IPA releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("ipa-"))] | sort_by(.createdAt) | reverse | .[3:] | .[].tagName' \
+            | while read -r old_tag; do
+                if [ -n "$old_tag" ]; then
+                  gh release delete "$old_tag" --yes --cleanup-tag
+                fi
+              done

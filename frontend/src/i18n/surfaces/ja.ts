@@ -938,7 +938,7 @@ export const surfaceJapanese = {
       limitDescription: "管理対象再生キャッシュの最大合計サイズです。",
       transcodeLimit: "変換キャッシュ上限",
       transcodeLimitDescription:
-        "変換済み音声と HLS 動画セグメントが共有するキャッシュ上限です。最も長く未使用のファイルから削除します。",
+        "変換済み音声と HLS 動画セグメントが共有するキャッシュ上限です。最も長く未使用のファイルから削除します。0 で上限なしになります。",
       videoHardware: "動画の変換",
       transcodeSlots: "同時変換数",
       transcodeSlotsDescription:

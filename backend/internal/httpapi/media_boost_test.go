@@ -85,6 +85,95 @@ func TestAudioTranscodeProfileSeparatesBoost(t *testing.T) {
 	}
 }
 
+func TestLosslessBoostSpec(t *testing.T) {
+	spec := audioTranscodeSpecFor(6, true)
+	if spec.extension != ".flac" || spec.contentType != "audio/flac" {
+		t.Fatalf("lossless boost spec = %+v, want a FLAC delivery", spec)
+	}
+	if spec.name == audioTranscodeSpecFor(6, false).name {
+		t.Fatal("lossless and MP3 boosts share a profile")
+	}
+	if got := audioTranscodeSpecFor(0, true); got.extension != ".mp3" {
+		t.Fatalf("unboosted spec = %+v, want the plain MP3 encode", got)
+	}
+	info, err := os.Stat(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	flacPath := audioTranscodeCachePathFor("in.wav", info, spec)
+	if !strings.HasSuffix(flacPath, ".flac") {
+		t.Fatalf("lossless cache path = %s, want a .flac entry", flacPath)
+	}
+	if mp3Path := audioTranscodeCachePath("in.wav", info, 6); !strings.HasSuffix(mp3Path, ".mp3") {
+		t.Fatalf("MP3 cache path = %s, want a .mp3 entry", mp3Path)
+	}
+}
+
+func TestLosslessBoostFFmpegArgs(t *testing.T) {
+	spec := audioTranscodeSpecFor(6, true)
+	joined := strings.Join(compatibleAudioFFmpegArgsFor("in.wav", "out.flac", spec.maximumBytes, spec), " ")
+	for _, want := range []string{"-c:a flac", "-af volume=6.0dB", "-f flac"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("lossless encode args = %s, want %q", joined, want)
+		}
+	}
+	for _, unwanted := range []string{"libmp3lame", "-ar", "-ac"} {
+		if strings.Contains(joined, unwanted) {
+			t.Fatalf("lossless encode args = %s, must not contain %q (source format is kept)", joined, unwanted)
+		}
+	}
+}
+
+// A boosted FLAC transcode of a quiet WAV measures louder by about the
+// computed gain, and decodes to the source sample rate.
+func TestBoostedLosslessTranscodeRaisesLoudness(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg is not installed")
+	}
+	dir := t.TempDir()
+	input := filepath.Join(dir, "quiet.wav")
+	command := exec.Command(ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "3", "-af", "volume=0.04", input)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("create quiet WAV: %v (%s)", err, output)
+	}
+	server := NewServer(nil, config.Config{CacheRoot: dir})
+	ctx := context.Background()
+	before, err := server.measureMediaLoudness(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gainDB := loudnessBoostGainDB(before)
+	if gainDB <= 0 {
+		t.Fatalf("quiet file got no boost")
+	}
+	info, err := os.Stat(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := audioTranscodeSpecFor(gainDB, true)
+	output := filepath.Join(dir, "boosted.flac")
+	if err := server.generateCompatibleAudio(ctx, input, info, output, spec); err != nil {
+		t.Fatal(err)
+	}
+	after, err := server.measureMediaLoudness(ctx, output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raised := after.IntegratedLUFS - before.IntegratedLUFS; math.Abs(raised-gainDB) > 1.5 {
+		t.Fatalf("lossless boost raised loudness by %.1f dB, want about %.1f dB", raised, gainDB)
+	}
+	probe, err := server.probePlaybackFile(ctx, output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio := firstPlaybackStream(probe, "audio")
+	if audio == nil || audio.CodecName != "flac" {
+		t.Fatalf("lossless output probe = %+v, want a FLAC stream", audio)
+	}
+}
+
 // A boosted compatible transcode of a quiet file measures louder by about
 // the computed gain, which is the whole point of the feature.
 func TestBoostedTranscodeRaisesLoudness(t *testing.T) {
@@ -114,7 +203,7 @@ func TestBoostedTranscodeRaisesLoudness(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := filepath.Join(dir, "boosted.mp3")
-	if err := server.generateCompatibleAudio(ctx, input, info, output, audioTranscodeMaximumBytes, gainDB); err != nil {
+	if err := server.generateCompatibleAudio(ctx, input, info, output, audioTranscodeSpecFor(gainDB, false)); err != nil {
 		t.Fatal(err)
 	}
 	after, err := server.measureMediaLoudness(ctx, output)

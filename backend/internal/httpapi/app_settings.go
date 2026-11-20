@@ -298,7 +298,7 @@ func applyGeneralSettings(r *http.Request, tx *sql.Tx, payload settingsUpdatePay
 	}{
 		{payload.LocalScanDepth, "local_scan_depth", 1, 8, "localScanDepth must be between 1 and 8"},
 		{payload.CacheLimitGB, "remote_cache_limit_gb", 0, 4096, "cacheLimitGb must be between 0 and 4096"},
-		{payload.TranscodeCacheLimitGB, transcodeCacheLimitSetting, 1, 4096, "transcodeCacheLimitGb must be between 1 and 4096"},
+		{payload.TranscodeCacheLimitGB, transcodeCacheLimitSetting, 0, 4096, "transcodeCacheLimitGb must be between 0 and 4096"},
 		{payload.TranscodeSlots, realtimeTranscodeSlotsSetting, realtimeTranscodeSlotsMinimum, realtimeTranscodeSlotsMaximum, "transcodeSlots must be between 1 and 5"},
 		{payload.RemoteDownloadLimitGB, "remote_download_limit_gb", minimumRemoteDownloadLimitGB, maximumRemoteDownloadLimitGB, "remoteDownloadLimitGb must be between 1 and 2048"},
 		{payload.FetchStagingRetentionDays, "fetch_staging_retention_days", minimumFetchStagingRetentionDays, maximumFetchStagingRetentionDays, "fetchStagingRetentionDays must be between 1 and 365"},

@@ -1299,7 +1299,7 @@ export const surfaceEnglish = {
       limitDescription: "Maximum total size of the managed playback cache.",
       transcodeLimit: "Transcode cache limit",
       transcodeLimitDescription:
-        "Maximum cache size for converted audio and HLS video segments. Least recently used files are removed first.",
+        "Maximum cache size for converted audio and HLS video segments. Least recently used files are removed first. Set 0 for no limit.",
       videoHardware: "Video conversion",
       transcodeSlots: "Simultaneous conversions",
       transcodeSlotsDescription:

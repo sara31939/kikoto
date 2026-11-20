@@ -107,6 +107,28 @@ func (s *Server) measureLoudnessInBackground(locationID int64, path string) {
 	}()
 }
 
+// losslessBoostSource reports whether the file at path holds lossless
+// audio — a PCM stream in any container, or an already-lossless codec —
+// whose boost keeps its fidelity in a FLAC delivery instead of an MP3.
+// Probe failures answer false, so a doubtful source takes the MP3 encode
+// it would have had anyway.
+func (s *Server) losslessBoostSource(ctx context.Context, path string) bool {
+	probe, err := s.probePlaybackFile(ctx, path)
+	if err != nil {
+		return false
+	}
+	audio := firstPlaybackStream(probe, "audio")
+	if audio == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(audio.CodecName)) {
+	case "flac", "alac", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_f64le",
+		"pcm_s16be", "pcm_s24be", "pcm_s32be", "pcm_f32be", "pcm_f64be", "pcm_u8", "tta", "wavpack":
+		return true
+	}
+	return false
+}
+
 // boostedHLSProfile returns a copy of an audio HLS encode profile whose
 // segments carry a loudness boost, under a cache directory of its own.
 func boostedHLSProfile(profile *hlsEncodeProfile, gainDB float64) *hlsEncodeProfile {

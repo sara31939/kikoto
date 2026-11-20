@@ -182,7 +182,7 @@ func TestPlaybackStartupPerformance(t *testing.T) {
 				return
 			}
 			spanKind = "compatible-cold"
-			if validCachedAudio(filepath.Join(server.cfg.CacheRoot, filepath.FromSlash(audioTranscodeCachePath(input, info, 0)))) {
+			if validCachedAudio(filepath.Join(server.cfg.CacheRoot, filepath.FromSlash(audioTranscodeCachePath(input, info, 0))), audioTranscodeMaximumBytes) {
 				spanKind = "compatible-warm"
 			}
 		}

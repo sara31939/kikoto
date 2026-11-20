@@ -378,7 +378,8 @@ func TestUpdateSettingsValidatesAndPersistsTranscodeCacheLimit(t *testing.T) {
 		wantStatus int
 	}{
 		{name: "valid", body: `{"transcodeCacheLimitGb":12}`, wantStatus: http.StatusOK},
-		{name: "zero", body: `{"transcodeCacheLimitGb":0}`, wantStatus: http.StatusBadRequest},
+		{name: "zero", body: `{"transcodeCacheLimitGb":0}`, wantStatus: http.StatusOK},
+		{name: "negative", body: `{"transcodeCacheLimitGb":-1}`, wantStatus: http.StatusBadRequest},
 		{name: "too large", body: `{"transcodeCacheLimitGb":4097}`, wantStatus: http.StatusBadRequest},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -391,13 +392,17 @@ func TestUpdateSettingsValidatesAndPersistsTranscodeCacheLimit(t *testing.T) {
 			if response.Code != test.wantStatus {
 				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 			}
-			if test.name == "valid" {
+			if test.name == "valid" || test.name == "zero" {
+				want := 12
+				if test.name == "zero" {
+					want = 0
+				}
 				var settings appSettingsResponse
 				if err := json.Unmarshal(response.Body.Bytes(), &settings); err != nil {
 					t.Fatal(err)
 				}
-				if settings.TranscodeCacheLimitGB != 12 {
-					t.Fatalf("transcode cache limit = %d GB, want 12 GB", settings.TranscodeCacheLimitGB)
+				if settings.TranscodeCacheLimitGB != want {
+					t.Fatalf("transcode cache limit = %d GB, want %d GB", settings.TranscodeCacheLimitGB, want)
 				}
 			}
 		})

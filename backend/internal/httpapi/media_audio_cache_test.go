@@ -176,12 +176,14 @@ func TestCompatibleAudioNeverPublishesTruncatedOrCancelledOutput(t *testing.T) {
 	outputRoot := t.TempDir()
 	output := filepath.Join(outputRoot, "track.mp3")
 	server := NewServer(nil, config.Config{})
-	if err := server.generateCompatibleAudio(context.Background(), input, info, output, 96<<10, 0); !errors.Is(err, errAudioTranscodeUnavailable) {
+	tinySpec := audioTranscodeSpecFor(0, false)
+	tinySpec.maximumBytes = 96 << 10
+	if err := server.generateCompatibleAudio(context.Background(), input, info, output, tinySpec); !errors.Is(err, errAudioTranscodeUnavailable) {
 		t.Fatalf("oversized conversion error = %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := server.generateCompatibleAudio(ctx, input, info, output, audioTranscodeMaximumBytes, 0); !errors.Is(err, context.Canceled) {
+	if err := server.generateCompatibleAudio(ctx, input, info, output, audioTranscodeSpecFor(0, false)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled conversion error = %v", err)
 	}
 	entries, err := os.ReadDir(outputRoot)

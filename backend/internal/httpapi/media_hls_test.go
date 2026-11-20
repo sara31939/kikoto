@@ -531,6 +531,32 @@ func TestTranscodeCacheDefaultLimitAndLRUEviction(t *testing.T) {
 	}
 }
 
+func TestTranscodeCacheZeroLimitDisablesEviction(t *testing.T) {
+	cacheRoot := t.TempDir()
+	db := openMigratedTestDB(t)
+	if _, err := db.Exec(`INSERT INTO app_setting (key, value_json) VALUES (?, '0')`, transcodeCacheLimitSetting); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(db, config.Config{CacheRoot: cacheRoot})
+	if got := server.transcodeCacheLimitBytes(context.Background()); got != 0 {
+		t.Fatalf("zero transcode cache limit = %d, want 0 (no ceiling)", got)
+	}
+	oldPath := writeCacheTestFile(t, cacheRoot, "transcodes/hls/1/revision/segment-000000.ts", "old", 2*time.Hour)
+	newPath := writeCacheTestFile(t, cacheRoot, "transcodes/hls/2/revision/segment-000000.ts", "new", time.Hour)
+	overview, err := server.enforceTranscodeCacheLimit(context.Background(), int64(1)<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overview.Files != 2 {
+		t.Fatalf("unlimited trim overview = %+v, want both segments kept", overview)
+	}
+	for _, path := range []string{oldPath, newPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("segment was evicted under a zero limit: %v", err)
+		}
+	}
+}
+
 func TestTranscodeCacheScanIncludesCompleteAudioAndOnlyStalePartialFiles(t *testing.T) {
 	cacheRoot := t.TempDir()
 	server := NewServer(openMigratedTestDB(t), config.Config{CacheRoot: cacheRoot})

@@ -514,7 +514,10 @@ func (s *Server) serveAutomaticLocalPlayback(w http.ResponseWriter, r *http.Requ
 	}
 	if boostGainDB > 0 {
 		w.Header().Set("X-Kikoto-Playback-Delivery", "transcoded")
-		s.serveCompatibleAudio(w, r, path, info, boostGainDB)
+		// A lossless source keeps its fidelity under a boost: the gain is
+		// folded into a FLAC encode rather than an MP3.
+		spec := audioTranscodeSpecFor(boostGainDB, s.losslessBoostSource(r.Context(), path))
+		s.serveCompatibleAudioSpec(w, r, path, info, spec)
 		return
 	}
 	if !forceTranscode {

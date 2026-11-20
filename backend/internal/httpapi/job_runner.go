@@ -88,6 +88,8 @@ func (s *Server) runWorkflowCoordinator(ctx context.Context) {
 	defer databaseCleanupTimer.Stop()
 	databaseBackupTimer := time.NewTimer(databaseBackupCheckInitialDelay)
 	defer databaseBackupTimer.Stop()
+	boostPrewarmTimer := time.NewTimer(boostPrewarmInitialWait)
+	defer boostPrewarmTimer.Stop()
 	for {
 		if s.layoutMigrationActive.Load() {
 			select {
@@ -121,6 +123,9 @@ func (s *Server) runWorkflowCoordinator(ctx context.Context) {
 		case <-databaseBackupTimer.C:
 			s.queueDueDatabaseBackup(ctx, time.Now())
 			databaseBackupTimer.Reset(databaseBackupCheckPeriod)
+		case <-boostPrewarmTimer.C:
+			s.runBoostPrewarm(ctx)
+			boostPrewarmTimer.Reset(boostPrewarmInterval)
 		}
 	}
 }

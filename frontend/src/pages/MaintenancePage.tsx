@@ -731,7 +731,7 @@ function CacheFetchSettings({
             disabled={readOnly}
             label={t("maintenance.cache.transcodeLimit")}
             value={draft.transcodeCacheLimitGb}
-            min={1}
+            min={0}
             max={4096}
             integer
             unit="GB"

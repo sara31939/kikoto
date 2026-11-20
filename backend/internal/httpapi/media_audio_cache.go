@@ -17,34 +17,82 @@ import (
 
 const (
 	audioTranscodeProfileVersion = "mp3-v1"
-	audioTranscodeMaximumBytes   = int64(512 << 20)
+	// A boosted encode of a lossless source (media_boost.go) keeps the
+	// source's own fidelity instead of folding the gain into an MP3.
+	audioTranscodeLosslessProfileVersion = "flac-v1"
+	audioTranscodeMaximumBytes           = int64(512 << 20)
 	// Stay below the partial-file retention age so cleanup cannot mistake an
 	// active encoder output for a file abandoned by a previous server process.
 	audioTranscodeTimeout = 4 * time.Minute
 	// FFmpeg's -fs stops successfully near the limit. Reject that boundary
 	// rather than publishing an apparently successful, truncated audio file.
 	audioTranscodeLimitMargin = int64(64 << 10)
+	// A lossless encode is bounded by its source instead of a fixed cap: a
+	// FLAC of a PCM source stays below the source size, and float sources
+	// land near it, so the source size plus this headroom bounds the output.
+	audioTranscodeLosslessMaximumBytes = int64(4 << 30)
+	audioTranscodeLosslessHeadroom     = int64(64 << 20)
 )
 
 var errAudioTranscodeUnavailable = errors.New("audio transcoding is unavailable")
 
-// audioTranscodeProfile names one encode variant of a source file. A boosted
-// variant (media_boost.go) is a different profile, so its cache entry never
-// mixes with the plain encode or another gain.
+// audioTranscodeSpec describes one encode variant of a source file: the
+// codec it is delivered in and the size bound its cache entry must stay
+// under. A boosted variant (media_boost.go) is a different profile, so its
+// cache entry never mixes with the plain encode or another gain.
+type audioTranscodeSpec struct {
+	name         string
+	extension    string
+	contentType  string
+	maximumBytes int64
+	gainDB       float64
+}
+
 func audioTranscodeProfile(gainDB float64) string {
-	if gainDB <= 0 {
-		return audioTranscodeProfileVersion
+	return audioTranscodeSpecFor(gainDB, false).name
+}
+
+// audioTranscodeSpecFor resolves the encode variant for one delivery. The
+// lossless variant serves a boost of a lossless source; every other encode
+// is the MP3 variant.
+func audioTranscodeSpecFor(gainDB float64, lossless bool) audioTranscodeSpec {
+	if lossless && gainDB > 0 {
+		return audioTranscodeSpec{
+			name:         audioTranscodeLosslessProfileVersion + "-boost" + boostGainSuffix(gainDB),
+			extension:    ".flac",
+			contentType:  "audio/flac",
+			maximumBytes: audioTranscodeLosslessMaximumBytes,
+			gainDB:       gainDB,
+		}
 	}
-	return audioTranscodeProfileVersion + "-boost" + boostGainSuffix(gainDB)
+	name := audioTranscodeProfileVersion
+	if gainDB > 0 {
+		name += "-boost" + boostGainSuffix(gainDB)
+	}
+	return audioTranscodeSpec{
+		name:         name,
+		extension:    ".mp3",
+		contentType:  "audio/mpeg",
+		maximumBytes: audioTranscodeMaximumBytes,
+		gainDB:       gainDB,
+	}
 }
 
 func audioTranscodeCachePath(input string, info os.FileInfo, gainDB float64) string {
-	revision := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%d", audioTranscodeProfile(gainDB), input, info.Size(), info.ModTime().UnixNano())))
-	return filepath.ToSlash(filepath.Join(transcodeCacheRootRelative, "audio", fmt.Sprintf("%x.mp3", revision)))
+	return audioTranscodeCachePathFor(input, info, audioTranscodeSpecFor(gainDB, false))
+}
+
+func audioTranscodeCachePathFor(input string, info os.FileInfo, spec audioTranscodeSpec) string {
+	revision := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%d", spec.name, input, info.Size(), info.ModTime().UnixNano())))
+	return filepath.ToSlash(filepath.Join(transcodeCacheRootRelative, "audio", fmt.Sprintf("%x%s", revision, spec.extension)))
 }
 
 func (s *Server) serveCompatibleAudio(w http.ResponseWriter, r *http.Request, input string, inputInfo os.FileInfo, gainDB float64) {
-	file, err := s.openCompatibleAudio(r.Context(), input, inputInfo, gainDB)
+	s.serveCompatibleAudioSpec(w, r, input, inputInfo, audioTranscodeSpecFor(gainDB, false))
+}
+
+func (s *Server) serveCompatibleAudioSpec(w http.ResponseWriter, r *http.Request, input string, inputInfo os.FileInfo, spec audioTranscodeSpec) {
+	file, err := s.openCompatibleAudioSpec(r.Context(), input, inputInfo, spec)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
@@ -63,7 +111,7 @@ func (s *Server) serveCompatibleAudio(w http.ResponseWriter, r *http.Request, in
 		return
 	}
 	defer func() { _ = file.Close() }()
-	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Header().Set("Content-Type", spec.contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set("ETag", strconv.Quote(filepath.Base(file.Name())))
@@ -73,7 +121,11 @@ func (s *Server) serveCompatibleAudio(w http.ResponseWriter, r *http.Request, in
 }
 
 func (s *Server) openCompatibleAudio(ctx context.Context, input string, inputInfo os.FileInfo, gainDB float64) (*os.File, error) {
-	relPath := audioTranscodeCachePath(input, inputInfo, gainDB)
+	return s.openCompatibleAudioSpec(ctx, input, inputInfo, audioTranscodeSpecFor(gainDB, false))
+}
+
+func (s *Server) openCompatibleAudioSpec(ctx context.Context, input string, inputInfo os.FileInfo, spec audioTranscodeSpec) (*os.File, error) {
+	relPath := audioTranscodeCachePathFor(input, inputInfo, spec)
 	output, err := safeCachePath(s.cfg.CacheRoot, relPath)
 	if err != nil {
 		return nil, err
@@ -91,7 +143,7 @@ func (s *Server) openCompatibleAudio(ctx context.Context, input string, inputInf
 	if err != nil {
 		return nil, err
 	}
-	if validCachedAudio(output) {
+	if validCachedAudio(output, spec.maximumBytes) {
 		defer releasePath()
 		return openCompleteAudio(output)
 	}
@@ -103,7 +155,7 @@ func (s *Server) openCompatibleAudio(ctx context.Context, input string, inputInf
 
 	// Reserve before locking the path: LRU eviction must not wait for a path
 	// held by a request that is itself waiting for the quota lock.
-	releaseReservation, err := s.reserveTranscodeCache(ctx, audioTranscodeMaximumBytes)
+	releaseReservation, err := s.reserveTranscodeCache(ctx, spec.maximumBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -113,14 +165,14 @@ func (s *Server) openCompatibleAudio(ctx context.Context, input string, inputInf
 		return nil, err
 	}
 	defer releasePath()
-	if !validCachedAudio(output) {
+	if !validCachedAudio(output, spec.maximumBytes) {
 		if _, _, err := s.removeCacheFileUnlocked(relPath); err != nil {
 			return nil, err
 		}
 		if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 			return nil, err
 		}
-		if err := s.generateCompatibleAudio(ctx, input, inputInfo, output, audioTranscodeMaximumBytes, gainDB); err != nil {
+		if err := s.generateCompatibleAudio(ctx, input, inputInfo, output, spec); err != nil {
 			if errors.Is(err, errAudioTranscodeUnavailable) {
 				s.mediaPreparationFailures.remember(failureKey)
 			}
@@ -132,9 +184,9 @@ func (s *Server) openCompatibleAudio(ctx context.Context, input string, inputInf
 	return openCompleteAudio(output)
 }
 
-func validCachedAudio(path string) bool {
+func validCachedAudio(path string, maximumBytes int64) bool {
 	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() && info.Size() > 0 && info.Size() < audioTranscodeMaximumBytes-audioTranscodeLimitMargin
+	return err == nil && info.Mode().IsRegular() && info.Size() > 0 && info.Size() < maximumBytes-audioTranscodeLimitMargin
 }
 
 func openCompleteAudio(path string) (*os.File, error) {
@@ -154,7 +206,16 @@ func openCompleteAudio(path string) (*os.File, error) {
 	return file, nil
 }
 
-func (s *Server) generateCompatibleAudio(ctx context.Context, input string, inputInfo os.FileInfo, output string, maximumBytes int64, gainDB float64) error {
+func (s *Server) generateCompatibleAudio(ctx context.Context, input string, inputInfo os.FileInfo, output string, spec audioTranscodeSpec) error {
+	maximumBytes := spec.maximumBytes
+	if spec.extension == ".flac" {
+		// The output tracks the source size, so reserve and bound by it
+		// rather than by the profile ceiling.
+		maximumBytes = inputInfo.Size() + audioTranscodeLosslessHeadroom
+		if maximumBytes > spec.maximumBytes {
+			maximumBytes = spec.maximumBytes
+		}
+	}
 	encodeContext, cancel := context.WithTimeout(ctx, audioTranscodeTimeout)
 	defer cancel()
 	release, err := s.acquireRealtimeTranscode(encodeContext)
@@ -176,7 +237,7 @@ func (s *Server) generateCompatibleAudio(ctx context.Context, input string, inpu
 		return err
 	}
 	defer func() { _ = os.Remove(temporaryPath) }()
-	command := exec.CommandContext(encodeContext, ffmpeg, compatibleAudioFFmpegArgs(input, temporaryPath, maximumBytes, gainDB)...)
+	command := exec.CommandContext(encodeContext, ffmpeg, compatibleAudioFFmpegArgsFor(input, temporaryPath, maximumBytes, spec)...)
 	command.Stdout = io.Discard
 	diagnostics := &transcodeDiagnosticOutput{}
 	command.Stderr = diagnostics
@@ -213,14 +274,27 @@ func (s *Server) generateCompatibleAudio(ctx context.Context, input string, inpu
 }
 
 func compatibleAudioFFmpegArgs(input string, output string, maximumBytes int64, gainDB float64) []string {
+	return compatibleAudioFFmpegArgsFor(input, output, maximumBytes, audioTranscodeSpecFor(gainDB, false))
+}
+
+func compatibleAudioFFmpegArgsFor(input string, output string, maximumBytes int64, spec audioTranscodeSpec) []string {
 	args := []string{
 		"-nostdin", "-hide_banner", "-loglevel", "error", "-y",
 		"-threads", "2", "-filter_threads", "1", "-max_alloc", "268435456",
 		"-protocol_whitelist", "file,pipe", "-i", input,
 		"-map", "0:a:0", "-map_metadata", "-1", "-vn", "-sn", "-dn",
 	}
-	if gainDB > 0 {
-		args = append(args, "-af", boostVolumeFilter(gainDB))
+	if spec.gainDB > 0 {
+		args = append(args, "-af", boostVolumeFilter(spec.gainDB))
+	}
+	if spec.extension == ".flac" {
+		// Keep the source sample format family, rate, and channels: the
+		// encode is lossless apart from the gain itself.
+		return append(args,
+			"-c:a", "flac", "-threads:a", "1", "-compression_level", "5",
+			"-fs", strconv.FormatInt(maximumBytes-audioTranscodeLimitMargin/2, 10),
+			"-f", "flac", output,
+		)
 	}
 	return append(args,
 		"-c:a", "libmp3lame", "-threads:a", "1", "-q:a", "4",

@@ -38,12 +38,15 @@ type transcodeCacheClearResult struct {
 	FreedBytes   int64 `json:"freedBytes"`
 }
 
+// transcodeCacheLimitBytes returns the cache ceiling in bytes. A stored
+// limit of 0 disables the ceiling: nothing is evicted for size. An absent
+// or invalid stored value uses the default.
 func (s *Server) transcodeCacheLimitBytes(ctx context.Context) int64 {
 	limitGB := defaultTranscodeCacheLimitGB
 	if s.db != nil {
 		limitGB = s.settingIntContext(ctx, transcodeCacheLimitSetting, defaultTranscodeCacheLimitGB)
 	}
-	if limitGB < 1 {
+	if limitGB < 0 {
 		limitGB = defaultTranscodeCacheLimitGB
 	}
 	return int64(limitGB) << 30
@@ -159,6 +162,11 @@ func (s *Server) trimTranscodeCacheLocked(ctx context.Context, additionalReserva
 	overview, entries, err := s.scanTranscodeCacheUnlocked(ctx)
 	if err != nil {
 		return transcodeCacheOverview{}, err
+	}
+	if overview.LimitBytes <= 0 {
+		// No ceiling: reservations are still accounted, but nothing is
+		// evicted and no reservation can exceed a limit.
+		return overview, nil
 	}
 	targetBytes := overview.LimitBytes - s.transcodeCacheReservedBytes - additionalReservation
 	if targetBytes < 0 {

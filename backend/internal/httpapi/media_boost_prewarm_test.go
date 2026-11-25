@@ -132,3 +132,71 @@ func TestBoostPrewarmPreparesBoostedEntry(t *testing.T) {
 		t.Fatalf("prewarm did not prepare the boosted entry at %s", output)
 	}
 }
+
+// TestBoostPrewarmDisabledSkipsPass checks that with the
+// boost_prewarm_enabled setting off, a pass leaves every track
+// unmeasured and prepares no cache entry.
+func TestBoostPrewarmDisabledSkipsPass(t *testing.T) {
+	dataRoot := t.TempDir()
+	cacheRoot := t.TempDir()
+	workDir := filepath.Join(dataRoot, "RJ00000003")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(workDir, "quiet.wav")
+	if err := os.WriteFile(input, []byte("not audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	db := openMigratedTestDB(t)
+	if _, err := db.Exec("INSERT INTO work (primary_code, title) VALUES ('RJ00000003', 'Prewarm Work')"); err != nil {
+		t.Fatal(err)
+	}
+	var workID, sourceID int64
+	if err := db.QueryRow("SELECT id FROM work WHERE primary_code = 'RJ00000003'").Scan(&workID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO file_source (code, display_name, source_type) VALUES ('local-test', 'Local Test', 'local')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT id FROM file_source WHERE code = 'local-test'").Scan(&sourceID); err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.Exec("INSERT INTO media_item (work_id, kind, title, fingerprint, has_audio) VALUES (?, 'audio', 'Track', 'prewarm-track', 1)", workID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	itemID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	locationResult, err := db.Exec("INSERT INTO media_file_location (media_item_id, file_source_id, location_type, path, availability) VALUES (?, ?, 'local', 'RJ00000003/quiet.wav', 'available')", itemID, sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locationID, err := locationResult.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO app_setting (key, value_json) VALUES (?, 'false')", boostPrewarmEnabledSetting); err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewServer(db, config.Config{DataRoot: dataRoot, CacheRoot: cacheRoot})
+	server.runBoostPrewarm(context.Background())
+
+	if gainDB := server.storedBoostGainDB(context.Background(), locationID, input); gainDB != 0 {
+		t.Fatalf("disabled prewarm measured the track (gain %v)", gainDB)
+	}
+	cacheFiles := 0
+	if err := filepath.WalkDir(cacheRoot, func(path string, entry os.DirEntry, err error) error {
+		if err == nil && entry.Type().IsRegular() {
+			cacheFiles++
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cacheFiles != 0 {
+		t.Fatalf("disabled prewarm prepared %d cache files", cacheFiles)
+	}
+}

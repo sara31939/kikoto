@@ -18,12 +18,19 @@ import (
 // critical path. A run is bounded in time and in files, and stops early
 // when the cache volume runs low on space; the next run resumes where
 // this one stopped, because a prepared entry is visible in the cache.
+// The boost_prewarm_enabled setting gates the pass: while it is off, the
+// timer still fires and the pass returns without measuring or encoding
+// anything. Playback-time preparation is unaffected by the setting.
 const (
 	boostPrewarmInterval    = time.Hour
 	boostPrewarmInitialWait = 10 * time.Minute
 	boostPrewarmRunBudget   = 45 * time.Minute
 	boostPrewarmMaxFiles    = 60
 )
+
+// boostPrewarmEnabledSetting is the app_setting key that gates prewarm
+// passes. An absent or invalid value leaves prewarming enabled.
+const boostPrewarmEnabledSetting = "boost_prewarm_enabled"
 
 // Preparation stops while the cache volume has less than this free, so
 // prewarming can never fill the disk under a running server. A variable
@@ -86,6 +93,9 @@ func (s *Server) prewarmBoostGainDB(ctx context.Context, locationID int64, path 
 // flight, and every failure leaves the track for a later pass.
 func (s *Server) runBoostPrewarm(ctx context.Context) {
 	if s.cfg.IsDemo() || s.db == nil {
+		return
+	}
+	if !s.settingBoolContext(ctx, boostPrewarmEnabledSetting, true) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, boostPrewarmRunBudget)

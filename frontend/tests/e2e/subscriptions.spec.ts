@@ -12,24 +12,29 @@ import {
   rolePermissions,
   runtimeSettingsFixture,
   subscriptionLookupFixture,
+  subscriptionScheduleFixture,
   subscriptionViewFixture,
   workFixture,
   workflowRunDetailFixture,
   workflowRunFixture,
+  workflowStatusFixture,
   type ApiErrorBody,
 } from "./fixtures/api";
 import type {
   CreatorSubscriptionLookup,
+  CreatorSubscriptionSchedule,
   RankingItem,
   RankingList,
   RankingOrder,
   RankingOverview,
   RankingPage,
+  RankingRefreshRun,
   RankingSnapshotRef,
   RankingTimeline,
   RankingVariant,
   ReleaseFeedPage,
   ShownWorksActionResult,
+  WorkflowRun,
   WorkflowRunDetail,
 } from "../../src/lib/api";
 import type { ForYouColumn, ForYouDraw, ForYouDrawRequest } from "../../src/lib/forYouApi";
@@ -39,7 +44,15 @@ type SubscriptionServer = {
   feed?: ReleaseFeedPage;
   lookup?: CreatorSubscriptionLookup;
   demo?: boolean;
+  /** The signed-in account's permissions; an administrator when absent. */
+  permissions?: string[];
   rankings?: RankingOverview;
+  /** The runs a ranking refresh queues. */
+  refreshRuns?: RankingRefreshRun[];
+  /** The subscription refresh schedule. */
+  schedule?: CreatorSubscriptionSchedule;
+  /** The newest run of each workflow, as the run list answers by workflow code. */
+  workflowRuns?: Record<string, WorkflowRun>;
   /**
    * Ranking pages by `<list>:<compare>` for the latest order and `<list>@<at>` for history,
    * where `<list>` is the list id, followed by `~<release>/<sort>` for an order other than the default.
@@ -191,7 +204,7 @@ const FOR_YOU_COLUMNS: ForYouColumn[] = ["maybe_like", "try_new", "listen_again"
 /** A For you draw of `columns` whose one work per column is titled after the draw number. */
 function forYouDrawFixture(draw: number, columns: ForYouColumn[]): ForYouDraw {
   return {
-    temperature: "balanced",
+    temperature: 3,
     algorithmVersion: "for-you-v1",
     columns: columns.map((column) => {
       const ordinal = FOR_YOU_COLUMNS.indexOf(column) + 1;
@@ -251,7 +264,7 @@ async function mockSubscriptions(page: Page, server: SubscriptionServer) {
       return;
     }
     if (url.pathname === "/api/rankings/refresh") {
-      await route.fulfill({ json: { runs: [] } });
+      await route.fulfill({ json: { runs: server.refreshRuns ?? [] } });
       return;
     }
     const rankingPage = /^\/api\/rankings\/(\d+)$/.exec(url.pathname);
@@ -281,6 +294,25 @@ async function mockSubscriptions(page: Page, server: SubscriptionServer) {
           ? { status: result.runId > 0 ? 202 : 200, json: result }
           : { status: 409, json: { error: "no remote source can be checked", code: "no_remote_source" } },
       );
+      return;
+    }
+    if (url.pathname === "/api/workflow-status") {
+      const workflows = url.searchParams.getAll("code").map((code) => {
+        const latest = server.workflowRuns?.[code];
+        return workflowStatusFixture(
+          { id: 0, code, definitionJson: "{}" },
+          latest ? [{ ...latest, workflowCode: code }] : [],
+        );
+      });
+      await route.fulfill({ json: { workflows } });
+      return;
+    }
+    if (url.pathname === "/api/subscriptions/refresh") {
+      await route.fulfill({ status: 202, json: { runId: 63, status: "queued" } });
+      return;
+    }
+    if (url.pathname === "/api/availability-watch") {
+      await route.fulfill({ json: { id: 1, sourceId: null, revision: 1, targets: [] } });
       return;
     }
     const run = /^\/api\/workflow-runs\/(\d+)(\/events)?(\/stream)?$/.exec(url.pathname);
@@ -349,7 +381,9 @@ async function mockSubscriptions(page: Page, server: SubscriptionServer) {
               permissions: ["library:read"],
               demoMode: true,
             })
-          : authenticatedStateFixture({ role: "admin", permissions: rolePermissions.admin }),
+          : server.permissions
+            ? authenticatedStateFixture({ role: "user", permissions: server.permissions })
+            : authenticatedStateFixture({ role: "admin", permissions: rolePermissions.admin }),
       });
       return;
     }
@@ -383,7 +417,9 @@ async function mockSubscriptions(page: Page, server: SubscriptionServer) {
       return;
     }
     if (url.pathname === "/api/subscriptions") {
-      await route.fulfill({ json: subscriptionViewFixture() });
+      await route.fulfill({
+        json: subscriptionViewFixture(server.schedule ? { schedule: server.schedule } : {}),
+      });
       return;
     }
     if (url.pathname === "/api/for-you/draw" && server.forYouDraws) {
@@ -469,7 +505,8 @@ test("@desktop the feed groups families by day, pages by days, and opening it cl
   await expect(entry.getByText("New since your last visit")).toBeAttached();
   const older = feed.getByRole("region", { name: /^New releases, .*October 12/ }).getByRole("listitem");
   await expect(older).toContainText("Now available");
-  await expect(older).toContainText("Availability Watch");
+  // The event already says the watch found it, so the line does not repeat it.
+  await expect(older).not.toContainText("Availability Watch");
   await expect(feed.getByRole("navigation", { name: "Pages" }).getByRole("button", { name: "Page 2" })).toBeVisible();
 
   // Days per page is a display option beside the Library card choices.
@@ -482,33 +519,23 @@ test("@desktop the feed groups families by day, pages by days, and opening it cl
     .toBe(true);
   await expect(navigation.getByLabel("1 new release")).toHaveCount(0);
 
-  // From 1280px the settings open beside the feed, which stays usable: the
-  // toolbar icon closes them again.
+  // The settings open in a dialog named in the address; Close ends it.
   const settingsButton = page.getByRole("button", { name: "Subscription settings" });
   await settingsButton.click();
   await expect(page).toHaveURL(/\/discover\?panel=subscriptions$/);
-  const settings = page.getByRole("complementary", { name: "Subscription settings" });
+  const settings = page.getByRole("dialog", { name: "Subscription settings" });
   await expect(settings.getByRole("tab", { name: "Subscriptions", selected: true })).toBeVisible();
   await expect(settings.getByText("Refresh schedule")).toBeVisible();
-  await settingsButton.click();
+  await settings.getByRole("button", { name: "Close settings" }).click();
   await expect(settings).toHaveCount(0);
   await expect(page).toHaveURL(/\/discover$/);
 
-  // Escape closes the panel and returns focus to the toolbar icon.
+  // Escape closes the dialog and returns focus to the toolbar icon.
   await settingsButton.click();
   await expect(settings).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(settings).toHaveCount(0);
   await expect(settingsButton).toBeFocused();
-
-  // Narrower desktops open the settings in a drawer over the feed.
-  await page.setViewportSize({ width: 1100, height: 800 });
-  await settingsButton.click();
-  const drawer = page.getByRole("dialog", { name: "Subscription settings" });
-  await expect(drawer.getByText("Refresh schedule")).toBeVisible();
-  await drawer.getByRole("button", { name: "Close settings" }).click();
-  await expect(drawer).toHaveCount(0);
-  await expect(page).toHaveURL(/\/discover$/);
 });
 
 test("@desktop subscribing to a circle confirms replacing its series and pulls the catalog for a baseline", async ({
@@ -628,7 +655,7 @@ test("@desktop rankings mark changes since the last visit and compare with the p
 
   // The settings icon opens the ranking settings from this view.
   await page.getByRole("button", { name: "Subscription settings" }).click();
-  const settings = page.getByRole("complementary", { name: "Subscription settings" });
+  const settings = page.getByRole("dialog", { name: "Subscription settings" });
   await expect(settings.getByRole("tab", { name: "Rankings", selected: true })).toBeVisible();
   await expect(
     settings
@@ -896,7 +923,7 @@ test("@desktop ranking settings show fixed rows and start a ranking when it is f
   };
   await mockSubscriptions(page, server);
   await page.goto("/discover?view=rankings&panel=rankings");
-  const settings = page.getByRole("complementary", { name: "Subscription settings" });
+  const settings = page.getByRole("dialog", { name: "Subscription settings" });
   const dlsite = settings.getByRole("region", { name: "DLsite voice rankings" });
   // The rows follow the fixed order of the chips.
   await expect
@@ -980,6 +1007,99 @@ test("@desktop ranking settings show fixed rows and start a ranking when it is f
         .filter(Boolean),
     )
     .toEqual([2024, 2023]);
+});
+
+/** A run of a workflow that ended two hours ago. */
+function endedRun(id: number, workflowCode: string, status: string): WorkflowRun {
+  const at = new Date(Date.now() - 2 * 3600_000).toISOString();
+  return workflowRunFixture({ id, workflowCode, displayName: workflowCode, status, startedAt: at, finishedAt: at });
+}
+
+test("@desktop the settings state each workflow's latest run and open it in Workflows", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const day = rankingListFixture();
+  const server: SubscriptionServer = {
+    requests: [],
+    feedQueries: [],
+    rankings: rankingOverviewFixture({
+      lists: [day],
+      workflows: [
+        { code: "dlsite_popular_collection", nextRunAt: null, latestRun: { id: 61, status: "failed" } },
+        { code: "remote_popular_collection", nextRunAt: null, latestRun: null },
+      ],
+    }),
+    rankingPages: { "1:": rankingPageFixture(day, null, []) },
+    refreshRuns: [{ runId: 65, status: "queued", workflowCode: "dlsite_popular_collection" }],
+    schedule: subscriptionScheduleFixture({ latestRun: { id: 62, status: "succeeded" } }),
+    workflowRuns: {
+      dlsite_popular_collection: endedRun(61, "dlsite_popular_collection", "failed"),
+      creator_subscription_refresh: endedRun(62, "creator_subscription_refresh", "succeeded"),
+      availability_watch: endedRun(64, "availability_watch", "succeeded"),
+    },
+  };
+  await mockSubscriptions(page, server);
+  await page.goto("/discover?view=rankings&panel=rankings");
+  const settings = page.getByRole("dialog", { name: "Subscription settings" });
+
+  // A failed pull is named with its time and opens its run. A remote workflow shows once a remote list exists.
+  const pull = settings.getByRole("group", { name: "Latest DLsite pull" });
+  await expect(pull).toContainText("Failed");
+  await expect(pull).toContainText("2 hr. ago");
+  await expect(settings.getByRole("group", { name: "Latest remote source pull" })).toHaveCount(0);
+
+  // A refresh's notice carries the run it queued.
+  await settings.getByRole("button", { name: "Refresh all" }).click();
+  await expect(page.getByText("Ranking pull queued.")).toBeVisible();
+  await page.getByRole("button", { name: "View run" }).click();
+  await expect(page).toHaveURL(/\/workflows\?run=65$/);
+  await page.goto("/discover?view=rankings&panel=rankings");
+
+  await pull.getByRole("button", { name: "Open run #61 (Failed)" }).click();
+  await expect(page).toHaveURL(/\/workflows\?run=61$/);
+
+  await page.goto("/discover?panel=subscriptions");
+  const refresh = settings.getByRole("group", { name: "Latest refresh" });
+  await expect(refresh).toContainText("Succeeded");
+  await settings.getByRole("button", { name: "Refresh now" }).click();
+  await expect(page.getByText("Refresh queued.")).toBeVisible();
+  await page.getByRole("button", { name: "View run" }).click();
+  await expect(page).toHaveURL(/\/workflows\?run=63$/);
+
+  // The watch has no schedule of its own; its latest run is whichever ran last, a subscription refresh's included.
+  await page.goto("/discover?view=watch&panel=watch");
+  const check = settings.getByRole("group", { name: "Latest check" });
+  await expect(check).toContainText("Succeeded");
+  await check.getByRole("button", { name: "Open run #64 (Succeeded)" }).click();
+  await expect(page).toHaveURL(/\/workflows\?run=64$/);
+});
+
+test("@desktop an account that only syncs metadata runs the refresh and sees its latest run without a link", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const server: SubscriptionServer = {
+    requests: [],
+    feedQueries: [],
+    permissions: ["library:read", "metadata:sync"],
+    schedule: subscriptionScheduleFixture({
+      latestRun: { id: 62, status: "failed" },
+      lastRunAt: "2026-10-14 09:00:00",
+      lastError: "upstream refused",
+    }),
+  };
+  await mockSubscriptions(page, server);
+  await page.goto("/discover?panel=subscriptions");
+  const settings = page.getByRole("dialog", { name: "Subscription settings" });
+  const refresh = settings.getByRole("group", { name: "Latest refresh" });
+  await expect(refresh).toContainText("Failed");
+  await expect(refresh.getByRole("button")).toHaveCount(0);
+  await expect(settings.getByRole("button", { name: "Refresh now" })).toBeEnabled();
+  await expect(settings.getByRole("switch", { name: "Refresh automatically" })).toBeEnabled();
+  await settings.getByRole("button", { name: "Refresh now" }).click();
+  await expect.poll(() => server.requests.some((request) => request.path === "/api/subscriptions/refresh")).toBe(true);
+  // The notice has no run to open.
+  await expect(page.getByText("Refresh queued.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "View run" })).toHaveCount(0);
 });
 
 /** A page action's run as the page follows it. */
@@ -1087,7 +1207,7 @@ test("@desktop checking a ranking page's sources marks the entries a source has"
   await expect(items.first()).toHaveAccessibleName("Example Work 1");
 });
 
-test("@desktop release cards label the watch action and say which works are watched", async ({ page }) => {
+test("@desktop release cards offer the watch action and light it on watched works", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   const server: SubscriptionServer = {
     requests: [],
@@ -1118,22 +1238,26 @@ test("@desktop release cards label the watch action and say which works are watc
   await page.goto("/discover");
   const feed = page.getByRole("region", { name: "New releases", exact: true });
   const watched = feed.getByRole("listitem", { name: "Example Work 2" });
-  await expect(watched).toContainText("Watching");
+  // Simple cards show their actions with the details, on hover.
+  await watched.getByTestId("work-card").hover();
+  await expect(watched.getByRole("img", { name: "In Availability Watch" })).toBeVisible();
   await expect(watched.getByRole("button", { name: "Add to Availability Watch" })).toHaveCount(0);
   const owned = feed.getByRole("listitem", { name: "Example Work 3" });
   await expect(owned).toBeVisible();
+  await owned.getByTestId("work-card").hover();
   await expect(owned.getByRole("button", { name: "Add to Availability Watch" })).toHaveCount(0);
-  await expect(owned).not.toContainText("Watching");
+  await expect(owned.getByRole("img", { name: "In Availability Watch" })).toHaveCount(0);
 
   const entry = feed.getByRole("listitem", { name: "Example Work 1" });
+  await entry.getByTestId("work-card").hover();
   const watch = entry.getByRole("button", { name: "Add to Availability Watch" });
-  await expect(watch).toHaveText("Watch");
+  await expect(watch).toBeVisible();
   await watch.click();
   await expect(page.getByText(`${syntheticWorkCode("RJ", 1)} is now in Availability Watch.`)).toBeVisible();
   expect(server.requests.find((request) => request.path === "/api/availability-watch/targets")?.body).toEqual({
     targetCodes: [syntheticWorkCode("RJ", 1)],
   });
-  await expect(entry).toContainText("Watching");
+  await expect(entry.getByRole("img", { name: "In Availability Watch" })).toBeVisible();
 });
 
 test("@desktop the feed page's works can have their metadata synced and their sources checked", async ({ page }) => {
@@ -1187,7 +1311,7 @@ test("@desktop the feed page's works can have their metadata synced and their so
   ).toHaveCount(0);
 });
 
-test("phones reach the ranking page actions and see the labeled watch action", async ({ page }) => {
+test("phones reach the ranking page actions and the watch action", async ({ page }) => {
   const day = rankingListFixture();
   await mockSubscriptions(page, {
     requests: [],
@@ -1200,7 +1324,9 @@ test("phones reach the ranking page actions and see the labeled watch action", a
   await page.goto("/discover?view=rankings");
   const ranking = page.getByRole("region", { name: "Rankings", exact: true });
   const entry = ranking.getByRole("listitem", { name: "Example Work 1" });
-  await expect(entry.getByRole("button", { name: "Add to Availability Watch" })).toHaveText("Watch");
+  // On a phone a simple card opens its details and actions with its toggle.
+  await entry.getByRole("button", { name: "Show details", exact: true }).click();
+  await expect(entry.getByRole("button", { name: "Add to Availability Watch" })).toBeVisible();
 
   await page.getByRole("button", { name: "Actions for the shown works" }).click();
   await expect(page.getByRole("menuitem", { name: /^Sync metadata/ })).toBeInViewport();
@@ -1216,28 +1342,55 @@ test("phones reach the ranking page actions and see the labeled watch action", a
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test("@desktop For you keeps its draw across views and reloads until a column is drawn again", async ({ page }) => {
+test("@desktop For you keeps its draw across pages and reloads until a column is drawn again", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   const server: SubscriptionServer = { requests: [], feedQueries: [], forYouDraws: [] };
   await mockSubscriptions(page, server);
+  // For you is a page of its own; a Discover link to its former view opens it.
   await page.goto("/discover?view=for-you");
+  await expect(page).toHaveURL(/\/for-you$/);
   const maybeLike = page.getByRole("region", { name: /^Maybe like/ });
   await expect(maybeLike.getByText("Example Work 1 from draw 1")).toBeVisible();
+  const sidebar = page.locator("aside nav");
 
-  await page.getByRole("tab", { name: /^New releases/ }).click();
-  await page.getByRole("tab", { name: "For you" }).click();
+  await sidebar.getByRole("button", { name: "Discover", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "For you" })).toHaveCount(0);
+  await sidebar.getByRole("button", { name: "For you", exact: true }).click();
   await expect(maybeLike.getByText("Example Work 1 from draw 1")).toBeVisible();
   await page.reload();
   await expect(maybeLike.getByText("Example Work 1 from draw 1")).toBeVisible();
   expect(server.forYouDraws).toHaveLength(1);
 
-  await maybeLike.getByRole("button", { name: "Draw Maybe like again" }).click();
+  // Beside the column heading on a wide page, beside the column tabs on a narrower one.
+  await page.getByRole("button", { name: "Draw Maybe like again" }).click();
   await expect(maybeLike.getByText("Example Work 1 from draw 2")).toBeVisible();
   expect(server.forYouDraws?.[1]?.columns).toEqual(["maybe_like"]);
-  await page.getByRole("tab", { name: /^New releases/ }).click();
-  await page.getByRole("tab", { name: "For you" }).click();
+  await sidebar.getByRole("button", { name: "Discover", exact: true }).click();
+  await sidebar.getByRole("button", { name: "For you", exact: true }).click();
   await expect(maybeLike.getByText("Example Work 1 from draw 2")).toBeVisible();
   expect(server.forYouDraws).toHaveLength(2);
+
+  // The temperature shows its steps in a row; a new step draws every column with it.
+  const temperature = page.getByRole("radiogroup", { name: "Temperature" });
+  await expect(temperature.getByRole("radio", { name: "3", exact: true })).toHaveAttribute("aria-checked", "true");
+  await temperature.getByRole("radio", { name: "5", exact: true }).click();
+  await expect(maybeLike.getByText("Example Work 1 from draw 3")).toBeVisible();
+  expect(server.forYouDraws?.[2]).toMatchObject({ temperature: 5 });
+});
+
+test("For you opens again on the column last chosen on a narrow screen", async ({ page }) => {
+  const server: SubscriptionServer = { requests: [], feedQueries: [], forYouDraws: [] };
+  await mockSubscriptions(page, server);
+  await page.goto("/for-you");
+  const columns = page.getByRole("tablist", { name: "For you column" });
+  await expect(columns.getByRole("tab", { name: "Maybe like" })).toHaveAttribute("aria-selected", "true");
+  await columns.getByRole("tab", { name: "Try new" }).click();
+  await expect(page.getByText("Example Work 2 from draw 1")).toBeVisible();
+
+  await page.goto("/discover");
+  await page.goto("/for-you");
+  await expect(columns.getByRole("tab", { name: "Try new" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByText("Example Work 2 from draw 1")).toBeVisible();
 });
 
 test("Demo shows a sample feed without actions", async ({ page }) => {

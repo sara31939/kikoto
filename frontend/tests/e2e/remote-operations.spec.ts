@@ -13,27 +13,36 @@ import { remoteWorkDetailFixture, rolePermissions, type ApiErrorBody } from "./f
 import {
   work,
   type RemoteTrackControl,
+  mediaFixture,
   mockApplication,
   mockRemoteSource,
   selectLibrarySource,
 } from "./fixtures/player-library";
-import { isCompactWorkDetail, openSourceActions, runSourceAction, showWorkDetailTab } from "./fixtures/work-detail";
+import {
+  closeDetailSources,
+  openDetailSources,
+  openDirectoryEditions,
+  openSourceActions,
+  runSourceAction,
+  selectDetailSource,
+  showWorkDetailTab,
+  sourceActionList,
+} from "./fixtures/work-detail";
+import { chooseLibrarySort, openLibraryView, showFullWorkCards } from "./fixtures/library-view";
 
 test("remote source reuses the library grid, source sorting, localized tags, and bottom pagination", async ({
   page,
 }) => {
   const requests: URL[] = [];
   await mockRemoteSource(page, (url) => requests.push(url));
+  await showFullWorkCards(page);
   await page.goto("/");
   await selectLibrarySource(page, "Example Remote");
 
   await expect(page.getByText("Remote Japanese work", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "退廃/背徳/インモラル", exact: true })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Pages", exact: true })).toBeVisible();
-  const displayButton = page.getByRole("button", { name: /^Display options .*Items per page: 24/ });
-  await expect(displayButton).toBeVisible();
-  await displayButton.click();
-  const displayOptions = page.getByRole("dialog", { name: "Display options" });
+  const displayOptions = await openLibraryView(page);
   await expect(displayOptions.getByRole("radiogroup", { name: "Items per page" })).toBeVisible();
   await expect(displayOptions.getByRole("radiogroup", { name: "Items per page" }).getByRole("radio")).toHaveText([
     "24",
@@ -45,21 +54,20 @@ test("remote source reuses the library grid, source sorting, localized tags, and
   // The source's 30 works span two pages again at 24 per page.
   await displayOptions.getByRole("radio", { name: "24 per page" }).click();
   await expect.poll(() => requests.at(-1)?.searchParams.get("pageSize")).toBe("24");
-  await page.keyboard.press("Escape");
-  const selectButton = page.getByRole("button", { name: "Select", exact: true });
-  await expect(selectButton).toBeVisible();
-  await selectButton.click();
+  // Selecting works for bulk actions starts from the panel and closes it.
+  await displayOptions.getByRole("button", { name: "Select works", exact: true }).click();
+  await expect(displayOptions).toBeHidden();
   await expect(page.getByLabel("Select work").first()).toBeVisible();
 
-  await page.getByRole("button", { name: "Sort: Recently added" }).click();
-  await page.getByRole("button", { name: "Code", exact: true }).click();
+  await chooseLibrarySort(page, "Code");
   await expect.poll(() => requests.some((url) => url.searchParams.get("sort") === "code")).toBe(true);
-  await page.getByRole("button", { name: "Sort: Code" }).click();
-  await page.getByRole("button", { name: "Sales", exact: true }).click();
+  await chooseLibrarySort(page, "Sales");
   await expect.poll(() => requests.some((url) => url.searchParams.get("sort") === "sales")).toBe(true);
+  // A remote source cannot filter by the viewer's quick marks.
+  await expect(page.getByRole("button", { name: /^Mark filter/ })).toHaveCount(0);
 
   await expect.poll(() => new URL(page.url()).searchParams.get("view")).toBeNull();
-  await expect(page.locator("section[class*='grid-template-columns']").first()).toBeVisible();
+  await expect(page.getByTestId("work-card").first()).toBeVisible();
 
   await page.getByTitle("Next page").last().click();
   await expect(page.getByText("Remote page two work", { exact: true })).toBeVisible();
@@ -110,7 +118,11 @@ test("@desktop a disabled source stays out of the wide source tabs until source 
   const remoteTab = page.getByRole("button", { name: "Example Remote", exact: true });
   await expect(page.getByRole("button", { name: "Local", exact: true })).toBeVisible();
   await expect(remoteTab).toHaveCount(0);
-  await page.getByRole("button", { name: "Source visibility", exact: true }).click();
+  // The visibility entry leads the source tabs.
+  await page
+    .getByRole("group", { name: "Source", exact: true })
+    .getByRole("button", { name: "Source visibility" })
+    .click();
   await page
     .getByRole("radiogroup", { name: "Example Remote visibility" })
     .getByRole("radio", { name: "Always show" })
@@ -157,6 +169,7 @@ test("remote source keeps alias matches returned by the backend", async ({ page 
   await page.goto("/");
   await selectLibrarySource(page, "Example Remote");
 
+  await page.getByRole("button", { name: "Search", exact: true }).click();
   const search = page.getByRole("searchbox", { name: "Search library" });
   await search.fill(aliasWorkCode);
   await expect.poll(() => requests.some((url) => url.searchParams.get("q") === aliasWorkCode)).toBe(true);
@@ -168,8 +181,7 @@ test("remote source remembers sorting after transient browse state is cleared", 
   await mockRemoteSource(page, (url) => requests.push(url));
   await page.goto("/");
   await selectLibrarySource(page, "Example Remote");
-  await page.getByRole("button", { name: "Sort: Recently added" }).click();
-  await page.getByRole("button", { name: "Code", exact: true }).click();
+  await chooseLibrarySort(page, "Code");
   await expect.poll(() => requests.some((url) => url.searchParams.get("sort") === "code")).toBe(true);
 
   requests.length = 0;
@@ -179,7 +191,7 @@ test("remote source remembers sorting after transient browse state is cleared", 
   });
   await page.reload();
   await expect(page.getByRole("button", { name: "Source: Example Remote", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Sort: Code" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sort: Code", exact: true })).toBeVisible();
   await expect.poll(() => requests.some((url) => url.searchParams.get("sort") === "code")).toBe(true);
 });
 
@@ -192,6 +204,7 @@ test("remote card Fork queues in place and reports a terminal failure without na
     untrackRequests: [],
   };
   await mockRemoteSource(page, () => undefined, { trackControl });
+  await showFullWorkCards(page);
   await page.goto("/");
   await selectLibrarySource(page, "Example Remote");
   await expect(page.getByText("Remote Japanese work", { exact: true })).toBeVisible();
@@ -225,6 +238,7 @@ test("a User keeps remote actions visible and learns about the missing permissio
       });
     },
   );
+  await showFullWorkCards(page);
   await page.goto("/");
   await selectLibrarySource(page, "Example Remote");
   await expect(page.getByText("Remote Japanese work", { exact: true })).toBeVisible();
@@ -247,6 +261,7 @@ test("mobile Fetch prepares language editions and switches between local, remote
   page,
 }) => {
   await mockRemoteSource(page, () => undefined);
+  await showFullWorkCards(page);
   await page.goto("/");
   await selectLibrarySource(page, "Example Remote");
   await page.getByTitle("Fetch").click();
@@ -310,6 +325,7 @@ test("mobile Fetch preserves reviewed choices after an unconfirmed submission an
       } satisfies RemoteWorkSaveResult,
     });
   });
+  await showFullWorkCards(page);
   await page.goto("/");
   await selectLibrarySource(page, "Example Remote");
   await page.getByTitle("Fetch").click();
@@ -322,7 +338,7 @@ test("mobile Fetch preserves reviewed choices after an unconfirmed submission an
   await publish.click();
   await expect(
     page.getByText(
-      "Fetch submission could not be confirmed. It may still be running; check Activity or retry this selection.",
+      "Fetch submission could not be confirmed. It may still be running; check Workflows or retry this selection.",
       { exact: true },
     ),
   ).toBeVisible();
@@ -347,6 +363,7 @@ test("mobile Fetch preserves reviewed choices after an unconfirmed submission an
 
 test("mobile Fetch reviews an unclaimed destination folder before publishing", async ({ page }) => {
   await mockRemoteSource(page, () => undefined, { fetchRootConflict: true });
+  await showFullWorkCards(page);
   await page.goto("/");
   await selectLibrarySource(page, "Example Remote");
   await page.getByTitle("Fetch").click();
@@ -430,8 +447,10 @@ test("local Delete selects by location, summarizes the selection, and requires t
     },
   ];
   await mockApplication(page, undefined, false, 1, 0, mediaItems, (body) => cleanupBodies.push(body), {
+    // A manager of local files gets the deletion list when the work has no folder for the workspace.
+    authenticated: true,
+    permissions: ["library:read", "playback:use", "downloads:manage"],
     work: { ...work, sourcePresence: [localPresence] },
-    detailLocalFolders: [localRootFolder(101)],
     onMediaRequest: () => {
       mediaRequests += 1;
     },
@@ -474,8 +493,11 @@ test("local Delete selects by location, summarizes the selection, and requires t
   });
 });
 
-test("@desktop wide work detail lists source actions inside Source info", async ({ page }) => {
-  await mockApplication(page, undefined, false, 1, 0, [], undefined, {
+test("@desktop work detail leads with Play and lists the local files entries in Source info", async ({ page }) => {
+  const mediaItems = [mediaFixture(1, "track.mp3", `${work.primaryCode}/track.mp3`, "audio")];
+  await mockApplication(page, undefined, false, 1, 0, mediaItems, undefined, {
+    authenticated: true,
+    permissions: rolePermissions.admin,
     work: { ...work, sourcePresence: [localPresence] },
     detailLocalFolders: [localRootFolder(103)],
   });
@@ -483,12 +505,46 @@ test("@desktop wide work detail lists source actions inside Source info", async 
   await page.goto("/");
   await page.getByText(work.title, { exact: true }).click();
 
-  const sourceActions = page
-    .getByRole("complementary", { name: "Source info", exact: true })
-    .getByRole("group", { name: /Source actions for/ });
-  await expect(page.getByRole("button", { name: /Source actions for/ })).toHaveCount(0);
-  await sourceActions.getByRole("button", { name: "Manage files", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "Manage files" })).toBeVisible();
+  // One primary action leads the Hero, with Metadata beside the personal actions.
+  const heroActions = page.getByTestId("hero-actions");
+  await expect(heroActions.getByRole("button", { name: "Edit metadata", exact: true })).toBeVisible();
+  await expect(heroActions.getByRole("button", { name: "Manage files", exact: true })).toHaveCount(0);
+  const actions = sourceActionList(page);
+  for (const name of ["Manage files", "Manage lyrics", "Edit display names", "Translate with AI"]) {
+    await expect(actions.getByRole("button", { name, exact: true })).toBeVisible();
+  }
+  await heroActions.getByRole("button", { name: "Play this work", exact: true }).click();
+  await expect(page.locator("audio")).toHaveJSProperty("paused", false);
+});
+
+test("a listener sees no management entry on a work detail", async ({ page }) => {
+  const mediaItems = [mediaFixture(1, "track.mp3", `${work.primaryCode}/track.mp3`, "audio")];
+  await mockApplication(page, undefined, false, 1, 0, mediaItems, undefined, {
+    authenticated: true,
+    permissions: rolePermissions.user,
+    work: { ...work, sourcePresence: [localPresence] },
+    detailLocalFolders: [localRootFolder(103)],
+  });
+  await page.goto("/");
+  await page.getByText(work.title, { exact: true }).click();
+
+  const heroActions = page.getByTestId("hero-actions");
+  await expect(heroActions.getByRole("button", { name: "Play this work", exact: true })).toBeVisible();
+  await expect(heroActions.getByRole("button", { name: "Edit metadata", exact: true })).toHaveCount(0);
+  await showWorkDetailTab(page, "Info");
+  await expect(sourceActionList(page)).toHaveCount(0);
+});
+
+test("a work with nothing to play says why in place of Play", async ({ page }) => {
+  await mockApplication(page, undefined, false, 1, 0, [
+    mediaFixture(1, "notes.txt", `${work.primaryCode}/notes.txt`, "text"),
+  ]);
+  await page.goto("/");
+  await page.getByText(work.title, { exact: true }).click();
+
+  const heroActions = page.getByTestId("hero-actions");
+  await expect(heroActions.getByRole("status")).toHaveText("No audio or video to play");
+  await expect(heroActions.getByRole("button", { name: "Play this work", exact: true })).toHaveCount(0);
 });
 
 test("@desktop Manage files lists the work's other places and applies the reviewed folder", async ({ page }) => {
@@ -592,10 +648,7 @@ test("@desktop Manage files lists the work's other places and applies the review
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await page.getByText(work.title, { exact: true }).click();
-  await page
-    .getByRole("complementary", { name: "Source info", exact: true })
-    .getByRole("button", { name: "Manage files", exact: true })
-    .click();
+  await runSourceAction(page, "Manage files");
 
   const editor = page.getByRole("dialog", { name: "Manage files" });
   await expect(
@@ -783,10 +836,7 @@ test("@desktop Manage lyrics resolves a lyrics conflict in place of deleting the
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await page.getByText(work.title, { exact: true }).click();
-  await page
-    .getByRole("complementary", { name: "Source info", exact: true })
-    .getByRole("button", { name: "Manage files", exact: true })
-    .click();
+  await runSourceAction(page, "Manage files");
 
   // The workspace marks Kikoto's lyrics folder and sends the folder's other lyrics to Manage lyrics.
   const folder = page.getByRole("dialog", { name: "Manage files" }).getByRole("region", { name: "This folder" });
@@ -823,6 +873,7 @@ test("@desktop Manage lyrics resolves a lyrics conflict in place of deleting the
     removeLocationIds: [],
     decisions: [],
     assignments: [],
+    assign: true,
     folderMode: "move",
   });
   await expect(apply).toBeDisabled();
@@ -846,7 +897,8 @@ test("@desktop Manage lyrics resolves a lyrics conflict in place of deleting the
         targetPath: "lyrics_kikoto/ja/track.mp3.vtt",
       },
     ],
-    assignments: [{ audioMediaItemId: 1, itemKey: "folder:track.mp3.vtt" }],
+    assignments: [],
+    assign: true,
     folderMode: "move",
   });
   await expect(
@@ -1052,9 +1104,11 @@ test("work detail preserves Local and Tracked entry intent while keeping every r
     ],
   };
   await mockApplication(page, undefined, false, 1, 0, mediaItems, (body) => cleanupBodies.push(body), {
-    // Untrack and Check sources need a signed-in account with remote:track.
+    // Each source action shows only to an account allowed to run it: Untrack and
+    // Check sources need remote:track, Fetch remote:fetch and metadata:sync, and
+    // Manage files and Manage cache downloads:manage.
     authenticated: true,
-    permissions: rolePermissions.contributor,
+    permissions: rolePermissions.admin,
     work: trackedWork,
     librarySources: [
       {
@@ -1097,75 +1151,61 @@ test("work detail preserves Local and Tracked entry intent while keeping every r
   await page.goto("/");
   await page.getByText(work.title, { exact: true }).click();
   await expect(page).toHaveURL(/view=local/);
-  const localTab = page.locator('button[title="Local: Local files available"]');
-  const trackedTab = page.locator('button[title^="Tracked:"]');
-  const remoteTab = page.locator('button[title="Remote A: Available"]');
-  await expect(localTab).toHaveAttribute("aria-pressed", "true");
-  await expect(trackedTab).toBeVisible();
-  await expect(page.locator('button[title^="Tracked:"]')).toHaveCount(1);
-  await expect(remoteTab).toBeVisible();
-  const missingRemoteTab = page.locator('button[title="Remote B: Not found"]');
-  await expect(missingRemoteTab).toBeVisible();
-  // A compact detail lists the source actions in its Info tab instead of a Hero menu.
-  const compact = isCompactWorkDetail(page);
-  const sourceMenu = page.getByRole("menu", { name: "Selected source options" });
-  if (!compact) {
-    await expect(page.getByTestId("hero-actions").getByRole("button", { name: /Source actions for/ })).toBeVisible();
-  }
+  // The two tracked file sources are listed under one Tracked group.
+  let sources = await openDetailSources(page);
+  const trackedSources = () => sources.getByRole("group", { name: "Tracked sources", exact: true });
+  await expect(sources.locator('button[title="Local: Local files available"]')).toHaveAttribute("aria-checked", "true");
+  await expect(trackedSources().getByRole("radio")).toHaveCount(2);
+  await expect(sources.locator('button[title="Remote A: Available"]')).toBeVisible();
+  await expect(sources.locator('button[title="Remote B: Not found"]')).toBeVisible();
+  await closeDetailSources(page);
+  // The Hero holds no source actions; the local source lists Manage files in Source info.
+  await expect(page.getByTestId("hero-actions").getByRole("button", { name: /Source actions for/ })).toHaveCount(0);
   let actions = await openSourceActions(page);
   await expect(actions.scope.getByRole(actions.role, { name: "Manage files", exact: true })).toBeVisible();
-  if (!compact) {
-    await expect(sourceMenu).toBeVisible();
-    await expect(page.getByRole("menuitem", { name: "Manage files", exact: true })).toBeFocused();
-    // Dismiss on a non-interactive surface; a screen corner can fall inside a control's touch target.
-    await page.getByRole("heading", { name: work.title, exact: true }).click();
-    await expect(sourceMenu).toHaveCount(0);
-  }
 
-  await showWorkDetailTab(page, "Directory");
-  await remoteTab.click();
+  await selectDetailSource(page, "Remote A: Available");
   actions = await openSourceActions(page);
   await expect(actions.scope.getByRole(actions.role, { name: /^Track/ })).toBeDisabled();
   await expect(actions.scope.getByRole(actions.role, { name: /^Untrack/ })).toBeVisible();
   await expect(actions.scope.getByRole(actions.role, { name: "Fetch", exact: true })).toBeVisible();
-  await showWorkDetailTab(page, "Directory");
-  await trackedTab.click();
-  await expect(page.getByRole("menu", { name: "Selected source options" })).toHaveCount(0);
+  await expect(actions.scope.getByRole(actions.role, { name: "Manage files", exact: true })).toHaveCount(0);
+  sources = await openDetailSources(page);
+  await trackedSources()
+    .getByRole("radio", { name: /Remote A/ })
+    .click();
   await expect(page.getByText("Browsing the tracked directory forked from Remote A.", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Switch fork", exact: true }).click();
-  const trackedSourcesMenu = page.getByRole("menu", { name: "Tracked sources" });
-  await expect(trackedSourcesMenu).toBeVisible();
-  await page.getByRole("menuitemradio", { name: /Remote B/ }).click();
-  await expect(trackedSourcesMenu).toHaveCount(0);
+  sources = await openDetailSources(page);
+  await trackedSources()
+    .getByRole("radio", { name: /Remote B/ })
+    .click();
+  await expect(sources).toHaveCount(0);
   await expect(page).toHaveURL(/view=tracked&trackedSource=8/);
   await expect(
     page.getByText("Remote B is tracked, but its directory has not been forked.", { exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Switch fork", exact: true }).click();
-  await page.getByRole("menuitemradio", { name: /Remote A/ }).click();
+  sources = await openDetailSources(page);
+  await expect(trackedSources().getByRole("radio", { name: /Remote B/ })).toHaveAttribute("aria-checked", "true");
+  await trackedSources()
+    .getByRole("radio", { name: /Remote A/ })
+    .click();
   await expect(page).toHaveURL(/view=tracked&trackedSource=7/);
   actions = await openSourceActions(page);
   await expect(actions.scope.getByText("Switch fork", { exact: true })).toBeVisible();
   await expect(actions.scope.getByRole(actions.role, { name: /^Untrack/ })).toBeVisible();
   await expect(actions.scope.getByRole(actions.role, { name: /Manage cache/ })).toBeVisible();
-  if (!compact) {
-    await page.keyboard.press("Escape");
-    await expect(sourceMenu).toHaveCount(0);
-  }
-  await showWorkDetailTab(page, "Directory");
-  await page.getByRole("button", { name: "Source tab visibility", exact: true }).click();
-  await page
-    .getByRole("dialog", { name: "Source tab visibility" })
-    .getByRole("button", { name: /^Check sources/ })
-    .click();
+  sources = await openDetailSources(page);
+  await sources.getByRole("button", { name: /^Check sources/ }).click();
   await expect.poll(() => sourceChecks).toBe(1);
 
   await page.getByRole("main").getByRole("button", { name: "Library", exact: true }).click();
   await selectLibrarySource(page, "Tracked");
   await page.getByText(work.title, { exact: true }).click();
   await expect(page).toHaveURL(/view=tracked/);
-  await expect(page.locator('button[title^="Tracked:"]')).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator('button[title="Remote A: Available"]')).toBeVisible();
+  sources = await openDetailSources(page);
+  await expect(trackedSources().getByRole("radio", { checked: true })).toHaveCount(1);
+  await expect(sources.locator('button[title="Remote A: Available"]')).toBeVisible();
+  await closeDetailSources(page);
   await runSourceAction(page, /Manage cache/);
   await page.getByRole("checkbox", { name: "Select all", exact: true }).click();
   await expect(page.getByText(/^1 selected \/ 1 deletable/)).toBeVisible();
@@ -1199,6 +1239,7 @@ test("tracked library cards confirm Untrack in an anchored popover", async ({ pa
     },
     onUntrack: (workId, sourceId) => untrackRequests.push({ workId, sourceId }),
   });
+  await showFullWorkCards(page);
   await page.goto("/");
   await selectLibrarySource(page, "Tracked");
 
@@ -1219,6 +1260,7 @@ test("anonymous Fetch opens login before loading remote detail or a fetch plan",
     if (/\/api\/remote-sources\/1\/works\/[^/]+/.test(path)) preparationRequests.push(path);
   });
   await mockRemoteSource(page, () => undefined, { authenticated: false });
+  await showFullWorkCards(page);
   await page.goto("/");
   await selectLibrarySource(page, "Example Remote");
   await expect(page.getByText("Remote Japanese work", { exact: true })).toBeVisible();
@@ -1248,8 +1290,7 @@ test("remote-only work uses the shared mobile detail shell without becoming pers
       exact: true,
     }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Directory edition", exact: true }).click();
-  const versionMenu = page.getByRole("dialog", { name: "Directory edition", exact: true });
+  const versionMenu = await openDirectoryEditions(page);
   const versionMenuBox = await versionMenu.boundingBox();
   const viewport = page.viewportSize();
   expect(versionMenuBox).not.toBeNull();
@@ -1278,23 +1319,28 @@ test("remote detail Track completes in place and makes the forked Tracked source
   await page.getByText("Remote Japanese work", { exact: true }).click();
   await expect(page).toHaveURL(/\/RJ00000051\?source=1/);
   const detailURL = page.url();
-  const trackedTab = page.locator('button[title^="Tracked:"]');
-  // Nothing is tracked yet, so there is no Tracked tab to browse.
-  await expect(page.locator('button[title="Example Remote: Available"]')).toBeVisible();
-  await expect(trackedTab).toHaveCount(0);
+  // Nothing is tracked yet, so there is no Tracked source to browse.
+  const expectTrackedSource = async (title: string | null) => {
+    const sources = await openDetailSources(page);
+    await expect(sources.locator('button[title="Example Remote: Available"]')).toBeVisible();
+    const tracked = sources.locator('button[title^="Tracked:"]');
+    if (title) await expect(tracked).toHaveAttribute("title", title);
+    else await expect(tracked).toHaveCount(0);
+    await closeDetailSources(page);
+  };
+  await expectTrackedSource(null);
 
   await runSourceAction(page, "Track");
 
   await expect.poll(() => trackControl.trackRequests).toHaveLength(1);
   await expect(page.getByText("Track workflow #91 queued.", { exact: true })).toBeVisible();
   expect(page.url()).toBe(detailURL);
-  await showWorkDetailTab(page, "Directory");
-  await expect(trackedTab).toHaveCount(0);
+  await expectTrackedSource(null);
 
   trackControl.status = "succeeded";
   await expect(page.getByText("Track workflow #91 completed for RJ00000051.", { exact: true })).toBeVisible();
   expect(page.url()).toBe(detailURL);
-  await expect(trackedTab).toHaveAttribute("title", "Tracked: Forked directory available");
+  await expectTrackedSource("Tracked: Forked directory available");
   let actions = await openSourceActions(page);
   await expect(actions.scope.getByRole(actions.role, { name: /^Track/ })).toBeDisabled();
   await actions.scope.getByRole(actions.role, { name: /^Untrack/ }).click();
@@ -1303,8 +1349,7 @@ test("remote detail Track completes in place and makes the forked Tracked source
   await actions.scope.getByRole(actions.role, { name: /^Confirm untrack/ }).click();
   await expect.poll(() => trackControl.untrackRequests).toHaveLength(1);
   await expect(page.getByText("Untracked RJ00000051 from Example Remote.", { exact: true })).toBeVisible();
-  await showWorkDetailTab(page, "Directory");
-  await expect(trackedTab).toHaveCount(0);
+  await expectTrackedSource(null);
   actions = await openSourceActions(page);
   await expect(actions.scope.getByRole(actions.role, { name: /^Track/ })).toBeEnabled();
   await expect(actions.scope.getByRole(actions.role, { name: /^Untrack/ })).toHaveCount(0);
@@ -1325,7 +1370,9 @@ test("persisted remote result opens the canonical detail with its remote source 
   await expect.poll(() => new URL(page.url()).searchParams.get("view")).toBe("remote");
   expect(new URL(page.url()).searchParams.get("source")).toBe("1");
   expect(new URL(page.url()).searchParams.get("remoteCode")).toBe("RJ00000051");
-  await expect(page.locator('button[title="Example Remote: Available"]')).toHaveAttribute("aria-pressed", "true");
+  const sources = await openDetailSources(page);
+  await expect(sources.locator('button[title="Example Remote: Available"]')).toHaveAttribute("aria-checked", "true");
+  await closeDetailSources(page);
   await expect(page.getByText("Previewing remote files from Example Remote.", { exact: true })).toBeVisible();
   expect(trackRequests).toEqual([]);
 });

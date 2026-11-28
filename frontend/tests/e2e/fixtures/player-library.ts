@@ -8,8 +8,12 @@ import type {
   LocalMediaRefreshResult,
   MediaCleanupResult,
   MediaItem,
+  MediaLyricsChoice,
   MediaProgress,
   MediaTextPreview,
+  PlaybackQueueResolution,
+  PlaybackQueueResolveItem,
+  TimedLyricsResult,
   RecentlyPlayedWorksResponse,
   RemoteFetchFileDecision,
   RemoteTrackRunStatus,
@@ -54,6 +58,7 @@ import {
   workflowRunDetailFixture,
   workflowRunFixture,
   workFixture,
+  withLocationFoldersFixture,
   workResolveFixture,
   worksPageFixture,
   type ApiErrorBody,
@@ -150,6 +155,102 @@ export const persistedTrack: PersistedPlayerTrack = {
 
 export const persistedPlayerTracks = new WeakMap<Page, PersistedPlayerTrack[]>();
 
+/** The work media a server would hold for the tracks a test persisted in the player queue. */
+function restoredMediaItemsFixture(page: Page, workId: number): MediaItem[] {
+  return (persistedPlayerTracks.get(page) ?? [])
+    .filter((track) => track.workId === workId)
+    .map((track) =>
+      mediaItemFixture({
+        id: track.mediaItemId,
+        title: track.title,
+        trackNo: 1,
+        sizeBytes: track.sizeBytes,
+        progress: track.progress,
+        locations: track.locations.map((location) =>
+          mediaLocationFixture({
+            id: location.locationId,
+            fileSourceId: location.sourceId,
+            fileSourceCode: "test",
+            fileSourceName: location.sourceName,
+            locationType: location.locationType,
+            path: `${track.workCode}/${track.title}`,
+            streamUrl: location.streamUrl,
+            sizeBytes: track.sizeBytes,
+            availability: location.availability,
+          }),
+        ),
+      }),
+    );
+}
+
+/**
+ * What the server resolves for a restored queue: every item of the given
+ * media, or of the persisted tracks, on its kept or first playback location;
+ * an item without one is unavailable, and an unknown item or work is missing.
+ */
+function resolvedQueueFixture(
+  page: Page,
+  body: { items: PlaybackQueueResolveItem[]; titlesOnly?: boolean },
+  mediaItems: MediaItem[],
+  workFor: (workId: number) => Work | null,
+): PlaybackQueueResolution {
+  const persisted = persistedPlayerTracks.get(page) ?? [];
+  const works = new Map<number, Work>();
+  const items = body.items.map((requested) => {
+    const missing = { ...requested, status: "missing" as const };
+    const queuedWork = workFor(requested.workId);
+    const media = mediaItems.length > 0 ? mediaItems : restoredMediaItemsFixture(page, requested.workId);
+    const item = media.find((candidate) => candidate.id === requested.mediaItemId);
+    if (!queuedWork || !item) return missing;
+    works.set(queuedWork.id, queuedWork);
+    const locations = item.playbackLocations ?? [];
+    const current = locations.find((location) => location.locationId === requested.locationId);
+    const location =
+      current && (requested.locationChosen || current.locationType === locations[0]?.locationType)
+        ? current
+        : locations[0];
+    if (!location) return { ...requested, status: "unavailable" as const };
+    const saved = persisted.find((track) => track.mediaItemId === item.id && track.workId === requested.workId);
+    const path = item.locations[0]?.path ?? item.title;
+    return {
+      ...requested,
+      status: "playable" as const,
+      track: {
+        mediaItemId: item.id,
+        workId: requested.workId,
+        locationId: location.locationId,
+        title: path.split("/").pop() || item.title,
+        kind: item.kind === "video" ? ("video" as const) : ("audio" as const),
+        folderPath: "",
+        locationType: location.locationType,
+        streamUrl: location.streamUrl,
+        availability: location.availability,
+        sizeBytes: item.sizeBytes,
+        durationSeconds: item.durationSeconds,
+        progress: item.progress,
+        locations,
+        lyricsChoices: (saved?.lyricsChoices ?? []).map((choice) => ({ ...choice })),
+        preferredLyricsMediaItemId: item.preferredLyricsMediaItemId ?? null,
+        lyricsOffsetMs: item.lyricsOffsetMs ?? 0,
+        lyricsPreferencePersistable: item.kind === "audio",
+      },
+    };
+  });
+  return {
+    items,
+    works: body.titlesOnly
+      ? []
+      : [...works.values()].map((queuedWork) => ({
+          id: queuedWork.id,
+          primaryCode: queuedWork.primaryCode,
+          title: queuedWork.title,
+          coverUrl: queuedWork.coverUrl,
+          circle: queuedWork.circle,
+          voiceActors: queuedWork.voiceActors ?? [],
+        })),
+  };
+}
+
 export const playerQueueStorageBaseKey = "kikoto:player-queue:v2";
 
 export const playerProgressStorageBaseKey = "kikoto:player-progress:v2";
@@ -233,6 +334,37 @@ function untrackResult(workId: number, sourceId: number): WorkSourceUntrackResul
   };
 }
 
+/**
+ * Answers the audio playback info of a library location as the server does: the
+ * file itself, or, for compatibility playback, an HLS playlist where the client
+ * declares audio HLS and one complete conversion where it does not.
+ */
+function audioPlaybackInfoFixture(locationId: string, url: URL) {
+  const capabilities = (url.searchParams.get("capabilities") ?? "").split(",").filter(Boolean);
+  const formats = capabilities.filter((capability) => capability !== "audio-hls");
+  const route = `/api/media/${locationId}`;
+  const base = { durationSeconds: 30, seekable: true };
+  if (url.searchParams.get("forceTranscode") !== "1") {
+    const query = new URLSearchParams({ profile: "audio" });
+    if (formats.length > 0) query.set("capabilities", formats.join(","));
+    return { ...base, delivery: "direct", conversion: "none", url: `${route}/stream?${query.toString()}` };
+  }
+  if (capabilities.includes("audio-hls")) {
+    return {
+      ...base,
+      delivery: "hls",
+      conversion: "transcode",
+      url: `${route}/hls/index.m3u8?v=fixture&profile=audio`,
+    };
+  }
+  return {
+    ...base,
+    delivery: "prepared",
+    conversion: "transcode",
+    url: `${route}/stream?profile=audio&forceTranscode=1`,
+  };
+}
+
 export async function mockApplication(
   page: Page,
   onWorksRequest?: (url: URL) => void,
@@ -245,6 +377,11 @@ export async function mockApplication(
 ) {
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
+    const audioPlayback = /^\/api\/media\/(\d+)\/playback$/.exec(url.pathname);
+    if (audioPlayback && url.searchParams.get("profile") === "audio") {
+      await route.fulfill({ json: audioPlaybackInfoFixture(audioPlayback[1], url) });
+      return;
+    }
     if (url.pathname === "/api/listening-sessions" && route.request().method() === "GET") {
       await route.fulfill({ json: { generation: 0 } });
       return;
@@ -504,7 +641,10 @@ export async function mockApplication(
           metadataSync: fixture.metadataSyncControl?.detailReady
             ? { status: "available", checkedAt: "2026-01-01T00:01:00Z" }
             : (fixture.detailMetadataSync ?? { status: "available", checkedAt: "" }),
-          mediaItems: url.searchParams.get("includeMedia") === "false" ? [] : mediaItems,
+          mediaItems:
+            url.searchParams.get("includeMedia") === "false"
+              ? []
+              : withLocationFoldersFixture(mediaItems, fixture.detailLocalFolders),
         }),
       });
       return;
@@ -530,36 +670,45 @@ export async function mockApplication(
         });
         return;
       }
-      const restoredTracks =
-        mediaItems.length > 0 ? [] : (persistedPlayerTracks.get(page) ?? []).filter((track) => track.workId === workId);
-      const restoredMediaItems = restoredTracks.map((track) =>
-        mediaItemFixture({
-          id: track.mediaItemId,
-          title: track.title,
-          trackNo: 1,
-          sizeBytes: track.sizeBytes,
-          progress: track.progress,
-          locations: track.locations.map((location) =>
-            mediaLocationFixture({
-              id: location.locationId,
-              fileSourceId: location.sourceId,
-              fileSourceCode: "test",
-              fileSourceName: location.sourceName,
-              locationType: location.locationType,
-              path: `${track.workCode}/${track.title}`,
-              streamUrl: location.streamUrl,
-              sizeBytes: track.sizeBytes,
-              availability: location.availability,
-            }),
-          ),
-        }),
-      );
       await route.fulfill({
         json: {
           workId,
           mediaWorkId: workId,
-          mediaItems: mediaItems.length > 0 ? mediaItems : restoredMediaItems,
+          mediaItems: withLocationFoldersFixture(
+            mediaItems.length > 0 ? mediaItems : restoredMediaItemsFixture(page, workId),
+            fixture.detailLocalFolders,
+          ),
         } satisfies ApiResponse<"getWorkMedia">,
+      });
+      return;
+    }
+    if (url.pathname === "/api/playback/queue/resolve" && route.request().method() === "POST") {
+      if (fixture.mediaBusy) {
+        await route.fulfill({
+          status: 503,
+          json: {
+            error: "database is busy; please retry",
+            code: "database_busy",
+            retryable: true,
+          } satisfies ApiErrorBody,
+        });
+        return;
+      }
+      const body = route.request().postDataJSON() as { items: PlaybackQueueResolveItem[]; titlesOnly?: boolean };
+      const fixtureWork = fixture.work ?? work;
+      const workFor = (workId: number) =>
+        workId === 1
+          ? fixtureWork
+          : workId > 1 && workId <= workCount
+            ? {
+                ...fixtureWork,
+                id: workId,
+                primaryCode: syntheticWorkCode("RJ", workId - 1),
+                title: `Mobile work ${workId}`,
+              }
+            : null;
+      await route.fulfill({
+        json: resolvedQueueFixture(page, body, mediaItems, workFor) satisfies ApiResponse<"resolvePlaybackQueue">,
       });
       return;
     }
@@ -639,23 +788,43 @@ export async function mockApplication(
       });
       return;
     }
+    if (url.pathname === "/api/lyrics/parse") {
+      const { text } = route.request().postDataJSON() as { text: string };
+      await route.fulfill({ json: mockTimedLyrics(text) });
+      return;
+    }
     const textPreviewMatch = url.pathname.match(/^\/api\/media\/(\d+)\/text$/);
     if (textPreviewMatch) {
       const locationID = Number(textPreviewMatch[1]);
+      const preview: MediaTextPreview =
+        locationID === 9
+          ? {
+              path: "lyrics.lrc",
+              content:
+                "[00:00.00]First line\n[00:05.00]Second line\n[00:10.00]Third line\n[00:15.00]Fourth line\n[00:20.00]Fifth line\n[00:25.00]Sixth line\n[00:30.00]Seventh line\n[00:35.00]Eighth line",
+            }
+          : { path: "notes.txt", content: "Synthetic notes" };
       await route.fulfill({
         json:
-          locationID === 9
-            ? ({
-                path: "lyrics.lrc",
-                content:
-                  "[00:00.00]First line\n[00:05.00]Second line\n[00:10.00]Third line\n[00:15.00]Fourth line\n[00:20.00]Fifth line\n[00:25.00]Sixth line\n[00:30.00]Seventh line\n[00:35.00]Eighth line",
-              } satisfies MediaTextPreview)
-            : ({ path: "notes.txt", content: "Synthetic notes" } satisfies MediaTextPreview),
+          url.searchParams.get("format") === "lyrics"
+            ? ({ ...mockTimedLyrics(preview.content), text: preview.content } satisfies TimedLyricsResult)
+            : preview,
       });
       return;
     }
     await route.fulfill({ status: 404, json: notMocked });
   });
+}
+
+/** The server's timed reading of LRC lines, for text the mock serves; other formats are not mocked. */
+function mockTimedLyrics(text: string): TimedLyricsResult {
+  const lines = text.split(/\r?\n/).flatMap((line) => {
+    const match = /^\[(\d+):(\d{2})(?:\.(\d+))?\](.*)$/.exec(line.trim());
+    if (!match) return [];
+    const fraction = Number(`0.${match[3] ?? "0"}`);
+    return [{ time: Number(match[1]) * 60 + Number(match[2]) + fraction, text: match[4].trim() }];
+  });
+  return { timed: lines.length > 0, lines, tags: [], sparse: false };
 }
 
 export async function seedPlayer(page: Page, track = persistedTrack, principalID: number | null = null) {
@@ -1256,6 +1425,16 @@ export function mediaFixture(id: number, title: string, path: string, kind: "aud
       }),
     ],
   });
+}
+
+/** An item whose locations carry the lyrics choices the server ranks for it. */
+export function withLyricsChoices(item: MediaItem, lyricsChoices: MediaLyricsChoice[]): MediaItem {
+  return { ...item, locations: item.locations.map((location) => ({ ...location, lyricsChoices })) };
+}
+
+/** An item whose locations carry the lyrics file the server's name matching picks for it. */
+export function withLyricsMatch(item: MediaItem, lyricsMatchMediaItemId: number): MediaItem {
+  return { ...item, locations: item.locations.map((location) => ({ ...location, lyricsMatchMediaItemId })) };
 }
 
 /** Switches the Library source through the phone source menu or the wide-layout source tabs. */

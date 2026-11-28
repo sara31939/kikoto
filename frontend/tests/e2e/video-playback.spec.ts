@@ -1,10 +1,11 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
-import type { MediaItem, MediaTextPreview, VideoPlaybackInfo } from "../../src/lib/api";
+import type { MediaItem, MediaLyricsChoice, VideoPlaybackInfo } from "../../src/lib/api";
 import type { ApiErrorBody } from "./fixtures/api";
 import { mediaFixture, mockApplication, silentWav, work } from "./fixtures/player-library";
 
-function videoFixture(id: number, title: string): MediaItem {
+/** A video whose location carries the lyrics choices the server ranks for it. */
+function videoFixture(id: number, title: string, lyricsChoices?: MediaLyricsChoice[]): MediaItem {
   const item = mediaFixture(id, title, `${work.primaryCode}/${title}`, "file");
   return {
     ...item,
@@ -15,12 +16,13 @@ function videoFixture(id: number, title: string): MediaItem {
       ...location,
       durationSeconds: 180,
       streamUrl: `/api/media/${id}/stream`,
+      lyricsChoices,
     })),
   };
 }
 
-async function mockLocalVideo(page: Page, otherItems: MediaItem[] = []) {
-  await mockApplication(page, undefined, false, 1, 0, [videoFixture(1, "example.avi"), ...otherItems]);
+async function mockLocalVideo(page: Page, otherItems: MediaItem[] = [], lyricsChoices?: MediaLyricsChoice[]) {
+  await mockApplication(page, undefined, false, 1, 0, [videoFixture(1, "example.avi", lyricsChoices), ...otherItems]);
   // Exercise the native-HLS branch through browser capability APIs. A generated
   // WAV supplies real media timing; this tests recovery, not codec decoding.
   await page.addInitScript(() => {
@@ -72,6 +74,46 @@ async function openVideo(page: Page) {
   await page.getByText("example.avi", { exact: true }).click();
   return page.getByLabel("Video preview, duration 3:00", { exact: true });
 }
+
+/** On the phone layout a video enters fullscreen when it starts, over the player's header. */
+async function leaveFullscreen(page: Page) {
+  await page.evaluate(async () => {
+    if (document.fullscreenElement) await document.exitFullscreen();
+  });
+}
+
+async function closePlayer(page: Page) {
+  await leaveFullscreen(page);
+  await page.getByRole("button", { name: "Close player", exact: true }).click();
+}
+
+/** Opens the video, which starts playing, and holds it paused at the start so positions are exact. */
+async function openPausedVideo(page: Page) {
+  const video = await openVideo(page);
+  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
+  await video.evaluate((element: HTMLVideoElement) => {
+    element.pause();
+    element.currentTime = 0;
+  });
+  await expect
+    .poll(() => video.evaluate((element: HTMLVideoElement) => element.paused && element.currentTime === 0))
+    .toBe(true);
+  await leaveFullscreen(page);
+  return video;
+}
+
+test("a folder that opens on a video offers Play folder, which plays its tracks from the video", async ({ page }) => {
+  await mockLocalVideo(page, [mediaFixture(2, "track.mp3", `${work.primaryCode}/track.mp3`, "audio")]);
+  await page.goto(`/${work.primaryCode}`);
+
+  // Opening the video itself shows the viewer, so the folder has its own way to play in order.
+  await page.getByRole("button", { name: "Play folder", exact: true }).click();
+  await expect(page.getByTestId("directory-file-row").filter({ hasText: "example.avi" })).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(page.getByLabel("Video preview, duration 3:00", { exact: true })).toHaveCount(0);
+});
 
 test("local video fallback and native HLS retry retain position and playback intent", async ({ page }) => {
   await mockLocalVideo(page);
@@ -163,38 +205,48 @@ test("busy local video preparation stops automatic retries and keeps manual reco
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
-test("a reopened video resumes where it stopped and can start over", async ({ page }) => {
+test("a reopened video offers to continue where it stopped, or to start over", async ({ page }) => {
   await mockLocalVideo(page);
   await mockDirectPlayback(page);
+  const prompt = page.getByRole("group", { name: "Continue from 0:42?", exact: true });
+
+  // A video without a stored position starts playing at once.
   let video = await openVideo(page);
-  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
+  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.paused)).toBe(false);
   await video.evaluate((element: HTMLVideoElement) => {
+    element.pause();
     element.currentTime = 42;
   });
   await expect.poll(() => video.evaluate(currentTime)).toBe(42);
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await closePlayer(page);
 
   video = await openVideo(page);
-  await expect(page.getByRole("status").filter({ hasText: "Resumed at 0:42" })).toBeVisible();
+  await prompt.getByRole("button", { name: "Continue", exact: true }).click();
+  await expect.poll(() => video.evaluate(currentTime)).toBeGreaterThanOrEqual(42);
+  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.paused)).toBe(false);
+  await video.evaluate((element: HTMLVideoElement) => {
+    element.pause();
+    element.currentTime = 42;
+  });
   await expect.poll(() => video.evaluate(currentTime)).toBe(42);
-  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.paused)).toBe(true);
+  await closePlayer(page);
 
-  await page.getByRole("button", { name: "Start over", exact: true }).click();
-  await expect.poll(() => video.evaluate(currentTime)).toBe(0);
-  await expect(page.getByText("Resumed at 0:42")).toHaveCount(0);
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  video = await openVideo(page);
+  await prompt.getByRole("button", { name: "Start over", exact: true }).click();
+  await expect(prompt).toHaveCount(0);
+  await expect.poll(() => video.evaluate(currentTime)).toBeLessThan(5);
+  await closePlayer(page);
 
   video = await openVideo(page);
   await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
-  await expect(page.getByText(/Resumed at/)).toHaveCount(0);
-  expect(await video.evaluate(currentTime)).toBe(0);
+  await expect(page.getByRole("button", { name: "Continue", exact: true })).toHaveCount(0);
 });
 
-test("video stage shortcuts control the video while the dialog keeps its file keys", async ({ page }) => {
+test("video stage shortcuts control the video, and the header steps through the folder's videos", async ({ page }) => {
   await mockLocalVideo(page, [videoFixture(5, "second.avi")]);
   await mockDirectPlayback(page);
-  const video = await openVideo(page);
-  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
+  const video = await openPausedVideo(page);
+  await expect(page.getByText("1 of 2", { exact: true })).toBeVisible();
   await page.getByRole("group", { name: "Video player", exact: true }).focus();
 
   await page.keyboard.press("ArrowRight");
@@ -219,28 +271,38 @@ test("video stage shortcuts control the video while the dialog keeps its file ke
   await page.keyboard.press("Shift+Comma");
   await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.playbackRate)).toBe(1.25);
 
-  // Outside the video stage the arrow keys still step through the folder's videos.
-  await page.getByRole("dialog").focus();
-  await page.keyboard.press("ArrowRight");
+  // The arrow keys seek, so the header's buttons step through the folder's videos.
+  await expect(page.getByRole("button", { name: "Previous video", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Next video", exact: true }).click();
   await expect(page.getByRole("heading", { name: "second.avi", exact: true })).toBeVisible();
+  await expect(page.getByText("2 of 2", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Next video", exact: true })).toBeDisabled();
 });
 
 test("same-name WebVTT and SRT files load as subtitle tracks", async ({ page }) => {
-  const subtitles: Record<number, MediaTextPreview> = {
-    2: { path: "example.srt", content: "1\r\n00:00:01,000 --> 00:00:03,500\r\nSynthetic SRT line\r\n" },
-    3: { path: "example.avi.vtt", content: "WEBVTT\n\n00:00:02.000 --> 00:00:04.000\nSynthetic WebVTT line\n" },
+  // The server converts each sidecar to WebVTT.
+  const subtitles: Record<number, string> = {
+    2: "WEBVTT\n\n00:00:01.000 --> 00:00:03.500\nSynthetic SRT line\n",
+    3: "WEBVTT\n\n00:00:02.000 --> 00:00:04.000\nSynthetic WebVTT line\n",
   };
-  await mockLocalVideo(page, [
-    mediaFixture(2, "example.srt", `${work.primaryCode}/example.srt`, "text"),
-    mediaFixture(3, "example.avi.vtt", `${work.primaryCode}/example.avi.vtt`, "text"),
-    mediaFixture(4, "other.srt", `${work.primaryCode}/other.srt`, "text"),
-  ]);
+  await mockLocalVideo(
+    page,
+    [
+      mediaFixture(2, "example.srt", `${work.primaryCode}/example.srt`, "text"),
+      mediaFixture(3, "example.avi.vtt", `${work.primaryCode}/example.avi.vtt`, "text"),
+      mediaFixture(4, "other.srt", `${work.primaryCode}/other.srt`, "text"),
+    ],
+    [
+      { lyricsMediaItemId: 3, locationId: 3, reason: "exact_sidecar" },
+      { lyricsMediaItemId: 2, locationId: 2, reason: "same_stem" },
+    ],
+  );
   await mockDirectPlayback(page);
   const textRequests: number[] = [];
-  await page.route(/\/api\/media\/\d+\/text$/, (route) => {
-    const id = Number(/\/api\/media\/(\d+)\/text$/.exec(route.request().url())?.[1]);
+  await page.route(/\/api\/media\/\d+\/text\?format=webvtt$/, (route) => {
+    const id = Number(/\/api\/media\/(\d+)\/text/.exec(route.request().url())?.[1]);
     textRequests.push(id);
-    return route.fulfill({ json: subtitles[id] ?? { path: "other.srt", content: "" } });
+    return route.fulfill({ contentType: "text/vtt", body: subtitles[id] ?? "WEBVTT\n" });
   });
   const video = await openVideo(page);
   await expect
@@ -289,11 +351,10 @@ test("choosing another audio track keeps the position and the paused or playing 
       } satisfies VideoPlaybackInfo,
     });
   });
-  const video = await openVideo(page);
+  const video = await openPausedVideo(page);
   const menu = page.getByRole("combobox", { name: "Audio track", exact: true });
   await expect(menu).toHaveValue("1");
   await expect(menu.getByRole("option")).toHaveText(["Track 1 · Japanese · Stereo", "Track 2 · Commentary · 5.1"]);
-  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
   await video.evaluate((element: HTMLVideoElement) => {
     element.currentTime = 42;
   });
@@ -329,7 +390,7 @@ test("choosing another audio track keeps the position and the paused or playing 
     .toEqual({ source: "stream", paused: false, positionRestored: true });
 
   // The choice lasts while the page does: reopening the video asks for the same track.
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await closePlayer(page);
   const before = requested.length;
   await page.getByText("example.avi", { exact: true }).click();
   await expect.poll(() => requested.length).toBeGreaterThan(before);
@@ -339,15 +400,15 @@ test("choosing another audio track keeps the position and the paused or playing 
 });
 
 test("ASS files and embedded subtitle streams load as subtitle tracks", async ({ page }) => {
-  const ass = [
-    "[Script Info]",
-    "[Events]",
-    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-    "Dialogue: 0,0:00:01.00,0:00:02.50,Default,,0,0,0,,{\\an8}Synthetic\\NASS line",
-  ].join("\n");
-  await mockLocalVideo(page, [mediaFixture(2, "example.ass", `${work.primaryCode}/example.ass`, "text")]);
-  await page.route(/\/api\/media\/\d+\/text$/, (route) =>
-    route.fulfill({ json: { path: "example.ass", content: ass } satisfies MediaTextPreview }),
+  // The server keeps the timing and text of ASS dialogue as WebVTT.
+  const ass = "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nSynthetic\nASS line\n";
+  await mockLocalVideo(
+    page,
+    [mediaFixture(2, "example.ass", `${work.primaryCode}/example.ass`, "text")],
+    [{ lyricsMediaItemId: 2, locationId: 2, reason: "same_stem" }],
+  );
+  await page.route(/\/api\/media\/\d+\/text\?format=webvtt$/, (route) =>
+    route.fulfill({ contentType: "text/vtt", body: ass }),
   );
   await page.route("**/api/media/1/playback*", (route) =>
     route.fulfill({
@@ -429,8 +490,7 @@ test("the on-screen back and forward buttons seek by the playback settings", asy
   await mockLocalVideo(page);
   await mockDirectPlayback(page);
   await storeSeekSteps(page, 7, 20);
-  const video = await openVideo(page);
-  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
+  const video = await openPausedVideo(page);
 
   await page.getByRole("button", { name: "Forward 20 seconds", exact: true }).click();
   await expect.poll(() => video.evaluate(currentTime)).toBe(20);
@@ -449,8 +509,7 @@ test("the on-screen back and forward buttons seek by the playback settings", asy
 test("double taps on either side of the video seek and add up", async ({ page }) => {
   await mockLocalVideo(page);
   await mockDirectPlayback(page);
-  const video = await openVideo(page);
-  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
+  const video = await openPausedVideo(page);
   await video.evaluate((element: HTMLVideoElement) => {
     element.currentTime = 100;
   });
@@ -491,14 +550,13 @@ test("the speed menu sets the playback rate and shows the speed notice", async (
 });
 
 test("the subtitle menu shows one track and extracts an embedded stream only once chosen", async ({ page }) => {
-  await mockLocalVideo(page, [mediaFixture(2, "example.srt", `${work.primaryCode}/example.srt`, "text")]);
-  await page.route(/\/api\/media\/\d+\/text$/, (route) =>
-    route.fulfill({
-      json: {
-        path: "example.srt",
-        content: "1\r\n00:00:01,000 --> 00:00:03,500\r\nSynthetic SRT line\r\n",
-      } satisfies MediaTextPreview,
-    }),
+  await mockLocalVideo(
+    page,
+    [mediaFixture(2, "example.srt", `${work.primaryCode}/example.srt`, "text")],
+    [{ lyricsMediaItemId: 2, locationId: 2, reason: "same_stem" }],
+  );
+  await page.route(/\/api\/media\/\d+\/text\?format=webvtt$/, (route) =>
+    route.fulfill({ contentType: "text/vtt", body: "WEBVTT\n\n00:00:01.000 --> 00:00:03.500\nSynthetic SRT line\n" }),
   );
   await page.route("**/api/media/1/playback*", (route) =>
     route.fulfill({
@@ -566,8 +624,7 @@ test("the subtitle menu shows one track and extracts an embedded stream only onc
 test("fullscreen holds the video stage, and its menus show inside it @desktop", async ({ page }) => {
   await mockLocalVideo(page);
   await mockDirectPlayback(page);
-  const video = await openVideo(page);
-  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
+  const video = await openPausedVideo(page);
   const fullscreenLabel = () => page.evaluate(() => document.fullscreenElement?.getAttribute("aria-label") ?? null);
 
   await page.getByRole("button", { name: "Full screen", exact: true }).click();

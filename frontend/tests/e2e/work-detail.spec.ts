@@ -8,6 +8,7 @@ import {
   mediaFixture,
   seedPlayer,
   silentWav,
+  withLyricsChoices,
 } from "./fixtures/player-library";
 import type { LocalMediaRefreshResult, MaintenanceWorkPage, Work, WorkTranslation } from "../../src/lib/api";
 import type { PlaybackReport } from "../../src/lib/playbackReportApi";
@@ -21,7 +22,13 @@ import {
   workflowRunFixture,
 } from "./fixtures/api";
 import { playbackReportResultFixture } from "./fixtures/playback-reports";
-import { openWorkMetadataEditor } from "./fixtures/work-detail";
+import {
+  closeDetailSources,
+  openDetailSources,
+  openDirectoryEditions,
+  openWorkMetadataEditor,
+} from "./fixtures/work-detail";
+import { showFullWorkCards } from "./fixtures/library-view";
 
 test("selected metadata title and introduction follow playback without changing directory edition", async ({
   page,
@@ -132,6 +139,10 @@ test("unknown routes and missing work codes render not found states", async ({ p
   await page.goto("/missing-route");
   await expect(page.getByRole("heading", { name: "Page not found" })).toBeVisible();
 
+  // A path under a known page is not found too, and the not-found state is the page's only content.
+  await page.goto("/system/missing-tab");
+  await expect(page.getByRole("main").getByRole("heading", { level: 2 })).toHaveText(["Page not found"]);
+
   await page.goto("/RJ00000054");
   await expect(page.getByRole("heading", { name: "Work not found" })).toBeVisible();
   await expect(page.getByText("Loading RJ00000054...")).toHaveCount(0);
@@ -229,6 +240,7 @@ test("a library card rates its work and follows a rating set in work detail", as
     }
   });
   await mockApplication(page, undefined, false, 1, 0, [], undefined, { authenticated: true });
+  await showFullWorkCards(page);
   await page.goto("/");
   const card = page.getByTestId("work-card").filter({ hasText: "Tagged mobile work" });
 
@@ -245,7 +257,41 @@ test("a library card rates its work and follows a rating set in work detail", as
   expect(ratings).toEqual([2, 5]);
 });
 
-test("a lone local source is named in the directory header until the viewer always shows its tab", async ({ page }) => {
+test("a phone names the shown source in the detail tab row and lists its sources in a menu", async ({ page }) => {
+  const mediaItems = [
+    mediaItemFixture({
+      id: 1,
+      title: "track.mp3",
+      locations: [mediaLocationFixture({ id: 1, fileSourceName: "Main local library", path: "RJ00000000/track.mp3" })],
+    }),
+  ];
+  await mockApplication(page, undefined, false, 1, 0, mediaItems, undefined, { authenticated: true });
+  await page.goto("/");
+  await page.getByText("Tagged mobile work", { exact: true }).click();
+
+  // The Directory has no source row of its own; the tab row names the source.
+  const directory = page.getByTestId("directory-panel");
+  await expect(directory.getByText("track.mp3", { exact: true })).toBeVisible();
+  await expect(directory.getByRole("button", { name: /^(Local|Tracked)/ })).toHaveCount(0);
+  await page.getByRole("button", { name: "Info", exact: true }).click();
+  const sourceButton = page.getByRole("button", { name: "Directory source: Local", exact: true });
+  await expect(sourceButton).toBeVisible();
+
+  // From Info, the source opens the Directory with its source menu, which
+  // lists the sources by name without visibility choices and leaves out the
+  // Tracked placeholder that has nothing to browse.
+  const sources = await openDetailSources(page);
+  await expect(directory).toBeVisible();
+  await expect(sources.getByRole("radio")).toHaveCount(1);
+  await expect(sources.locator('button[title="Local: Local files available"]')).toHaveAttribute("aria-checked", "true");
+  await expect(sources.getByText("Main local library")).toHaveCount(0);
+  await expect(sources.getByRole("radiogroup", { name: "Local visibility" })).toHaveCount(0);
+  await closeDetailSources(page);
+});
+
+test("@desktop a lone local source is named in the directory header until the viewer always shows its tab", async ({
+  page,
+}) => {
   const mediaItems = [
     mediaItemFixture({
       id: 1,
@@ -263,7 +309,6 @@ test("a lone local source is named in the directory header until the viewer alwa
   await expect(directory.getByRole("button", { name: /^(Local|Tracked)/ })).toHaveCount(0);
 
   // The viewer can always show the lone tab, or show the hidden Tracked placeholder.
-  // A compact detail keeps the source controls in its Directory tab menu.
   await page.getByRole("button", { name: "Source tab visibility", exact: true }).click();
   await page.getByRole("radiogroup", { name: "Local visibility" }).getByRole("radio", { name: "Always show" }).click();
   await expect(directory.locator('button[title="Local: Local files available"]')).toHaveAttribute(
@@ -347,20 +392,27 @@ test("directory rows wrap long unbroken file names without horizontal overflow",
   ).toEqual({ fits: true, whiteSpace: "normal" });
   const audioRow = page.getByTestId("directory-file-row").filter({ hasText: longTitle });
   const imageRow = page.getByTestId("directory-file-row").filter({ hasText: imageTitle });
-  await expect(audioRow.getByText("0:10", { exact: true })).toBeVisible();
+  // A phone shows the duration on the size line, leaving the name the row's width.
+  const audioDuration = audioRow.getByText("0:10", { exact: true }).locator("visible=true");
+  await expect(audioDuration).toBeVisible();
   await expect(imageRow.getByText("2.0 KB", { exact: true })).toBeVisible();
-  const [audioTitleBox, audioMetaBox] = await Promise.all([
+  const [audioTitleBox, audioMetaBox, audioDurationBox] = await Promise.all([
     fileName.boundingBox(),
-    audioRow.getByText("12 B", { exact: true }).boundingBox(),
+    // The size follows the duration's separator on the same line.
+    audioRow.getByText("12 B").boundingBox(),
+    audioDuration.boundingBox(),
   ]);
   expect(audioTitleBox).not.toBeNull();
   expect(audioMetaBox).not.toBeNull();
+  expect(audioDurationBox).not.toBeNull();
   expect(audioMetaBox!.y).toBeGreaterThan(audioTitleBox!.y);
+  expect(Math.abs(audioDurationBox!.y - audioMetaBox!.y)).toBeLessThan(4);
 
   // A phone stops a long name at two lines until the viewer asks for full names.
   const cutShort = () => fileName.evaluate((element) => element.scrollHeight > element.clientHeight + 1);
   expect(await cutShort()).toBe(true);
-  const fullNames = page.getByTestId("directory-panel").getByRole("button", { name: "Full names", exact: true });
+  // Full names sits at the end of the Info and Directory row.
+  const fullNames = page.getByRole("button", { name: "Full names", exact: true });
   await fullNames.click();
   await expect(fullNames).toHaveAttribute("aria-pressed", "true");
   expect(await cutShort()).toBe(false);
@@ -372,7 +424,9 @@ test("directory rows wrap long unbroken file names without horizontal overflow",
 test("directory folds matched lyrics into the audio row while preserving text preview", async ({ page }) => {
   const lyricsWork = { ...work, primaryCode: "RJ00000000", title: "Lyrics attachment work" };
   const mediaItems = [
-    mediaFixture(1, "01.mp3", "library/RJ00000000/Main/01.mp3", "audio"),
+    withLyricsChoices(mediaFixture(1, "01.mp3", "library/RJ00000000/Main/01.mp3", "audio"), [
+      { lyricsMediaItemId: 9, locationId: 9, reason: "same_stem" },
+    ]),
     mediaFixture(9, "01.lrc", "library/RJ00000000/Main/01.lrc", "text"),
     mediaFixture(10, "notes.txt", "library/RJ00000000/Main/notes.txt", "text"),
   ];
@@ -498,6 +552,91 @@ test("image viewer steps through the folder's images and confirms a cover change
   await coverViewer.getByRole("button", { name: "Confirm cover", exact: true }).click();
   await expect.poll(() => coverOverrides).toEqual([{ locationId: 2 }]);
   await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+test("@desktop image viewer zooms to any scale with the wheel and returns to fit", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const mediaItems = [mediaFixture(1, "01.mp3", "RJ00000000/Main/01.mp3", "audio"), imageFixture(2, "scan.png")];
+  await mockApplication(page, undefined, false, 1, 0, mediaItems, undefined, { authenticated: true });
+  await page.route("**/api/media/2/asset**", (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200"><rect width="100%" height="100%" fill="#888"/></svg>',
+    }),
+  );
+  await page.goto("/RJ00000000");
+  await page.getByRole("button", { name: "Show folders" }).click();
+  await page
+    .getByRole("dialog", { name: "Folders" })
+    .getByRole("button", { name: /^Images/ })
+    .click();
+  await page.getByTestId("directory-file-row").filter({ hasText: "scan.png" }).click();
+
+  const viewer = page.getByRole("dialog", { name: "scan.png" });
+  const image = viewer.getByRole("img", { name: "scan.png" });
+  await expect(viewer.getByText(/1600 × 1200/)).toBeVisible();
+  // Layout width ignores the dialog's opening zoom transform.
+  const layoutWidth = () => image.evaluate((element) => element.clientWidth);
+  const fitted = await layoutWidth();
+  expect(fitted).toBeLessThan(1600);
+
+  // Each wheel step zooms a little further, past the fitted size but not straight to actual size.
+  const box = (await image.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, -100);
+  await expect(viewer.getByRole("button", { name: "Fit to window" })).toBeVisible();
+  await expect.poll(layoutWidth).toBeGreaterThan(fitted);
+  const stepped = await layoutWidth();
+  expect(stepped).toBeLessThan(1600);
+  await page.mouse.wheel(0, -100);
+  await expect.poll(layoutWidth).toBeGreaterThan(stepped);
+
+  await page.keyboard.press("0");
+  await expect(viewer.getByRole("button", { name: "Actual size" })).toBeVisible();
+  await expect.poll(layoutWidth).toBe(fitted);
+});
+
+test("image viewer pinches to any scale on phones", async ({ page }) => {
+  const mediaItems = [mediaFixture(1, "01.mp3", "RJ00000000/Main/01.mp3", "audio"), imageFixture(2, "scan.png")];
+  await mockApplication(page, undefined, false, 1, 0, mediaItems, undefined, { authenticated: true });
+  await page.route("**/api/media/2/asset**", (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200"><rect width="100%" height="100%" fill="#888"/></svg>',
+    }),
+  );
+  await page.goto("/RJ00000000");
+  await page.getByRole("button", { name: "Show folders" }).click();
+  await page
+    .getByRole("dialog", { name: "Folders" })
+    .getByRole("button", { name: /^Images/ })
+    .click();
+  await page.getByTestId("directory-file-row").filter({ hasText: "scan.png" }).click();
+
+  const viewer = page.getByRole("dialog", { name: "scan.png" });
+  const image = viewer.getByRole("img", { name: "scan.png" });
+  await expect(viewer.getByText(/1600 × 1200/)).toBeVisible();
+  const layoutWidth = () => image.evaluate((element) => element.clientWidth);
+  const fitted = await layoutWidth();
+
+  // Two fingers spreading apart from the middle of the image zoom it in step with the gesture.
+  const box = (await image.boundingBox())!;
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  const touch = await page.context().newCDPSession(page);
+  const fingers = (spread: number) => [
+    { x: x - spread, y, id: 1 },
+    { x: x + spread, y, id: 2 },
+  ];
+  await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: fingers(20) });
+  for (const spread of [30, 40, 50, 60]) {
+    await touch.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: fingers(spread) });
+  }
+  await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  await expect(viewer.getByRole("button", { name: "Fit to window" })).toBeVisible();
+  await expect.poll(layoutWidth).toBeGreaterThan(fitted * 2.5);
+  await expect.poll(layoutWidth).toBeLessThan(fitted * 3.5);
 });
 
 test("@desktop file viewer opens above the floating full player", async ({ page }) => {
@@ -670,21 +809,11 @@ test("work detail summarizes DLsite stats in the hero and groups active source i
   // The stat row scrolls sideways only, so a vertical swipe across it scrolls the page.
   await expect(dlsiteInfo).toHaveCSS("overflow-y", "hidden");
   const sourceInfo = page.getByTestId("active-source-info");
-  await expect(sourceInfo.getByText("Source info", { exact: true })).toBeVisible();
-  await expect(sourceInfo.getByText("Main local library", { exact: true })).toBeVisible();
-  await expect(sourceInfo.getByText("Playable duration", { exact: true })).toBeVisible();
-  await expect(sourceInfo.getByText("1m", { exact: true })).toBeVisible();
-  await expect(page.getByTestId("source-info-audio-row")).toContainText(
-    "Playable1Playable duration1m(All playable durations measured)",
-  );
-  await expect(page.getByTestId("source-info-files-row")).toContainText("Files1Size2.0 KB(All file sizes measured)");
-  const sourcePrimaryMetrics = page.locator("[data-source-primary-metrics]");
-  await expect(sourcePrimaryMetrics).toHaveCount(2);
-  expect(
-    await sourcePrimaryMetrics.evaluateAll((elements) =>
-      elements.every((element) => element.getBoundingClientRect().height <= 18),
-    ),
-  ).toBe(true);
+  // The card names the source and its file figures; the Hero carries the duration and the
+  // source tabs an available source's status.
+  await expect(sourceInfo).toHaveText("Main local libraryPlayable1Files1Size2.0 KB");
+  const sourceMetrics = sourceInfo.locator("dl");
+  expect((await sourceMetrics.boundingBox())!.height).toBeLessThanOrEqual(18);
 });
 
 test("work detail prompts for missing metadata and refreshes after sync completes", async ({ page }) => {
@@ -719,8 +848,10 @@ test("work detail prompts for missing metadata and refreshes after sync complete
 
   await expect.poll(() => metadataSyncControl.statusRequests).toBeGreaterThan(0);
   await expect.poll(() => metadataSyncControl.detailRequests).toBeGreaterThan(initialDetailRequests);
-  await expect(page.getByRole("group", { name: "Metadata language", exact: true })).toContainText("Japanese");
   await expect(page.getByTestId("metadata-sync-notice")).toHaveCount(0);
+  // A work with one metadata language and one edition shows no language or edition chip.
+  await expect(page.getByRole("button", { name: "Metadata language", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Directory edition/ })).toHaveCount(0);
 });
 
 test("work detail names the remote source that filled a work DLsite does not have", async ({ page }) => {
@@ -807,6 +938,9 @@ test("local work detail lists Origin first and expands from local to all edition
     },
   ];
   await mockApplication(page, undefined, false, 1, 0, [], undefined, {
+    // The metadata editor entry shows only to an account that edits metadata.
+    authenticated: true,
+    permissions: ["library:read", "playback:use", "library:write"],
     detailTranslations,
     detailMetadataPresentation: {
       defaultVariantKey: "english-metadata",
@@ -820,7 +954,7 @@ test("local work detail lists Origin first and expands from local to all edition
   await page.getByText(work.title, { exact: true }).click();
 
   const metadataTrigger = page.getByRole("button", { name: "Metadata language", exact: true });
-  // A phone header shows the language code and keeps the full name for assistive technology.
+  // A phone title row shows the language code and keeps the full name for assistive technology.
   await expect(metadataTrigger).toHaveText("EN");
   await expect(metadataTrigger).toHaveAccessibleDescription("English");
   await metadataTrigger.click();
@@ -834,11 +968,13 @@ test("local work detail lists Origin first and expands from local to all edition
   );
   await page.keyboard.press("Escape");
 
-  const editionTrigger = page.getByRole("button", { name: "Directory edition", exact: true });
-  // The language chip beside it names the language, so a phone shows only the edition kind.
-  await expect(editionTrigger).toHaveText("Origin");
-  await expect(editionTrigger).toHaveAccessibleDescription("Origin · Japanese");
-  await editionTrigger.click();
+  // A phone names the shown edition's language beside the source in the Directory row.
+  const sourceTrigger = page.getByRole("button", {
+    name: /^Directory source: .+, Directory edition: Origin · Japanese$/,
+  });
+  await expect(sourceTrigger).toContainText("JA");
+  await sourceTrigger.click();
+  await page.getByRole("button", { name: /^Directory edition/ }).click();
   const versionMenu = page.getByRole("dialog", { name: "Directory edition", exact: true });
   await expect(versionMenu.getByRole("group", { name: "Japanese versions" })).toBeVisible();
   await expect(versionMenu.getByRole("group", { name: "English versions" })).toBeVisible();
@@ -1032,7 +1168,7 @@ for (const update of ["progress save", "directory refresh", "cancelled directory
       await page.getByRole("button", { name: "Collapse player", exact: true }).click();
       await page.getByText(work.title, { exact: true }).click();
       await expect(page.getByText("original.mp3", { exact: true })).toBeVisible();
-      await page.getByRole("button", { name: "Directory edition", exact: true }).click();
+      await openDirectoryEditions(page);
       await page.getByRole("menuitemradio", { name: /RJ00000001/ }).click();
       await expect.poll(() => editionRequests).toBe(1);
       await expect(page.getByTestId("directory-skeleton")).toBeVisible();
@@ -1057,7 +1193,7 @@ for (const update of ["progress save", "directory refresh", "cancelled directory
         });
         await expect.poll(() => refreshRequests).toBe(1);
         if (update === "cancelled directory recovery") {
-          await page.getByRole("button", { name: "Directory edition", exact: true }).click();
+          await openDirectoryEditions(page);
           await page.getByRole("menuitemradio", { name: /RJ00000000/ }).click();
           await expect(page.getByText("original.mp3", { exact: true })).toBeVisible();
         }
@@ -1085,7 +1221,9 @@ for (const update of ["progress save", "directory refresh", "cancelled directory
   });
 }
 
-test("mobile work detail keeps tags in the hero and work-code utilities together", async ({ page }) => {
+test("mobile work detail keeps the work code in the header and leads the tag row with personal tags", async ({
+  page,
+}) => {
   const detailWork: Work = {
     ...work,
     dlsiteUrl: "https://example.invalid/work/RJ00000000",
@@ -1125,37 +1263,48 @@ test("mobile work detail keeps tags in the hero and work-code utilities together
 
   const detail = page.getByRole("main");
   await expect(detail.getByRole("button", { name: "Example Voice", exact: true })).toBeVisible();
-  // Provider tags and personal tags share one hero row, with personal tags after provider tags.
+  // The phone header carries the work code, so it sits above the title.
+  const [workCodeBox, titleBox] = await Promise.all([
+    workCodeActions.boundingBox(),
+    detail.getByRole("heading", { name: detailWork.title }).boundingBox(),
+  ]);
+  expect(workCodeBox!.y + workCodeBox!.height).toBeLessThanOrEqual(titleBox!.y);
+  // One hero tag row leads with personal tags and ends with the tag editor.
   const providerTag = detail
     .getByRole("list", { name: "Tags", exact: true })
     .getByRole("button", { name: "Example tag" });
   const personalTag = detail.getByRole("list", { name: "My tags", exact: true }).getByText("Personal tag");
+  const editTags = detail.getByRole("button", { name: "Edit tags", exact: true });
   await expect(providerTag).toBeVisible();
   await expect(personalTag).toBeVisible();
-  await expect(detail.getByRole("button", { name: "Edit tags", exact: true })).toBeVisible();
-  const [providerTagBox, personalTagBox, statsBox] = await Promise.all([
+  await expect(editTags).toBeVisible();
+  const [providerTagBox, personalTagBox, editTagsBox, statsBox] = await Promise.all([
     providerTag.boundingBox(),
     personalTag.boundingBox(),
+    editTags.boundingBox(),
     detail.getByTestId("dlsite-info").boundingBox(),
   ]);
   expect(providerTagBox).not.toBeNull();
   expect(personalTagBox).not.toBeNull();
+  expect(editTagsBox).not.toBeNull();
   expect(statsBox).not.toBeNull();
+  expect(personalTagBox!.x).toBeLessThan(providerTagBox!.x);
+  expect(editTagsBox!.x).toBeGreaterThan(providerTagBox!.x);
   expect(
-    personalTagBox!.y > providerTagBox!.y ||
-      (personalTagBox!.y === providerTagBox!.y && personalTagBox!.x > providerTagBox!.x),
-  ).toBe(true);
+    Math.abs(personalTagBox!.y + personalTagBox!.height / 2 - (editTagsBox!.y + editTagsBox!.height / 2)),
+  ).toBeLessThan(4);
   expect(statsBox!.y).toBeGreaterThan(personalTagBox!.y);
 
   await page.getByRole("button", { name: "Info", exact: true }).click();
   await expect(detail.getByTestId("active-source-info")).toBeVisible();
 });
 
-test("mobile work detail folds a long title and hides work details until the viewer shows them", async ({ page }) => {
+test("mobile work detail folds a long title, marks a work without tags, and hides work details", async ({ page }) => {
   const longTitle = Array.from({ length: 12 }, (_, index) => `Example long title part ${index + 1}`).join(" ");
   const detailWork: Work = {
     ...work,
     title: longTitle,
+    tags: [],
     voiceActors: ["Example Voice"],
     voiceCredits: [{ personId: 7, routeKey: "00000001", displayName: "Example Voice" }],
   };
@@ -1163,6 +1312,7 @@ test("mobile work detail folds a long title and hides work details until the vie
   await page.goto(`/${detailWork.primaryCode}`);
 
   const detail = page.getByRole("main");
+  await expect(detail.getByText("No tags", { exact: true })).toBeVisible();
   const title = detail.getByRole("heading", { name: longTitle });
   const expandTitle = detail.getByRole("button", { name: "Show full title" });
   await expect(expandTitle).toHaveAttribute("aria-expanded", "false");
@@ -1171,9 +1321,11 @@ test("mobile work detail folds a long title and hides work details until the vie
   await expect(detail.getByRole("button", { name: "Collapse title" })).toHaveAttribute("aria-expanded", "true");
   expect((await title.boundingBox())!.height).toBeGreaterThan(foldedHeight);
 
+  // Hiding the details keeps the title on one line beside the toggle.
   const voice = detail.getByRole("button", { name: "Example Voice", exact: true });
   await detail.getByRole("button", { name: "Hide work details" }).click();
-  await expect(title).toHaveCount(0);
+  await expect(title).toBeVisible();
+  expect((await title.boundingBox())!.height).toBeLessThan(foldedHeight);
   await expect(voice).toHaveCount(0);
   await expect(detail.getByTestId("dlsite-info")).toHaveCount(0);
   await expect(detail.getByTestId("hero-actions")).toBeVisible();
@@ -1182,7 +1334,7 @@ test("mobile work detail folds a long title and hides work details until the vie
   await page.reload();
   const showDetails = detail.getByRole("button", { name: "Show work details" });
   await expect(showDetails).toHaveAttribute("aria-expanded", "false");
-  await expect(title).toHaveCount(0);
+  await expect(voice).toHaveCount(0);
   await showDetails.click();
   await expect(title).toBeVisible();
   await expect(voice).toBeVisible();

@@ -28,7 +28,12 @@ export const alwaysRun = ["plan", "style"];
 // runs, and it formats and tests every script, so one that only Style or no
 // job uses selects nothing. An unlisted script selects every job.
 export const scriptJobs = {
+  "check-api-errors.go": ["backend"],
+  "check-go-dropped-errors.go": ["backend"],
   "check-go-format.go": ["backend"],
+  "check-httpapi-sql.go": ["backend"],
+  "check-httpapi-sql_test.go": ["backend"],
+  "httpapi-sql-baseline.json": ["backend"],
   "golangci-lint.yml": ["backend"],
   "go-test-shard.mjs": ["backend"],
   "go-test-durations.json": ["backend"],
@@ -36,6 +41,10 @@ export const scriptJobs = {
   "production-browser-smoke.mjs": ["production"],
   "smoke.mjs": ["dev_smoke"],
   "check-doc-links.mjs": [],
+  "check-duplicate-helpers.mjs": [],
+  "duplicate-helpers-baseline.json": [],
+  "check-e2e-locators.mjs": [],
+  "check-hook-deps-suppressions.mjs": [],
   "check-doc-locales.mjs": [],
   "check-playwright-image.mjs": [],
   "check-pr-description.mjs": [],
@@ -50,7 +59,7 @@ export const scriptJobs = {
 };
 
 const documentation =
-  /^(docs\/|(README(?:\.[\w-]+)?\.md|AGENTS\.md|CONTRIBUTING\.md|DESIGN\.md|SECURITY\.md|PRIVACY\.md|LICENSE)$)/;
+  /^(docs\/|(?:[\w-]+\/)*AGENTS\.md$|(README(?:\.[\w-]+)?\.md|CONTRIBUTING\.md|DESIGN\.md|SECURITY\.md|PRIVACY\.md|LICENSE)$)/;
 // Both development images are built from these.
 const devImage =
   /^(frontend\/Dockerfile|backend\/Dockerfile|frontend\/nginx(?:-security)?\.conf|docker-compose\.dev\.yml|deploy\/compose\/dev\.yml)$/;

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import type { MaintenanceWorkPage, MetadataOnboarding, WorkflowNotificationsPage } from "../../src/lib/api";
-import { fixtureTimestamp, type ApiErrorBody } from "./fixtures/api";
+import { fixtureTimestamp, notificationSummaryFixture, type ApiErrorBody } from "./fixtures/api";
 import { mockApplication } from "./fixtures/player-library";
 
 for (const layout of ["mobile", "@desktop"]) {
@@ -36,7 +36,7 @@ for (const layout of ["mobile", "@desktop"]) {
     releaseStart();
     await expect(notice).toContainText("Metadata sync in progress");
     expect(starts).toBe(1);
-    await expect(notice.getByRole("button", { name: "View Activity" })).toBeVisible();
+    await expect(notice.getByRole("button", { name: "View run" })).toBeVisible();
     state = { status: "succeeded", missingWorks: 0, runId: 42 };
     await expect(notice).toContainText("Metadata sync completed");
     await page.screenshot({ path: `test-results/metadata-onboarding-${layout.replace("@", "")}.png` });
@@ -96,28 +96,31 @@ for (const canViewActivity of [true, false]) {
     await page.route("**/api/metadata/onboarding**", (route) =>
       route.fulfill({ json: { status: "partial", missingWorks: 1, runId: 42 } satisfies MetadataOnboarding }),
     );
-    await page.route("**/api/notifications?*", (route) =>
+    await page.route("**/api/notifications/summary?*", (route) =>
       route.fulfill({
-        json: {
-          notifications: [
-            {
-              id: 1,
-              workflowRunId: 42,
-              type: "metadata_onboarding",
-              status: "failed",
-              workId: null,
-              fileSourceId: null,
-              workCode: "",
-              message: "",
-              createdAt: fixtureTimestamp,
-            },
-          ],
-          page: 1,
-          pageSize: 20,
-          total: 1,
-          totalPages: 1,
-          clearableTotal: 0,
-        } satisfies WorkflowNotificationsPage,
+        json: notificationSummaryFixture(
+          {
+            notifications: [
+              {
+                id: 1,
+                workflowRunId: 42,
+                type: "metadata_onboarding",
+                status: "failed",
+                workId: null,
+                fileSourceId: null,
+                workCode: "",
+                message: "",
+                createdAt: fixtureTimestamp,
+              },
+            ],
+            page: 1,
+            pageSize: 20,
+            total: 1,
+            totalPages: 1,
+            clearableTotal: 0,
+          } satisfies WorkflowNotificationsPage,
+          null,
+        ),
       }),
     );
     let lastRunFilter: string | null = null;
@@ -133,11 +136,9 @@ for (const canViewActivity of [true, false]) {
       .click();
     await expect(page).toHaveURL(expected);
     await expect(page.getByRole("heading", { name: "Metadata", exact: true })).toBeVisible();
-    await expect(
-      page
-        .getByRole("group", { name: "Filter DLsite works", exact: true })
-        .getByRole("button", { name: "Metadata issues", exact: true }),
-    ).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("combobox", { name: "Filter DLsite works", exact: true })).toHaveText(
+      /^Needs attention/,
+    );
     await expect(page.getByRole("button", { name: "Refresh list", exact: true })).toBeEnabled();
     expect(lastRunFilter).toBe(canViewActivity ? "42" : null);
     await page.goto("/");

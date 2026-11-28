@@ -84,14 +84,17 @@ test("@smoke renders the anonymous library shell", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.locator("footer").getByRole("button", { name: "Library", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Open appearance settings" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Account menu" })).toHaveCount(0);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   const accountSheet = page.getByRole("dialog", { name: "Account" });
   await expect(accountSheet).toBeVisible();
   await expect(accountSheet.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
+  // On phones Appearance is a view of the account panel instead of a header control.
+  await expect(accountSheet.getByRole("button", { name: /^Appearance/ })).toBeVisible();
+  await expect(page.locator("header").getByRole("button", { name: "Open appearance settings" })).toHaveCount(0);
   // Anonymous visitors choose the UI language here but have no personal metadata language.
+  await accountSheet.getByRole("button", { name: /^Language/ }).click();
   await expect(accountSheet.getByRole("combobox", { name: "UI language" })).toBeVisible();
   await expect(accountSheet.getByRole("combobox", { name: "Preferred metadata language" })).toHaveCount(0);
 });
@@ -131,5 +134,7 @@ test("About project links keep their touch area on their own button", async ({ p
   // A touch area that escapes its link would take every tap and scroll on the page.
   const references = page.getByRole("region", { name: "Reference projects", exact: true });
   await references.getByRole("link", { name: "advplyr/audiobookshelf" }).tap({ trial: true, timeout: 2_000 });
-  await page.getByText("Software overview", { exact: true }).tap({ trial: true, timeout: 2_000 });
+  await page
+    .getByText("Your personal audio library, built around listening.", { exact: true })
+    .tap({ trial: true, timeout: 2_000 });
 });

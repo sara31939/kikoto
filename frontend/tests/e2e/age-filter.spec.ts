@@ -1,12 +1,14 @@
 import { expect, test } from "@playwright/test";
 import { workDetailFixture } from "./fixtures/api";
 import { mockApplication, work } from "./fixtures/player-library";
+import { showFullWorkCards } from "./fixtures/library-view";
 
 test("age rating chip filters the library without opening the work", async ({ page }) => {
   const requests: string[] = [];
   await mockApplication(page, (url) => requests.push(url.searchParams.get("q") ?? ""), false, 1, 0, [], undefined, {
     work: { ...work, ageRating: "adult" },
   });
+  await showFullWorkCards(page);
   await page.goto("/");
   await page.getByRole("button", { name: "Age rating: R18", exact: true }).click();
   await expect.poll(() => requests).toContain("$age:adult$");
@@ -18,6 +20,8 @@ test("age rating search offers categories and applies the selected value", async
   const requests: string[] = [];
   await mockApplication(page, (url) => requests.push(url.searchParams.get("q") ?? ""));
   await page.goto("/");
+  // A phone keeps the search field, and with it the condition button, behind Search.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
   await page.getByRole("button", { name: "Add search condition", exact: true }).click();
   await page.getByRole("combobox", { name: "Search clause type", exact: true }).click();
   await page.getByRole("option", { name: "Age rating", exact: true }).click();

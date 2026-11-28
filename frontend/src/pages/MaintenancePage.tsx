@@ -1,6 +1,5 @@
 import { ArrowRight, Eraser, HardDriveDownload, Users } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import { AutosaveStatus, useAutosaveStatus } from "@/components/settings/AutosaveStatus";
@@ -9,21 +8,22 @@ import {
   SettingsNumberInput,
   SettingsRow,
   SettingsSection,
+  SettingsSectionSkeleton,
 } from "@/components/settings/SettingsSection";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
-import { FloatingSelect } from "@/components/ui/floating-select";
 import { Switch } from "@/components/ui/switch";
 import { toastFromError, useToast } from "@/components/ui/toast";
-import { libraryLayoutSummary } from "@/features/library-setup/libraryLayoutSummary";
-import { LibraryLayoutSection } from "@/features/library-setup/LibraryLayoutSection";
+import { LegacyWorkflowMigrationReview } from "@/features/library-setup/LegacyWorkflowMigrationReview";
+import { LocalLibraryDialog } from "@/features/library-setup/LocalLibraryDialog";
 import { useLibraryLayout } from "@/features/library-setup/useLibraryLayout";
 import { VideoHardwareSettingsSection } from "@/features/video-hardware/VideoHardwareSettingsSection";
 import { ProxySettingsSection } from "@/features/proxy";
 import { useStableCallback } from "@/hooks/useStableCallback";
 import { RemoteSourceDialog } from "@/features/sources/RemoteSourceDialog";
-import { LibrarySourceList, type LocalLibraryEntry } from "@/features/sources/LibrarySourceList";
+import { LibrarySourceList, LibrarySourceListSkeleton } from "@/features/sources/LibrarySourceList";
 import { KikoeruImportAccessRow } from "@/features/user-data/KikoeruImportAccessRow";
+import { useSourcePresenceCheckSlots } from "@/features/workflows/source-presence/useSourcePresenceCheckSlots";
 import {
   DATA_PREFIX,
   DEFAULT_CACHE_SUFFIX,
@@ -38,15 +38,16 @@ import {
   type AppSettings,
   type FileSource,
   type FolderLyricsMode,
-  type LibraryLayout,
   type VideoHardwareAcceleration,
 } from "@/lib/api";
 import { NAVIGATION_EVENT } from "@/lib/browserHistory";
 import { draftAfterSave, sectionSettings } from "@/pages/settingsDraft";
+import { cleanupPath } from "@/pages/settingsPaths";
 import { UsersPage } from "@/pages/UsersPage";
 import { ASRSettingsSection } from "@/features/asr-settings/ASRSettingsSection";
 import { LLMSettingsSection } from "@/features/llm-settings/LLMSettingsSection";
 import { LyricsAttributionSection } from "@/features/llm-settings/LyricsAttributionSection";
+import { RecordSettingsSection } from "@/features/records";
 
 type MaintenanceTab = "library" | "cache" | "proxy" | "llm" | "users";
 
@@ -70,6 +71,7 @@ type RuntimeDraft = {
   kikoeruImportPrivateAddresses: boolean;
   hideRemoteSourceAddresses: boolean;
   folderLyricsMode: FolderLyricsMode;
+  recordLibraryEnabled: boolean;
 };
 
 /**
@@ -102,6 +104,7 @@ function runtimeDraftFromSettings(settings: AppSettings): RuntimeDraft {
     kikoeruImportPrivateAddresses: settings.kikoeruImportPrivateAddresses ?? false,
     hideRemoteSourceAddresses: settings.hideRemoteSourceAddresses ?? true,
     folderLyricsMode: settings.folderLyricsMode ?? "copy",
+    recordLibraryEnabled: settings.recordLibraryEnabled ?? false,
   };
 }
 
@@ -132,9 +135,9 @@ export function MaintenancePage({
   const [isSettingsLoading, setIsSettingsLoading] = useState(true);
   const [draft, setDraft] = useState<RuntimeDraft | null>(null);
   const [anonymousAccessEnabled, setAnonymousAccessEnabled] = useState(false);
+  const [anonymousRemoteBrowsingEnabled, setAnonymousRemoteBrowsingEnabled] = useState(false);
   const [isAccessPolicySaving, setIsAccessPolicySaving] = useState(false);
   const [confirmAnonymousAccess, setConfirmAnonymousAccess] = useState(false);
-  const localStatus = useAutosaveStatus();
   const catalogStatus = useAutosaveStatus();
   const networkStatus = useAutosaveStatus();
   const accessStatus = useAutosaveStatus();
@@ -143,6 +146,8 @@ export function MaintenancePage({
   const [draftSource, setDraftSource] = useState<FileSource>(emptyRemoteSource);
   const [editingSourceId, setEditingSourceId] = useState<number | null>(null);
   const [isSourceModalOpen, setIsSourceModalOpen] = useState(false);
+  const [isStorageModalOpen, setIsStorageModalOpen] = useState(false);
+  const [reconnectingPool, setReconnectingPool] = useState<string | null>(null);
   const [savingSource, setSavingSource] = useState(false);
   const [checkingSourceId, setCheckingSourceId] = useState<number | null>(null);
   const [togglingSourceId, setTogglingSourceId] = useState<number | null>(null);
@@ -156,6 +161,11 @@ export function MaintenancePage({
     [settings],
   );
   const localSource = settings?.fileSources.find((source) => source.sourceType === "local_folder") ?? null;
+  const sourceChecks = useSourcePresenceCheckSlots({
+    enabled: activeTab === "library" && canManageSources,
+    sources: remoteSources,
+    readOnly,
+  });
   const savedDraft = settings ? runtimeDraftFromSettings(settings) : null;
 
   useEffect(() => {
@@ -166,6 +176,7 @@ export function MaintenancePage({
     setSettings(next);
     setDraft(runtimeDraftFromSettings(next));
     setAnonymousAccessEnabled(next.anonymousAccessEnabled);
+    setAnonymousRemoteBrowsingEnabled(next.anonymousRemoteBrowsingEnabled ?? false);
   };
 
   // Stable so settings load when access changes, not on every render or language switch.
@@ -217,9 +228,10 @@ export function MaintenancePage({
   }, [settings]);
 
   useEffect(() => {
-    if (activeTab !== "library" || window.location.hash !== "#remote-sources") return;
+    const target = window.location.hash.slice(1);
+    if (activeTab !== "library" || (target !== "remote-sources" && target !== "record")) return;
     const frame = window.requestAnimationFrame(() => {
-      document.getElementById("remote-sources")?.scrollIntoView({ block: "start" });
+      document.getElementById(target)?.scrollIntoView({ block: "start" });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [activeTab, isSettingsLoading, settings]);
@@ -263,6 +275,24 @@ export function MaintenancePage({
     save: saveRuntime,
   };
 
+  const saveRemoteBrowsingPolicy = async (enabled: boolean) => {
+    if (readOnly || !canManageAccessPolicy) return false;
+    setIsAccessPolicySaving(true);
+    setAnonymousRemoteBrowsingEnabled(enabled);
+    try {
+      const next = await api.updateAccessPolicy({ anonymousRemoteBrowsingEnabled: enabled });
+      setSettings((current) => (current ? { ...current, ...next } : current));
+      setAnonymousRemoteBrowsingEnabled(next.anonymousRemoteBrowsingEnabled);
+      return true;
+    } catch (error) {
+      setAnonymousRemoteBrowsingEnabled(!enabled);
+      toast.notify(toastFromError(error, t("maintenance.accessPolicySaveFailed")));
+      return false;
+    } finally {
+      setIsAccessPolicySaving(false);
+    }
+  };
+
   const saveAccessPolicy = async (enabled: boolean) => {
     if (readOnly || !canManageAccessPolicy) return false;
     setIsAccessPolicySaving(true);
@@ -271,6 +301,8 @@ export function MaintenancePage({
       const next = await api.updateAccessPolicy({ anonymousAccessEnabled: enabled });
       setSettings((current) => (current ? { ...current, ...next } : current));
       setAnonymousAccessEnabled(next.anonymousAccessEnabled);
+      // Turning anonymous access off turns remote browsing off with it.
+      setAnonymousRemoteBrowsingEnabled(next.anonymousRemoteBrowsingEnabled ?? false);
       try {
         await onAccessPolicyUpdated();
       } catch {
@@ -318,6 +350,8 @@ export function MaintenancePage({
       else await api.createFileSource(sourcePayload(draftSource));
       closeSourceModal();
       await reload();
+      // A source that became usable queues a check of the library.
+      sourceChecks.refresh();
       toast.success(t("maintenance.sourceSaved"));
     } catch (error) {
       toast.notify(toastFromError(error, t("sourceSetup.saveFailed")));
@@ -342,6 +376,7 @@ export function MaintenancePage({
     replaceSource({ ...source, enabled });
     try {
       replaceSource(await api.updateFileSource(source.id, { ...sourcePayload(source), enabled }));
+      sourceChecks.refresh();
       toast.success(
         t(enabled ? "sourceSetup.enabledToast" : "sourceSetup.disabledToast", { name: source.displayName }),
       );
@@ -399,9 +434,23 @@ export function MaintenancePage({
     }
   };
 
+  const reconnectPool = async (path: string) => {
+    if (readOnly) return;
+    setReconnectingPool(path);
+    try {
+      const next = await api.reconnectLibraryPool(path);
+      libraryLayout.setLayout(next);
+      toast.success(t("librarySetup.reconnected"));
+    } catch (error) {
+      toast.notify(toastFromError(error, t("librarySetup.reconnectFailed")));
+    } finally {
+      setReconnectingPool(null);
+    }
+  };
+
   if (!canManageSources && !canManageUsers && !canManageAccessPolicy) {
     return (
-      <section className="rounded-lg border bg-card p-5">
+      <section>
         <p className="text-sm text-muted-foreground">{t("maintenance.adminRequired")}</p>
       </section>
     );
@@ -412,11 +461,16 @@ export function MaintenancePage({
       {/* Each tab gates its own writes, so Demo can still browse, open details, and follow links. */}
       <fieldset data-testid="maintenance-content" className="w-full min-w-0 border-0 p-0">
         {isSettingsLoading && activeTab !== "users" ? (
-          <SettingsSkeleton />
+          <SettingsSkeleton libraries={activeTab === "library"} />
         ) : activeTab === "library" && draft ? (
-          <div className="space-y-6">
+          <div className="space-y-10">
             <LibrarySourceList
-              local={localLibraryEntry(libraryLayout, localSource?.displayName ?? t("maintenance.mainLocalLibrary"), t)}
+              localName={localSource?.displayName ?? t("maintenance.mainLocalLibrary")}
+              layout={libraryLayout.layout}
+              layoutFailed={libraryLayout.failed}
+              reconnectingPool={reconnectingPool}
+              onConfigureStorage={() => setIsStorageModalOpen(true)}
+              onReconnectPool={reconnectPool}
               sources={remoteSources}
               checkingSourceId={checkingSourceId}
               togglingSourceId={togglingSourceId}
@@ -426,70 +480,31 @@ export function MaintenancePage({
               onDelete={setSourcePendingDelete}
               onCheck={checkSourceHealth}
               onToggleEnabled={toggleSourceEnabled}
+              renderSourceCheck={sourceChecks.renderSourceCheck}
+              onOpenSourceCheck={sourceChecks.onOpenSourceCheck}
+              legacyWorkflowReview={
+                !readOnly && libraryLayout.layout?.hasLegacyWorkflows ? (
+                  <section className="space-y-3">
+                    <h3 className="text-sm font-semibold">{t("librarySetup.workflowMigration.title")}</h3>
+                    <LegacyWorkflowMigrationReview />
+                  </section>
+                ) : undefined
+              }
             />
+            {sourceChecks.dialog}
 
-            <SettingsGroupDivider label={t("maintenance.library.settingsGroup")} />
-
-            <LibraryLayoutSection
-              id="library-storage"
-              layout={libraryLayout.layout}
-              failed={libraryLayout.failed}
+            <RecordSettingsSection
+              enabled={draft.recordLibraryEnabled}
+              savedEnabled={settings?.recordLibraryEnabled ?? false}
               readOnly={readOnly}
-              onSaved={libraryLayout.setLayout}
+              onEnabledChange={(recordLibraryEnabled) => saveRuntime({ recordLibraryEnabled })}
             />
-
-            <SettingsSection
-              title={t("maintenance.library.local")}
-              description={localSource?.displayName ?? t("maintenance.mainLocalLibrary")}
-              action={<AutosaveStatus state={localStatus.state} />}
-            >
-              <SettingsRow
-                title={t("maintenance.library.scanDepth")}
-                description={
-                  (settings?.localScanDepthMinimum ?? 1) > 1
-                    ? `${t("sourceSetup.scanDepthDescription")} ${t("librarySetup.scanDepthMinimum", { count: settings?.localScanDepthMinimum ?? 1 })}`
-                    : t("sourceSetup.scanDepthDescription")
-                }
-              >
-                <SettingsNumberInput
-                  disabled={readOnly}
-                  label={t("maintenance.library.scanDepth")}
-                  value={draft.localScanDepth}
-                  min={settings?.localScanDepthMinimum ?? 1}
-                  max={8}
-                  integer
-                  unit={t("sourceSetup.levels")}
-                  onChange={(localScanDepth) => patchDraft({ localScanDepth })}
-                  onCommit={() => void localStatus.track(runtimeEditor.commit("localScanDepth"))}
-                />
-              </SettingsRow>
-              <SettingsRow
-                title={t("maintenance.library.folderLyricsMode")}
-                description={`${t("maintenance.library.lyricsFilesDescription")} ${t("maintenance.library.folderLyricsModeDescription")}`}
-              >
-                <FloatingSelect
-                  value={draft.folderLyricsMode}
-                  options={[
-                    { value: "copy", label: t("lyricsFiles.folderModeCopy") },
-                    { value: "move", label: t("lyricsFiles.folderModeMove") },
-                  ]}
-                  onValueChange={(value) =>
-                    void localStatus.track(saveRuntime({ folderLyricsMode: value === "move" ? "move" : "copy" }))
-                  }
-                  ariaLabel={t("maintenance.library.folderLyricsMode")}
-                  disabled={readOnly}
-                />
-              </SettingsRow>
-            </SettingsSection>
 
             <SettingsSection
               title={t("maintenance.library.creatorCatalogs")}
               action={<AutosaveStatus state={catalogStatus.state} />}
             >
-              <SettingsRow
-                title={t("maintenance.library.catalogFreshnessDays")}
-                description={t("maintenance.library.catalogFreshnessDescription")}
-              >
+              <SettingsRow title={t("maintenance.library.catalogFreshnessDays")}>
                 <SettingsNumberInput
                   disabled={readOnly}
                   label={t("maintenance.library.catalogFreshnessDays")}
@@ -533,7 +548,7 @@ export function MaintenancePage({
             <StoragePaths settings={settings} remoteSources={remoteSources} />
           </div>
         ) : activeTab === "cache" && draft ? (
-          <div className="space-y-6">
+          <div className="space-y-10">
             <CacheFetchSettings
               draft={draft}
               readOnly={readOnly}
@@ -552,7 +567,7 @@ export function MaintenancePage({
             />
           </div>
         ) : activeTab === "proxy" && settings ? (
-          <div className="space-y-6">
+          <div className="space-y-10">
             <ProxySettingsSection
               proxy={settings.proxy}
               remoteSources={remoteSources}
@@ -568,7 +583,7 @@ export function MaintenancePage({
             afterPolicy={<LyricsAttributionSection readOnly={readOnly} />}
           />
         ) : activeTab === "users" ? (
-          <div className="space-y-6">
+          <div className="space-y-10">
             {canManageUsers && (
               <UsersPage currentUserId={currentUserId} isSuperAdmin={isSuperAdmin} readOnly={readOnly} embedded />
             )}
@@ -580,10 +595,7 @@ export function MaintenancePage({
                   title={t("maintenance.access.instance")}
                   action={<AutosaveStatus state={accessStatus.state} />}
                 >
-                  <SettingsRow
-                    title={t("maintenance.access.anonymous")}
-                    description={t("maintenance.access.anonymousDescription")}
-                  >
+                  <SettingsRow title={t("maintenance.access.anonymous")}>
                     <Switch
                       checked={anonymousAccessEnabled}
                       disabled={isAccessPolicySaving}
@@ -593,6 +605,18 @@ export function MaintenancePage({
                         else void accessStatus.track(saveAccessPolicy(false));
                       }}
                       aria-label={t("maintenance.access.anonymous")}
+                    />
+                  </SettingsRow>
+                  <SettingsRow
+                    title={t("maintenance.access.anonymousRemote")}
+                    description={t("maintenance.access.anonymousRemoteDescription")}
+                  >
+                    <Switch
+                      checked={anonymousRemoteBrowsingEnabled}
+                      // Remote browsing only widens anonymous access, so it waits for it.
+                      disabled={isAccessPolicySaving || !anonymousAccessEnabled}
+                      onCheckedChange={(enabled) => void accessStatus.track(saveRemoteBrowsingPolicy(enabled))}
+                      aria-label={t("maintenance.access.anonymousRemote")}
                     />
                   </SettingsRow>
                 </SettingsSection>
@@ -623,6 +647,22 @@ export function MaintenancePage({
         ) : null}
       </fieldset>
 
+      {isStorageModalOpen && settings && (
+        <LocalLibraryDialog
+          name={localSource?.displayName ?? t("maintenance.mainLocalLibrary")}
+          layout={libraryLayout.layout}
+          failed={libraryLayout.failed}
+          readOnly={readOnly}
+          settings={{
+            localScanDepth: settings.localScanDepth,
+            folderLyricsMode: settings.folderLyricsMode ?? "copy",
+          }}
+          scanDepthMinimum={settings.localScanDepthMinimum ?? 1}
+          onSaved={libraryLayout.setLayout}
+          onSaveSettings={saveRuntime}
+          onClose={() => setIsStorageModalOpen(false)}
+        />
+      )}
       {isSourceModalOpen && (
         <RemoteSourceDialog
           source={draftSource}
@@ -691,16 +731,13 @@ function CacheFetchSettings({
   const commitTransfer = (key: keyof RuntimeDraft) => () => void transferStatus.track(editor.commit(key));
   const commitPacing = (key: keyof RuntimeDraft) => () => void pacingStatus.track(editor.commit(key));
   const openCleanup = () => {
-    window.history.pushState({}, "", "/settings?tab=cleanup");
+    window.history.pushState({}, "", cleanupPath("cache"));
     window.dispatchEvent(new Event(NAVIGATION_EVENT));
   };
   return (
-    <div className="space-y-6" data-testid="cache-configuration-card">
+    <div className="space-y-10" data-testid="cache-configuration-card">
       <SettingsSection title={t("maintenance.cache.policy")} action={<AutosaveStatus state={policyStatus.state} />}>
-        <SettingsRow
-          title={t("maintenance.cache.remotePlayback")}
-          description={t("maintenance.cache.remotePlaybackDescription")}
-        >
+        <SettingsRow title={t("maintenance.cache.remotePlayback")}>
           <Switch
             checked={draft.cacheEnabled}
             disabled={readOnly}
@@ -711,7 +748,7 @@ function CacheFetchSettings({
             aria-label={t("maintenance.cache.remotePlayback")}
           />
         </SettingsRow>
-        <SettingsRow title={t("maintenance.cache.limit")} description={t("maintenance.cache.limitDescription")}>
+        <SettingsRow title={t("maintenance.cache.limit")}>
           <SettingsNumberInput
             disabled={readOnly}
             label={t("maintenance.cache.limit")}
@@ -723,10 +760,7 @@ function CacheFetchSettings({
             onCommit={commitPolicy("cacheLimitGb")}
           />
         </SettingsRow>
-        <SettingsRow
-          title={t("maintenance.cache.transcodeLimit")}
-          description={t("maintenance.cache.transcodeLimitDescription")}
-        >
+        <SettingsRow title={t("maintenance.cache.transcodeLimit")}>
           <SettingsNumberInput
             disabled={readOnly}
             label={t("maintenance.cache.transcodeLimit")}
@@ -740,7 +774,7 @@ function CacheFetchSettings({
           />
         </SettingsRow>
         {canManageCleanup && (
-          <SettingsRow title={t("sourceSetup.cleanupLinkTitle")} description={t("sourceSetup.cleanupLinkDescription")}>
+          <SettingsRow title={t("sourceSetup.cleanupLinkTitle")}>
             <Button variant="outline" size="sm" onClick={openCleanup}>
               <Eraser className="h-4 w-4" />
               {t("cleanup.tab")}
@@ -754,10 +788,7 @@ function CacheFetchSettings({
         title={t("maintenance.cache.transferSafety")}
         action={<AutosaveStatus state={transferStatus.state} />}
       >
-        <SettingsRow
-          title={t("maintenance.cache.downloadLimit")}
-          description={t("maintenance.cache.downloadLimitDescription")}
-        >
+        <SettingsRow title={t("maintenance.cache.downloadLimit")}>
           <SettingsNumberInput
             disabled={readOnly}
             label={t("maintenance.cache.downloadLimit")}
@@ -770,10 +801,7 @@ function CacheFetchSettings({
             onCommit={commitTransfer("remoteDownloadLimitGb")}
           />
         </SettingsRow>
-        <SettingsRow
-          title={t("maintenance.cache.stagingRetention")}
-          description={t("maintenance.cache.stagingRetentionDescription")}
-        >
+        <SettingsRow title={t("maintenance.cache.stagingRetention")}>
           <SettingsNumberInput
             disabled={readOnly}
             label={t("maintenance.cache.stagingRetention")}
@@ -797,7 +825,6 @@ function CacheFetchSettings({
             base: draft.remoteDelayBaseSeconds,
             random: draft.remoteDelayRandomSeconds,
           })}
-          description={t("sourceSetup.pacingDescription")}
         >
           <SettingsRow
             title={t("maintenance.cache.baseDelay")}
@@ -903,12 +930,12 @@ function StoragePaths({ settings, remoteSources }: { settings: AppSettings | nul
     ]),
   ];
   return (
-    <div className="theme-card-surface overflow-hidden rounded-xl border bg-card">
-      <SettingsDisclosure title={t("maintenance.paths.title")} description={t("maintenance.paths.description")}>
+    <div className="border-y">
+      <SettingsDisclosure title={t("maintenance.paths.title")}>
         {rows.map(([label, value], index) => (
           <label
             key={`${label}:${index}`}
-            className="grid gap-1 px-4 py-2.5 sm:grid-cols-[12rem_minmax(0,1fr)] sm:items-center"
+            className="grid gap-1 py-2.5 sm:grid-cols-[12rem_minmax(0,1fr)] sm:items-center"
           >
             <span className="truncate text-xs font-medium text-muted-foreground">{label}</span>
             <input
@@ -923,59 +950,13 @@ function StoragePaths({ settings, remoteSources }: { settings: AppSettings | nul
   );
 }
 
-/** The local library's row in the library overview: its storage mode and whether its storage is online. */
-function localLibraryEntry(
-  { layout, failed }: { layout: LibraryLayout | null; failed: boolean },
-  name: string,
-  t: TFunction,
-): LocalLibraryEntry {
-  const onConfigure = () =>
-    document.getElementById("library-storage")?.scrollIntoView({ block: "start", behavior: "smooth" });
-  if (!layout) {
-    return {
-      name,
-      detail: failed ? t("librarySetup.loadFailed") : t("common.loading"),
-      status: "unknown",
-      onConfigure,
-    };
-  }
-  const summary = libraryLayoutSummary(layout);
-  const state =
-    summary.mode === "pools"
-      ? t("maintenance.library.poolsOnline", { online: summary.online, total: summary.total })
-      : t(summary.online > 0 ? "librarySetup.online" : "librarySetup.offline");
-  return {
-    name,
-    detail: `${t(`librarySetup.modes.${summary.mode}.name`)} · ${state}`,
-    status: summary.total === 0 ? "unknown" : summary.online === summary.total ? "online" : "offline",
-    onConfigure,
-  };
-}
-
-/** Separates the overview at the top of a tab from the configuration sections below it. */
-function SettingsGroupDivider({ label }: { label: string }) {
-  return (
-    <div className="flex items-center gap-3 px-1 pt-2">
-      <h2 className="shrink-0 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</h2>
-      <span className="h-px flex-1 bg-border" aria-hidden="true" />
-    </div>
-  );
-}
-
-function SettingsSkeleton() {
+/** A tab's loading placeholder, in the shape of the sections it is about to show. */
+function SettingsSkeleton({ libraries = false }: { libraries?: boolean }) {
   const { t } = useTranslation();
   return (
-    <div className="space-y-6" role="status" aria-label={t("common.loading")}>
-      {Array.from({ length: 2 }, (_, index) => (
-        <div key={index} className="space-y-2.5">
-          <div className="h-4 w-32 animate-pulse rounded bg-muted" />
-          <div className="space-y-3 rounded-xl border bg-card p-4">
-            <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
-            <div className="h-4 w-1/2 animate-pulse rounded bg-muted" />
-            <div className="h-9 w-full animate-pulse rounded bg-muted" />
-          </div>
-        </div>
-      ))}
+    <div className="space-y-10" role="status" aria-label={t("common.loading")} aria-busy="true">
+      {libraries ? <LibrarySourceListSkeleton /> : <SettingsSectionSkeleton />}
+      <SettingsSectionSkeleton rows={2} />
     </div>
   );
 }

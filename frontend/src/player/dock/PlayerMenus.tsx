@@ -11,6 +11,7 @@ import { useStableCallback } from "@/hooks/useStableCallback";
 import { cn } from "@/lib/tailwindClassNames";
 import { isPlaybackCompatibilityScope } from "@/player/playerPersistence";
 import { usePlayerTime, type usePlayer } from "@/player/PlayerProvider";
+import { supportsCompatibilityPlayback } from "@/player/playerTrackMedia";
 import type { PlayerTrack, PlayerTrackLocation } from "@/player/playerTypes";
 import { parseSleepRewindDraft, SLEEP_REWIND_MINUTES_MAX, SLEEP_REWIND_MINUTES_MIN } from "@/player/sleepRewind";
 
@@ -74,6 +75,7 @@ export function SleepTimerMenu({
       open={open}
       anchorRef={anchorRef}
       onOpenChange={onOpenChange}
+      ariaLabel={t("player.sleepTimer")}
       className={cn("w-[min(14rem,calc(100vw-1.5rem))]", menuSurface)}
     >
       <div className="flex items-center justify-between px-2.5 pb-1.5 pt-1 text-xs font-semibold text-muted-foreground">
@@ -248,7 +250,7 @@ export function MoreOptionsMenu({
             if (isPlaybackCompatibilityScope(value)) player.setPlaybackCompatibility(value);
           }}
           ariaLabel={t("player.compatibilityScope")}
-          disabled={track.locationType !== "local" && track.locationType !== "cache"}
+          disabled={!supportsCompatibilityPlayback(track)}
           className="h-10 rounded-xl"
         />
       </div>
@@ -288,7 +290,7 @@ export function SourceMenu({
       anchorRef={anchorRef}
       onOpenChange={onOpenChange}
       ariaLabel={t("player.chooseSource")}
-      className={cn("w-[min(16rem,calc(100vw-1.5rem))]", menuSurface)}
+      className={cn("w-max min-w-40 max-w-[min(16rem,calc(100vw-1.5rem))]", menuSurface)}
     >
       {locations.map((location) => {
         const selected = location.locationId === currentLocationId;

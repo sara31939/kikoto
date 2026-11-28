@@ -1,10 +1,11 @@
 import { useEffect, useRef, type Dispatch, type SetStateAction } from "react";
 
 import { api } from "@/lib/api";
+import { startLoad } from "@/lib/effectScope";
 
 import { restoredCursorStartPosition } from "./playbackStart";
 import { discardObsoletePlayerState, loadPersistedQueue } from "./playerPersistence";
-import { revalidatePersistedQueue } from "./playerQueueRestore";
+import { keepPlayingTrackLocation, revalidatePersistedQueue } from "./playerQueueRestore";
 import type { PlayerTrack, PlayMode, SleepTimerState } from "./playerTypes";
 import type { PlaybackEngine } from "./usePlaybackEngine";
 
@@ -26,7 +27,8 @@ export function useRestoredPlayerQueue(queueStorageKey: string, obsoleteProgress
 }
 
 /**
- * Refreshes a restored queue against the library once after startup. The result
+ * Refreshes a restored queue against the library once after startup, in one
+ * request however long the queue is. The result
  * is dropped if the listener already changed the queue, and the restored item
  * continues its Resume cursor unless the listener has already acted on it.
  */
@@ -42,51 +44,44 @@ export function useRestoredQueueRevalidation(
   useEffect(() => {
     const restoredTracks = restored.queue;
     if (restoredTracks.length === 0) return;
-    let cancelled = false;
-    void revalidatePersistedQueue(
-      restoredTracks,
-      async (workID) => (await api.getWorkMedia(workID)).mediaItems,
-      async (workID) => {
-        const work = await api.getWorkSummary(workID);
-        return {
-          primaryCode: work.primaryCode,
-          title: work.title,
-          coverUrl: work.coverUrl,
-          circle: work.circle,
-        };
+    return startLoad(() => revalidatePersistedQueue(restoredTracks, api.resolvePlaybackQueue), {
+      onSuccess: (refreshed) => {
+        const current = refs.queueRef.current;
+        if (
+          current.length !== restoredTracks.length ||
+          current.some((track, index) => track.queueItemId !== restoredTracks[index]?.queueItemId)
+        )
+          return;
+        const currentQueueItemID = current[refs.currentIndexRef.current]?.queueItemId;
+        // An item the listener has started keeps playing from where it is.
+        const playbackStarted =
+          refs.isPlayingRef.current ||
+          (refs.listenerIntentInstanceRef.current !== null &&
+            refs.listenerIntentInstanceRef.current === refs.currentPlaybackInstanceKeyRef.current);
+        const validated = playbackStarted
+          ? keepPlayingTrackLocation(refreshed, current[refs.currentIndexRef.current])
+          : refreshed;
+        const validatedIndex = Math.max(
+          0,
+          validated.findIndex((track) => track.queueItemId === currentQueueItemID),
+        );
+        // The restored session item continues its Resume cursor until the listener acts on it.
+        const cursorPosition = restoredCursorStartPosition(validated[validatedIndex]?.progress);
+        if (
+          cursorPosition > 0 &&
+          currentQueueItemID &&
+          currentQueueItemID === restoredTracks[restored.currentIndex]?.queueItemId &&
+          refs.listenerIntentInstanceRef.current !== refs.currentPlaybackInstanceKeyRef.current
+        ) {
+          refs.pendingPlaybackStartRef.current = { queueItemId: currentQueueItemID, positionSeconds: cursorPosition };
+          refs.restoredMediaItemRef.current = null;
+          requestStartPosition();
+        }
+        invalidatePlaybackRequests();
+        setQueue(validated);
+        setCurrentIndex(validatedIndex);
       },
-    ).then((validated) => {
-      if (cancelled) return;
-      const current = refs.queueRef.current;
-      if (
-        current.length !== restoredTracks.length ||
-        current.some((track, index) => track.queueItemId !== restoredTracks[index]?.queueItemId)
-      )
-        return;
-      const currentQueueItemID = current[refs.currentIndexRef.current]?.queueItemId;
-      const validatedIndex = Math.max(
-        0,
-        validated.findIndex((track) => track.queueItemId === currentQueueItemID),
-      );
-      // The restored session item continues its Resume cursor until the listener acts on it.
-      const cursorPosition = restoredCursorStartPosition(validated[validatedIndex]?.progress);
-      if (
-        cursorPosition > 0 &&
-        currentQueueItemID &&
-        currentQueueItemID === restoredTracks[restored.currentIndex]?.queueItemId &&
-        refs.listenerIntentInstanceRef.current !== refs.currentPlaybackInstanceKeyRef.current
-      ) {
-        refs.pendingPlaybackStartRef.current = { queueItemId: currentQueueItemID, positionSeconds: cursorPosition };
-        refs.restoredMediaItemRef.current = null;
-        requestStartPosition();
-      }
-      invalidatePlaybackRequests();
-      setQueue(validated);
-      setCurrentIndex(validatedIndex);
     });
-    return () => {
-      cancelled = true;
-    };
   }, [invalidatePlaybackRequests, refs, requestStartPosition, restored, setCurrentIndex, setQueue]);
 }
 

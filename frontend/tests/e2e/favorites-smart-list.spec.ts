@@ -24,11 +24,12 @@ const works: Work[] = Array.from({ length: 3 }, (_, index) =>
   }),
 );
 
-async function mockSmartLists(page: Page) {
+async function mockSmartLists(page: Page, lists: FavoriteList[] = []) {
   const state = {
-    lists: [favoriteListFixture()] as FavoriteList[],
+    lists: [favoriteListFixture(), ...lists] as FavoriteList[],
     created: null as { kind?: string; rule?: SmartListRule } | null,
     seen: false,
+    converted: false,
   };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -78,9 +79,15 @@ async function mockSmartLists(page: Page) {
       await route.fulfill({ json: { listId: 7, newCount: 0 } });
       return;
     }
+    if (path === "/api/favorite-lists/7/convert" && request.method() === "POST") {
+      state.converted = true;
+      state.lists = state.lists.map((list) => (list.id === 7 ? { ...list, kind: "user", rule: undefined } : list));
+      await route.fulfill({ json: state.lists.find((list) => list.id === 7) });
+      return;
+    }
     if (path === "/api/favorite-works") {
       const smart = url.searchParams.get("listId") === "7";
-      const newIDs = smart && !state.seen ? [3] : [];
+      const newIDs = !state.seen ? [3] : [];
       await route.fulfill({
         json: {
           ...worksPageFixture(smart ? works : [], { total: smart ? works.length : 0 }),
@@ -88,7 +95,7 @@ async function mockSmartLists(page: Page) {
           listCounts: { "1": 0, "7": works.length },
           statusCounts: smart ? { none: works.length } : {},
           newCounts: newIDs.length > 0 ? { "7": newIDs.length } : {},
-          newWorkIds: newIDs,
+          newWorkIds: smart ? newIDs : [],
         } satisfies FavoriteWorksPage,
       });
       return;
@@ -160,4 +167,52 @@ test("@desktop a smart list is created from tags and reports its new works until
   await rule.getByRole("button", { name: "Mark all as seen" }).click();
   await expect.poll(() => state.seen).toBe(true);
   await expect(rule.getByText("1 new work")).toBeHidden();
+
+  // Converting waits in the list's editor, not on the shelf.
+  await expect(rule.getByRole("button", { name: "Convert to regular list" })).toHaveCount(0);
+  await rule.getByRole("button", { name: "Edit rule" }).click();
+  const listDialog = page.getByRole("dialog", { name: "Edit list" });
+  await listDialog.getByRole("button", { name: "Convert to regular list" }).click();
+  const confirmation = page.getByRole("alertdialog", { name: "Convert to a regular list?" });
+  await expect(confirmation).toContainText('The 3 works "Example smart list" shows now stay in the list');
+  await confirmation.getByRole("button", { name: "Convert to regular list" }).click();
+  await expect.poll(() => state.converted).toBe(true);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(rule).toHaveCount(0);
+});
+
+test("a phone shelf strip with new works off screen keeps the page and its bottom navigation in view", async ({
+  page,
+}) => {
+  const userLists = Array.from({ length: 4 }, (_, index) =>
+    favoriteListFixture({ id: 10 + index, name: `Example list ${index + 1}`, kind: "user", sortOrder: index }),
+  );
+  const smartList = favoriteListFixture({
+    id: 7,
+    name: "Example smart list",
+    kind: "smart",
+    sortOrder: userLists.length,
+    rule: { require: [], any: [{ kind: "metadata", id: 101, name: "Example Tag A", state: "active" }], exclude: [] },
+  });
+  await mockSmartLists(page, [...userLists, smartList]);
+  await page.goto("/favorites");
+
+  const smartShelf = page.getByRole("button", { name: /Example smart list/ });
+  await expect(smartShelf).toHaveAccessibleName(/1 new work/);
+  const fitsViewport = () =>
+    page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
+  const navigation = page.getByRole("button", { name: "Favorites", exact: true });
+  const viewportHeight = page.viewportSize()!.height;
+  await expect.poll(fitsViewport).toBe(true);
+  expect((await navigation.boundingBox())!.y + (await navigation.boundingBox())!.height).toBeLessThanOrEqual(
+    viewportHeight,
+  );
+
+  await smartShelf.click();
+  const rule = page.getByRole("region", { name: "Smart list rule" });
+  await expect(rule.getByRole("button", { name: "Edit rule" })).toBeInViewport({ ratio: 1 });
+  await expect.poll(fitsViewport).toBe(true);
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: /^Search/ })).toBeFocused();
+  await expect(navigation).toBeInViewport({ ratio: 1 });
 });

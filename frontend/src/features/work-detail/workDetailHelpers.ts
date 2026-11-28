@@ -24,6 +24,8 @@ export const emptyRemoteWorkPreview: RemoteWorkPreview = {
 
 export type ActiveSourceInfoModel = {
   label: string;
+  /** The source's short name, as its source tab names it. */
+  tabLabel: string;
   kind: SourceTabInfo["kind"];
   status: SourceTabInfo["status"];
   statusLabel: string;
@@ -31,11 +33,6 @@ export type ActiveSourceInfoModel = {
   loading: boolean;
   metadataDurationSeconds: number | null;
 };
-
-export function openActivityRun(runId: number) {
-  window.history.pushState({}, "", `/workflows?activity=1&run=${runId}`);
-  window.dispatchEvent(new Event("kikoto:navigation"));
-}
 
 export function trackedPresenceForRemoteSource(work: WorkDetail | null, sourceID: number, remoteCode: string) {
   const candidates = (work?.sourcePresence ?? []).filter(

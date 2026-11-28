@@ -1,4 +1,4 @@
-import { CircleAlert, ExternalLink, Heart, Image, Loader2, RefreshCw, SlidersHorizontal } from "lucide-react";
+import { CircleAlert, ExternalLink, Image, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
@@ -12,9 +12,18 @@ import { BrowseLoadingIndicator } from "@/components/collection/BrowseLoadingInd
 import { useCollectionResultsScroll } from "@/components/collection/useCollectionResultsScroll";
 import { CatalogStatStrip } from "@/components/creator/CatalogStatStrip";
 import { CatalogSyncBadge } from "@/components/creator/CatalogSyncBadge";
-import { ActionMenu } from "@/components/ui/action-menu";
+import type { ActionMenuItem } from "@/components/ui/action-menu";
 import { CreatorCoverDialog, type CreatorCoverWorksRequest } from "@/components/creator/CreatorCoverDialog";
+import {
+  CreatorActionRow,
+  CreatorFavoriteButton,
+  CreatorMoreMenu,
+  CreatorRefreshButton,
+  creatorQuietActionClassName,
+} from "@/components/creator/CreatorDetailActions";
 import { CreatorDetailHeader } from "@/components/creator/CreatorDetailHeader";
+import { CreatorWorkCaption } from "@/components/creator/CreatorWorkResults";
+import { CreatorWorkViewMenu } from "@/components/creator/CreatorWorkViewMenu";
 import { CatalogWorkToolbar } from "@/components/creator/CatalogWorkToolbar";
 import {
   workCardLayout,
@@ -25,7 +34,6 @@ import {
 import { WorkCollectionPagination } from "@/components/work-collection/WorkCollectionPagination";
 import { LazyRemoteFetchWorkspaceDialog } from "@/features/work-detail/workflows/LazyRemoteFetchWorkspaceDialog";
 import { useRemoteFetchWorkspace } from "@/features/work-detail/workflows/useRemoteFetchWorkspace";
-import { openWorkflowPath, workflowActivityRunPath } from "@/features/workflows/workflowLinks";
 import {
   api,
   ApiError,
@@ -37,6 +45,7 @@ import {
 import { creatorCoverUrl } from "@/lib/creatorApi";
 import { navigateToHistoryReturn } from "@/lib/browserHistory";
 import { currentClientStorageScope } from "@/lib/clientStorageScope";
+import { startLoad } from "@/lib/effectScope";
 import { coalesceRuns } from "@/lib/inflightRequests";
 import { useAuth } from "@/auth/AuthProvider";
 import { REMOTE_TRACK_PERMISSIONS, usePermissionGate } from "@/auth/usePermissionGate";
@@ -57,7 +66,7 @@ import { formatDateTime } from "@/i18n/format";
 import { useLocale } from "@/i18n/LocaleProvider";
 import { useMobileNavigationLayout } from "@/hooks/useMobileNavigationLayout";
 import { creatorWorkPageSizeOptions } from "@/lib/creatorWorksBrowse";
-import { CircleCatalogOptionsSheet, type CircleAvailabilityFilter } from "@/pages/CircleDetailSheets";
+import { openWorkflowRun } from "@/lib/workflowLinks";
 import { circleRefreshSettledMessage, useCircleRefreshRun } from "@/pages/circleRefreshRun";
 import { CreatorWorkFetchConfirm, CreatorWorkSelectionBar } from "@/pages/creator/CreatorWorkSelectionBar";
 import { useCreatorWorkSelection } from "@/pages/creator/useCreatorWorkSelection";
@@ -68,6 +77,7 @@ import {
   circleRemoteTargets,
   circleWorkKey,
   circleWorkRemoteTarget,
+  type CircleAvailabilityFilter,
   dlsiteMakerURL,
   emptyCircleDetail,
   isCircleBulkSaveSelectable,
@@ -129,7 +139,6 @@ export function CircleDetailPage({
   const [deleteTarget, setDeleteTarget] = useState<CircleCatalogWork | null>(null);
   const [coverDialogOpen, setCoverDialogOpen] = useState(false);
   const remoteWorkActions = useRemoteWorkActions();
-  const [catalogOptionsOpen, setCatalogOptionsOpen] = useState(false);
   const [workQuery, setWorkQuery] = useState("");
   const [availabilityFilter, setAvailabilityFilter] = useState<CircleAvailabilityFilter>("all");
   const [workPage, setWorkPage] = useState(1);
@@ -231,13 +240,12 @@ export function CircleDetailPage({
 
   useEffect(() => {
     if (!active) return;
-    const controller = new AbortController();
-    void loadCircleDetail(true, controller.signal).then((next) => {
-      if (controller.signal.aborted) return;
-      if (next) completeResultsScroll();
-      else cancelResultsScroll();
+    return startLoad((signal) => loadCircleDetail(true, signal), {
+      onSuccess: (next) => {
+        if (next) completeResultsScroll();
+        else cancelResultsScroll();
+      },
     });
-    return () => controller.abort();
   }, [active, cancelResultsScroll, completeResultsScroll, externalId, loadCircleDetail]);
 
   // The fallback must keep its identity across renders: works-derived memos
@@ -246,8 +254,7 @@ export function CircleDetailPage({
   const filteredWorks = useMemo(() => {
     return circle.works;
   }, [circle.works]);
-  const catalogOnlyCount = circle.works.filter((work) => work.catalogStatus !== "imported").length;
-  const availableWorkCount = circle.availableWorks ?? circle.works.filter((work) => work.local || work.remote).length;
+  const metadataMissingWorks = circle.metadataMissingWorks ?? 0;
   const totalWorkPages = Math.max(1, Math.ceil(circle.worksMeta.total / workPageSize));
   const currentWorkPage = Math.min(circle.worksMeta.page || workPage, totalWorkPages);
   const pagedWorks = filteredWorks;
@@ -307,9 +314,9 @@ export function CircleDetailPage({
     : circle.series.reduce((total, series) => total + series.works, 0);
 
   const canOpenWorkflows = auth.hasPermission("workflows:run") && !auth.demoMode;
-  // Demo lists the covers and the catalog sync form for inspection and saves or runs neither.
+  // Demo lists the covers and the catalog sync options for inspection and saves or runs neither.
   const canChangeCover = auth.demoMode || auth.hasPermission("favorites:write");
-  const openRefreshRun = (runId: number) => openWorkflowPath(workflowActivityRunPath(runId));
+  const openRefreshRun = openWorkflowRun;
   const refreshRun = useCircleRefreshRun({
     run: detail?.refresh,
     canWatchRuns: canOpenWorkflows,
@@ -320,7 +327,7 @@ export function CircleDetailPage({
       toast.notify({
         kind: run.status === "failed" ? "error" : run.status === "partial" ? "warning" : "success",
         message,
-        actionLabel: canOpenWorkflows ? t("nav.activity") : undefined,
+        actionLabel: canOpenWorkflows ? t("workflowPage.viewRun") : undefined,
         onAction: canOpenWorkflows ? () => openRefreshRun(run.runId) : undefined,
       });
     },
@@ -341,7 +348,7 @@ export function CircleDetailPage({
       toast.notify({
         kind: "info",
         message: t("creatorBrowse.circleRefreshQueued", { id: queued.runId }),
-        actionLabel: canOpenWorkflows ? t("nav.activity") : undefined,
+        actionLabel: canOpenWorkflows ? t("workflowPage.viewRun") : undefined,
         onAction: canOpenWorkflows ? () => openRefreshRun(queued.runId) : undefined,
       });
     } catch (error) {
@@ -357,12 +364,18 @@ export function CircleDetailPage({
 
   const firstPull = circle.syncState === "never";
   const catalogSyncedTime = circle.lastSyncedAt ? formatDateTime(circle.lastSyncedAt, resolvedLocale) : "";
-  const catalogNote = firstPull
-    ? t("detailActions.catalogNotPulledHint")
-    : catalogSyncedTime
-      ? t("detailActions.catalogSyncedAt", { time: catalogSyncedTime })
-      : "";
-  const moreMenuItems = [
+  // First pull reads the whole catalog and fills its metadata; Refresh also
+  // matches the circle's works on the remote sources.
+  const runPrimaryRefresh = () =>
+    void queueRefresh(
+      firstPull
+        ? { catalogRefresh: "full", metadataRefresh: "missing" }
+        : { catalogRefresh: "incremental", metadataRefresh: "missing", sourceCheck: true },
+    );
+  const refreshUnavailable = isLoading || refreshBusy;
+  // First pull and Refresh stand beside More; the rest of catalog management
+  // waits in More, each entry only for a viewer allowed to run it.
+  const moreMenuItems: ActionMenuItem[] = [
     ...(canChangeCover
       ? [
           {
@@ -370,6 +383,18 @@ export function CircleDetailPage({
             label: t("detailActions.changeCover"),
             icon: <Image className="h-4 w-4" />,
             onSelect: () => setCoverDialogOpen(true),
+          },
+        ]
+      : []),
+    ...(canRefreshCatalog && !firstPull && metadataMissingWorks > 0
+      ? [
+          {
+            key: "retryMetadata",
+            label: t("detailActions.retryMetadata"),
+            icon: <RefreshCw className="h-4 w-4" />,
+            disabled: refreshUnavailable,
+            hint: t("detailActions.retryMetadataCount", { count: metadataMissingWorks }),
+            onSelect: () => void queueRefresh({ catalogRefresh: "stored", metadataRefresh: "missing" }),
           },
         ]
       : []),
@@ -461,14 +486,13 @@ export function CircleDetailPage({
     if (!target) return;
     await selection.runBusy(async () => {
       try {
-        const syncResult = await api.syncRemoteSourceWork(target.sourceId, target.code, "circle_mark_interest");
-        const markResult = await api.updateWorkUserState(syncResult.workId, { listeningStatus: status });
+        const syncResult = await api.syncRemoteSourceWork(target.sourceId, target.code, "circle_mark_interest", status);
         toast.success(t("creatorBrowse.savedAndMarked", { code: syncResult.primaryCode }));
         const next = await api.getCircle(externalId, detailQuery);
         setDetail({
           ...next,
           works: next.works.map((item) =>
-            item.primaryCode === work.primaryCode ? { ...item, listeningMark: markResult.listeningStatus } : item,
+            item.primaryCode === work.primaryCode ? { ...item, listeningMark: status } : item,
           ),
         });
       } catch (error) {
@@ -519,19 +543,21 @@ export function CircleDetailPage({
   if (notFound) {
     const missing = notFound === "missing";
     return (
-      <NotFoundPage
-        title={missing ? t("creatorBrowse.circleNotInDatabase") : t("creatorBrowse.circleNotFound")}
-        message={
-          !missing
-            ? t("creatorBrowse.circleUnavailable", { id: externalId })
-            : t("creatorBrowse.circleContactAdmin", { id: externalId })
-        }
-        onBack={navigateToList}
-        onOpenLibrary={() => {
-          window.history.pushState({}, "", "/");
-          window.dispatchEvent(new Event("kikoto:navigation"));
-        }}
-      />
+      <>
+        <NotFoundPage
+          title={missing ? t("creatorBrowse.circleNotInDatabase") : t("creatorBrowse.circleNotFound")}
+          message={
+            !missing
+              ? t("creatorBrowse.circleUnavailable", { id: externalId })
+              : t("creatorBrowse.circleContactAdmin", { id: externalId })
+          }
+          onBack={navigateToList}
+          onOpenLibrary={() => {
+            window.history.pushState({}, "", "/");
+            window.dispatchEvent(new Event("kikoto:navigation"));
+          }}
+        />
+      </>
     );
   }
 
@@ -555,81 +581,43 @@ export function CircleDetailPage({
               <span>{circle.externalId}</span>
               <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
             </a>
-            <CatalogSyncBadge state={circle.syncState} appearance="dot" />
+            {/* Attention only matters to someone who can refresh the catalog. */}
+            {canRefreshCatalog && circle.syncState === "attention" && (
+              <CatalogSyncBadge state={circle.syncState} appearance="dot" />
+            )}
+            {/* The Works tab below states the catalog's size. */}
+            <CatalogStatStrip
+              label={t("sheets.catalogAvailability")}
+              stats={[
+                { key: "local", label: t("detailActions.local"), count: circle.localWorks },
+                { key: "remote", label: t("detailActions.remote"), count: circle.remoteWorks },
+                { key: "unavailable", label: t("detailActions.unavailable"), count: circle.missingWorks },
+              ]}
+            />
           </>
         }
-        meta={<UserTagRow tags={circle.userTags} scope="circle" onSave={saveCircleTags} className="mt-2.5" />}
         actions={
-          <div
-            className="flex shrink-0 flex-wrap gap-1.5 lg:gap-2"
-            role="group"
-            aria-label={t("detailActions.circleActions")}
-          >
-            <Button
-              variant={circle.favorite ? "default" : "outline"}
-              size="icon"
-              className="lg:h-[var(--control-height-sm)] lg:w-auto lg:px-[var(--control-padding-sm-x)] lg:text-xs"
-              aria-label={circle.favorite ? t("creator.removeFavorite") : t("creator.addFavorite")}
-              aria-pressed={circle.favorite}
-              title={circle.favorite ? t("creator.removeFavorite") : t("creator.addFavorite")}
-              onClick={() => void toggleCircleFavorite()}
-            >
-              <Heart className={`h-4 w-4 ${circle.favorite ? "fill-current" : ""}`} />
-              <span className="hidden lg:inline">{t("detailActions.favorite")}</span>
-            </Button>
-            {!firstPull && !refreshRun.active && catalogOnlyCount > 0 && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-[var(--control-icon-size)] gap-1.5 px-2 lg:h-[var(--control-height-sm)] lg:gap-2 lg:px-[var(--control-padding-sm-x)]"
-                aria-label={t("detailActions.retryMetadata")}
-                title={t("detailActions.retryMetadataCount", { count: catalogOnlyCount })}
-                disabled={!canRefreshCatalog || isLoading || refreshBusy}
-                onClick={() => void queueRefresh({ catalogRefresh: "stored", metadataRefresh: "missing" })}
-              >
-                <RefreshCw className="h-4 w-4" />
-                <span className="lg:hidden">{t("detailActions.metadata")}</span>
-                <span className="hidden lg:inline">{t("detailActions.retryMetadata")}</span>
-              </Button>
+          <CreatorActionRow label={t("detailActions.circleActions")}>
+            <CreatorFavoriteButton favorite={circle.favorite} onToggle={() => void toggleCircleFavorite()} />
+            {canRefreshCatalog && (
+              <CreatorRefreshButton
+                firstPull={firstPull}
+                refreshing={refreshBusy}
+                disabled={refreshUnavailable}
+                syncedAt={catalogSyncedTime}
+                onRefresh={runPrimaryRefresh}
+                onOpenRun={
+                  canOpenWorkflows && detail?.refresh
+                    ? () => detail.refresh && openRefreshRun(detail.refresh.runId)
+                    : undefined
+                }
+              />
             )}
-            {refreshRun.active && detail?.refresh && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-[var(--control-icon-size)] gap-1.5 px-2 lg:h-[var(--control-height-sm)] lg:gap-2 lg:px-[var(--control-padding-sm-x)]"
-                aria-label={t("detailActions.refreshRunning")}
-                title={canOpenWorkflows ? t("detailActions.viewRefreshRun") : undefined}
-                disabled={!canOpenWorkflows}
-                onClick={() => detail.refresh && openRefreshRun(detail.refresh.runId)}
-              >
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span>{t("detailActions.refreshRunning")}</span>
-              </Button>
-            )}
-            <ActionMenu
-              label={t("detailActions.moreCircleActions")}
-              buttonLabel={t("detailActions.more")}
-              items={moreMenuItems}
-            />
-          </div>
+            <CreatorMoreMenu label={t("detailActions.moreCircleActions")} items={moreMenuItems} />
+          </CreatorActionRow>
         }
       >
-        <CatalogStatStrip
-          label={t("sheets.catalogAvailability")}
-          stats={[
-            { key: "available", label: t("content.available"), count: availableWorkCount },
-            { key: "local", label: t("detailActions.local"), count: circle.localWorks },
-            { key: "remote", label: t("detailActions.remote"), count: circle.remoteWorks },
-            { key: "unavailable", label: t("detailActions.unavailable"), count: circle.missingWorks },
-          ]}
-          availability={{ total: circle.catalogWorks, local: circle.localWorks, available: availableWorkCount }}
-          availabilityLabel={t("creator.availabilityBreakdown", {
-            local: circle.localWorks,
-            remote: Math.max(0, availableWorkCount - circle.localWorks),
-            missing: circle.missingWorks,
-          })}
-          note={catalogNote}
-        />
+        <UserTagRow tags={circle.userTags} scope="circle" onSave={saveCircleTags} variant="chip" />
       </CreatorDetailHeader>
 
       <section ref={resultsScroll.anchorRef} className="scroll-mt-24 space-y-3">
@@ -654,44 +642,32 @@ export function CircleDetailPage({
           }
           query={workQuery}
           searchLabel={t("detailActions.searchCatalogWorks")}
-          mobileSearch={isSeriesView}
-          mobileSearchAction={
-            isSeriesView ? (
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="relative"
-                aria-label={t("detailActions.catalogOptions")}
-                title={t("detailActions.catalogOptions")}
-                aria-haspopup="dialog"
-                aria-expanded={catalogOptionsOpen}
-                onClick={() => setCatalogOptionsOpen(true)}
-              >
-                <SlidersHorizontal className="h-4 w-4" />
-                {(workQuery.trim() || availabilityFilter !== "all" || selection.selectionMode) && (
-                  <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary" aria-hidden="true" />
-                )}
-              </Button>
-            ) : undefined
-          }
           onQueryChange={changeWorkQuery}
-          sort={showsWorks ? <LibrarySortButton {...sortProps} variant="toolbar" /> : undefined}
-          mobileSort={showsWorks ? <LibrarySortButton {...sortProps} /> : undefined}
-          cardModes={cardModes}
+          sort={showsWorks ? <LibrarySortButton {...sortProps} /> : undefined}
           filterLabel={t("detailActions.catalogAvailabilityFilter")}
           filter={availabilityFilter}
           defaultFilter="all"
           filterOptions={circleAvailabilityOptions(t)}
           onFilterChange={changeAvailabilityFilter}
-          pageSize={showsWorks ? workPageSize : undefined}
-          pageSizeOptions={creatorWorkPageSizeOptions}
-          onPageSizeChange={showsWorks ? changeWorkPageSize : undefined}
-          mobileColumns={mobileColumns}
-          desktopColumns={desktopColumns}
-          onMobileColumnsChange={setMobileColumns}
-          onDesktopColumnsChange={setDesktopColumns}
-          selectionMode={isSeriesView ? undefined : selection.selectionMode}
-          onSelectionModeChange={isSeriesView ? undefined : selection.setSelectionMode}
+          // The Works tab states the count, so the caption keeps only the page.
+          caption={showsWorks ? <CreatorWorkCaption page={currentWorkPage} totalPages={totalWorkPages} /> : undefined}
+          view={
+            <CreatorWorkViewMenu
+              display={{
+                cardModes,
+                mobileColumns,
+                desktopColumns,
+                onMobileColumnsChange: setMobileColumns,
+                onDesktopColumnsChange: setDesktopColumns,
+                pageSize: showsWorks ? workPageSize : undefined,
+                pageSizeOptions: showsWorks ? creatorWorkPageSizeOptions : undefined,
+                onPageSizeChange: showsWorks ? changeWorkPageSize : undefined,
+              }}
+              selection={
+                isSeriesView ? undefined : { active: selection.selectionMode, onToggle: selection.toggleSelectionMode }
+              }
+            />
+          }
         />
 
         {circle.worksMeta.truncated && (
@@ -705,61 +681,6 @@ export function CircleDetailPage({
             </span>
           </div>
         )}
-
-        {(!isSeriesView || selectedSeries) && (
-          <div>
-            <WorkCollectionPagination
-              placement="top"
-              page={currentWorkPage}
-              pageSize={workPageSize}
-              totalItems={circle.worksMeta.total}
-              totalPages={totalWorkPages}
-              compactMobile
-              refreshing={isLoading}
-              refreshingLabel={t("creatorBrowse.refreshingCircles")}
-              leadingControls={
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="relative h-11 w-11 lg:hidden"
-                  aria-label={t("detailActions.catalogOptions")}
-                  title={t("detailActions.catalogOptions")}
-                  aria-haspopup="dialog"
-                  aria-expanded={catalogOptionsOpen}
-                  onClick={() => setCatalogOptionsOpen(true)}
-                >
-                  <SlidersHorizontal className="h-4 w-4" />
-                  {(workQuery.trim() || availabilityFilter !== "all" || selection.selectionMode) && (
-                    <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-primary" aria-hidden="true" />
-                  )}
-                </Button>
-              }
-              onPageChange={changeWorkPage}
-            />
-          </div>
-        )}
-
-        <CircleCatalogOptionsSheet
-          open={catalogOptionsOpen}
-          onClose={() => setCatalogOptionsOpen(false)}
-          isSeriesView={isSeriesView}
-          selectionMode={selection.selectionMode}
-          availabilityFilter={availabilityFilter}
-          onAvailabilityFilterChange={changeAvailabilityFilter}
-          query={workQuery}
-          onQueryChange={changeWorkQuery}
-          pageSize={workPageSize}
-          pageSizeOptions={creatorWorkPageSizeOptions}
-          onPageSizeChange={changeWorkPageSize}
-          mobileColumns={mobileColumns}
-          onMobileColumnsChange={setMobileColumns}
-          cardMode={mobileCardMode}
-          onCardModeChange={setMobileCardMode}
-          onSelectWorks={() => {
-            setCatalogOptionsOpen(false);
-            selection.toggleSelectionMode();
-          }}
-        />
 
         {isSeriesView ? (
           <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
@@ -797,7 +718,7 @@ export function CircleDetailPage({
                 {selectedSeries && (
                   <div className="flex shrink-0 gap-2">
                     {selectedSeries.url && (
-                      <Button variant="outline" size="sm" asChild>
+                      <Button variant="ghost" size="icon" className={creatorQuietActionClassName} asChild>
                         <a href={selectedSeries.url} target="_blank" rel="noreferrer">
                           <ExternalLink className="h-4 w-4" />
                           {t("creatorBrowse.dlsiteSeries")}

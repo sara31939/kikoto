@@ -19,6 +19,7 @@ import { useLocale } from "@/i18n/LocaleProvider";
 import { formatRelativeTime, parseWorkflowTimestamp } from "@/features/workflows/runPresentation";
 import { useNow } from "@/features/workflows/useRunClock";
 import { workflowCopy } from "@/features/workflows/workflowPageModel";
+import { useArmedConfirm } from "@/hooks/useArmedConfirm";
 import { api, type AvailabilityWatch, type AvailabilityWatchTarget } from "@/lib/api";
 import { cn } from "@/lib/tailwindClassNames";
 
@@ -39,7 +40,6 @@ import {
   type WatchTargetAction,
   type WatchTargetGroup,
 } from "./availabilityWatchModel";
-import { useArmedConfirm } from "./useArmedConfirm";
 import type { AvailabilityWatchState } from "./useAvailabilityWatch";
 import type { WatchTargetActions } from "./useWatchTargetActions";
 
@@ -396,7 +396,6 @@ export function AvailabilityWatchPool({
         </div>
         {parsed && <AddPreview id="availability-watch-add-preview" parsed={parsed} />}
         {addError && <p className="mt-2 text-xs text-error-foreground">{addError}</p>}
-        <p className="mt-2 text-xs text-muted-foreground">{workflowCopy("watchPoolDescription")}</p>
       </div>
 
       <div className="flex flex-wrap items-center gap-2">

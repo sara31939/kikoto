@@ -82,6 +82,8 @@ type PlayerContextValue = {
   moveQueueItem: (queueItemId: string, direction: -1 | 1) => void;
   moveQueueItemTo: (queueItemId: string, targetIndex: number) => void;
   removeQueueItem: (queueItemId: string) => void;
+  /** Removes several queue items at once, as removing each in turn would. */
+  removeQueueItems: (queueItemIds: Iterable<string>) => void;
   clearQueue: () => void;
   selectLocation: (locationId: number) => void;
   /** Whether this account lets the Now Playing source label switch locations. */
@@ -168,6 +170,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const { saveProgress, flushProgress, checkpointProgress } = usePlaybackProgress(
     engine,
     Boolean(auth.user) && !auth.demoMode && auth.hasPermission("playback:use"),
+    Boolean(auth.user) && !auth.demoMode && auth.hasPermission("playback:use"),
     principalID,
   );
   const { sleepRewindMinutes, setSleepRewindMinutes } = useSleepRewindPreference(principalID);
@@ -232,6 +235,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     moveQueueItemTo,
     moveQueueItem,
     removeQueueItem,
+    removeQueueItems,
     clearQueue,
     selectLocation,
   } = usePlayerQueueActions({
@@ -344,6 +348,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       moveQueueItem,
       moveQueueItemTo,
       removeQueueItem,
+      removeQueueItems,
       clearQueue,
       selectLocation,
       sourceSwitchingEnabled,
@@ -390,6 +395,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       moveQueueItem,
       moveQueueItemTo,
       removeQueueItem,
+      removeQueueItems,
       clearQueue,
       selectLocation,
       sourceSwitchingEnabled,

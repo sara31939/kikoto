@@ -16,7 +16,7 @@ vi.mock("@/lib/serverConfig", () => ({
 }));
 vi.mock("@/lib/mobileDiagnostics", () => ({ recordApiError }));
 
-import { api, ApiError, assetURL, mediaDownloadURL } from "./api";
+import { api, ApiError, assetURL } from "./api";
 import { apiSessionVersion, changeApiSession, observeApiPrincipal } from "./apiSession";
 import { getText } from "./apiTransport";
 import { setDemoMetadataLanguageUser, writeDemoMetadataLanguages } from "./demoMetadataLanguages";
@@ -68,7 +68,6 @@ describe("API client transport", () => {
     expect(init.redirect).toBe("error");
     expect(new Headers(init.headers).get("Authorization")).toBeNull();
     expect(assetURL("/assets/example-cover.jpg")).toBe("/assets/example-cover.jpg");
-    expect(mediaDownloadURL(7)).toBe("/api/media/7/download");
   });
 
   it("sends a Demo visitor's browser-local metadata language with authenticated requests", async () => {
@@ -166,6 +165,30 @@ describe("API client transport", () => {
       expect(init.credentials).toBe(native ? "omit" : "include");
       expect(new Headers(init.headers).get("Authorization")).toBe(native ? "Bearer synthetic-token" : null);
     }
+  });
+
+  it.each([false, true])("reads an upstream text URL without the session when native=%s", async (native) => {
+    isNativeApp.mockReturnValue(native);
+    getStoredServerURL.mockReturnValue("https://mobile.example.invalid/kikoto");
+    getStoredSessionToken.mockReturnValue("synthetic-token");
+    const fetchMock = vi.fn().mockImplementation(async () => new Response("Example lyrics"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.getTextPreview("https://upstream.example.invalid/files/readme.txt")).resolves.toBe(
+      "Example lyrics",
+    );
+    const [upstreamURL, upstreamInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(upstreamURL).toBe("https://upstream.example.invalid/files/readme.txt");
+    expect(upstreamInit.credentials).toBe("omit");
+    const upstreamHeaders = new Headers(upstreamInit.headers);
+    expect(upstreamHeaders.get("Authorization")).toBeNull();
+    expect(upstreamHeaders.get("X-Kikoto-Mobile")).toBeNull();
+
+    if (!native) return;
+    // An absolute URL on the selected server is still this server's.
+    await api.getTextPreview("https://mobile.example.invalid/kikoto/api/media/1/text");
+    const [, ownInit] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(new Headers(ownInit.headers).get("Authorization")).toBe("Bearer synthetic-token");
   });
 
   it.each([false, true])("fences a previous session's text body, including failure=%s", async (failure) => {

@@ -9,7 +9,6 @@ export const subscriptionsJapanese = {
     },
     views: {
       label: "「見つける」の表示",
-      "for-you": "あなた向け",
       releases: "新着",
       rankings: "ランキング",
       watch: "監視",
@@ -17,16 +16,9 @@ export const subscriptionsJapanese = {
     },
     forYou: {
       label: "あなた向け",
+      settings: "あなた向けの設定",
       temperature: {
-        label: "冒険度",
-        safe: "控えめ",
-        balanced: "バランス",
-        adventurous: "冒険",
-        hints: {
-          safe: "好みに近い作品を選びます。",
-          balanced: "好みの作品に少し意外性を加えます。",
-          adventurous: "いつもの好みから離れた作品も選びます。",
-        },
+        label: "温度",
       },
       columnsLabel: "あなた向けの列",
       columns: {
@@ -34,22 +26,14 @@ export const subscriptionsJapanese = {
         try_new: "新しく試す",
         listen_again: "もう一度聴く",
       },
-      descriptions: {
-        maybe_like: "まだ聴いていない、好みに近い作品",
-        try_new: "あまり聴かないサークル・声優・タグ",
-        listen_again: "気に入って、しばらく聴いていない作品",
-      },
-      drawAgain: "引き直す",
       drawAgainColumn: "「{{column}}」を引き直す",
-      coldStart:
-        "作品を評価したり、お気に入りやマークを付けたりすると、好みを学習します。それまでは「気に入りそう」は DLsite の評価と販売数に従います。",
       preparing: "おすすめを準備しています。",
       failed: "あなた向けの作品を選べませんでした。",
       columnFailed: "この列を選べませんでした。",
       empty: {
         maybe_like: "まだ聴いていないローカル作品はすべて他の列にあります。",
-        try_new: "この冒険度で新しいと言える作品はありません。",
-        listen_again: "この冒険度でもう一度聴く作品はありません。",
+        try_new: "この温度で新しいと言える作品はありません。",
+        listen_again: "この温度でもう一度聴く作品はありません。",
         listenAgainCold: "再生した作品は、しばらく経つとここに表示されます。",
       },
       elapsed: {
@@ -85,6 +69,7 @@ export const subscriptionsJapanese = {
       label: "表示中の作品の操作",
       button: "操作",
       viewRun: "実行を表示",
+      viewRuns: "実行の一覧を表示",
       metadata: {
         label: "メタデータを同期",
         hint: "メタデータがない作品と、同期から1日以上たった作品が対象です。ライブラリにない作品は追加されます。",
@@ -110,7 +95,7 @@ export const subscriptionsJapanese = {
         partial: "ソースの確認が完了しました。一部の作品は確認できませんでした。",
         failed: "ソースの確認に失敗しました。",
         queueFailed: "ソースの確認をキューに追加できませんでした。",
-        noSource: "確認できるリモートソースがありません。先に設定で互換ソースを追加してください。",
+        noSource: "確認できるリモートソースがありません。先に「システム → ライブラリ」で互換ソースを追加してください。",
       },
     },
     feed: {
@@ -203,9 +188,8 @@ export const subscriptionsJapanese = {
       availabilityWatch: "配信状況の監視をチェック",
       availabilityWatchDescription: "更新のたびに配信状況の監視のチェックを実行します。",
       nextRun: "次回の更新：",
-      lastRun: "前回の更新：",
       off: "オフ",
-      viewRun: "最新の実行を表示",
+      latestRun: "最新の更新",
       lastErrorNotice: "前回の更新に確認が必要です。詳細は最新の実行を開いてください。",
       saveFailed: "スケジュールを保存できませんでした。",
       queued: "更新をキューに追加しました。",

@@ -9,7 +9,6 @@ export const subscriptionsHans = {
     },
     views: {
       label: "发现视图",
-      "for-you": "为你推荐",
       releases: "新作",
       rankings: "排行榜",
       watch: "监视",
@@ -17,16 +16,9 @@ export const subscriptionsHans = {
     },
     forYou: {
       label: "为你推荐",
+      settings: "为你推荐设置",
       temperature: {
-        label: "探索程度",
-        safe: "稳妥",
-        balanced: "均衡",
-        adventurous: "大胆",
-        hints: {
-          safe: "贴近你已经喜欢的作品。",
-          balanced: "在喜欢的作品之外加一点意外。",
-          adventurous: "离你平常听的更远一些。",
-        },
+        label: "温度",
       },
       columnsLabel: "推荐列",
       columns: {
@@ -34,21 +26,14 @@ export const subscriptionsHans = {
         try_new: "尝鲜",
         listen_again: "再听一次",
       },
-      descriptions: {
-        maybe_like: "还没听过、贴近你口味的作品",
-        try_new: "你很少听的社团、声优和标签",
-        listen_again: "喜欢过、已有一段时间没听的作品",
-      },
-      drawAgain: "重新抽取",
       drawAgainColumn: "重新抽取“{{column}}”",
-      coldStart: "为作品评分、收藏或标记后，推荐会学习你的喜好。在此之前，“可能喜欢”按 DLsite 评分和销量排列。",
       preparing: "推荐仍在准备中。",
       failed: "无法抽取推荐。",
       columnFailed: "无法抽取这一列。",
       empty: {
         maybe_like: "所有未听过的本地作品都在其他列中。",
-        try_new: "在这个探索程度下没有足够新的作品。",
-        listen_again: "在这个探索程度下没有可以再听的作品。",
+        try_new: "在这个温度下没有足够新的作品。",
+        listen_again: "在这个温度下没有可以再听的作品。",
         listenAgainCold: "播放过的作品过一段时间后会显示在这里。",
       },
       elapsed: {
@@ -84,6 +69,7 @@ export const subscriptionsHans = {
       label: "当前作品的操作",
       button: "操作",
       viewRun: "查看运行",
+      viewRuns: "查看运行记录",
       metadata: {
         label: "同步元数据",
         hint: "针对没有元数据或同步已超过一天的作品。媒体库中没有的作品会被添加。",
@@ -109,7 +95,7 @@ export const subscriptionsHans = {
         partial: "来源检测已完成，部分作品未能检测。",
         failed: "来源检测失败。",
         queueFailed: "无法将来源检测加入队列。",
-        noSource: "没有可检测的远程来源。请先在设置中添加兼容来源。",
+        noSource: "没有可检测的远程来源。请先在「系统 → 媒体库」中添加兼容来源。",
       },
     },
     feed: {
@@ -196,9 +182,8 @@ export const subscriptionsHans = {
       availabilityWatch: "检查可用性监视",
       availabilityWatchDescription: "每次刷新后运行可用性监视检查。",
       nextRun: "下次刷新：",
-      lastRun: "上次刷新：",
       off: "关闭",
-      viewRun: "查看最近一次运行",
+      latestRun: "最近一次刷新",
       lastErrorNotice: "上次刷新需要处理，请打开最近一次运行查看详情。",
       saveFailed: "无法保存计划。",
       queued: "刷新已加入队列。",

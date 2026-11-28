@@ -1,4 +1,3 @@
-import { ListChecks, Sparkles } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -10,12 +9,11 @@ import { REMOTE_TRACK_PERMISSIONS, usePermissionGate } from "@/auth/usePermissio
 import { BrowseLoadingIndicator } from "@/components/collection/BrowseLoadingIndicator";
 import { DemoContentNotice, DemoRemoteSourceNotice } from "@/components/DemoReadOnlyNotice";
 import { MetadataOnboardingNotice } from "@/components/MetadataOnboardingNotice";
-import { IconButton } from "@/components/ui/icon-button";
 import { toastFromError, useToast } from "@/components/ui/toast";
 import {
   useWorkCollectionLayout,
   workCardLayout,
-  WorkCollectionDisplayPicker,
+  type WorkCollectionDisplayOptionsProps,
 } from "@/components/work-collection/WorkCollectionLayout";
 import { preloadWorkDetail } from "@/features/work-detail/lazyWorkDetail";
 import type { DetailSourceIntent } from "@/features/work-detail/source/sourceContextModel";
@@ -81,7 +79,11 @@ import {
   writeLibraryHistoryBrowseState,
 } from "@/pages/library/libraryBrowseModel";
 import { LibraryDesktopToolbar } from "@/pages/library/LibraryDesktopToolbar";
-import { LibraryPrimaryTabs, LibrarySourceMenu } from "@/pages/library/LibraryPrimaryTabs";
+import { LibraryPrimaryTabs } from "@/pages/library/LibraryPrimaryTabs";
+import { LibraryMarkFilter } from "@/pages/library/LibraryMarkFilter";
+import { LibrarySortButton } from "@/pages/library/LibrarySortButton";
+import { LibraryViewMenu } from "@/pages/library/LibraryViewMenu";
+import { RecentlyPlayedPicker } from "@/pages/library/RecentlyPlayedPicker";
 import {
   knownLibraryRoute,
   libraryBrowseKey,
@@ -173,6 +175,9 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   const [librarySort, setLibrarySort] = useState<LibrarySort>(initialBrowseState.sort);
   const remoteInlineRecommendations = auth.demoMode && recommendBadgesEnabled;
   const [sortDirection, setSortDirection] = useState<SortDirection>(initialBrowseState.direction);
+  // Recommended always lists the best match first; the stored direction stays
+  // for the orders that offer one.
+  const requestDirection: SortDirection = librarySort === "recommend" ? "desc" : sortDirection;
   const [randomSeed, setRandomSeed] = useState(initialBrowseState.randomSeed);
   const [workPage, setWorkPage] = useState(initialBrowseState.page);
   const [workPageSize, setWorkPageSize] = useState<LibraryPageSize>(libraryPageSize(initialBrowseState.pageSize));
@@ -308,7 +313,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       scope: localScope,
       status: statusFilter,
       sort: librarySort,
-      direction: sortDirection,
+      direction: requestDirection,
       randomSeed,
     },
     recommendations,
@@ -327,7 +332,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     sourceStates: remoteSourceStates,
     query: remoteSearchQuery,
     sort: librarySort,
-    direction: sortDirection,
+    direction: requestDirection,
     randomSeed,
     inlineRecommendations: remoteInlineRecommendations,
     recommendationSessionId: recommendationSession.id,
@@ -656,8 +661,8 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     setWorkPage(1);
     setWorkPageSize(pageSize);
   };
+  // A new order keeps the page where it is; the results update in place.
   const changeLibrarySort = (sort: LibrarySort) => {
-    queueResultsScroll();
     if (activeTab.kind === "source") updateRemoteSourceState(activeTab.source.id, { page: 1 });
     else setWorkPage(1);
     if (sort === "random") setRandomSeed(createRandomSortSeed());
@@ -666,13 +671,11 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
   };
   const reshuffle = () => {
     if (librarySort === "recommend") recommendations.recordReshuffle();
-    queueResultsScroll();
     if (activeTab.kind === "source") updateRemoteSourceState(activeTab.source.id, { page: 1 });
     else setWorkPage(1);
     setRandomSeed(createRandomSortSeed());
   };
   const changeSortDirection = (direction: SortDirection) => {
-    queueResultsScroll();
     if (activeTab.kind === "source") updateRemoteSourceState(activeTab.source.id, { page: 1 });
     else setWorkPage(1);
     writeLibrarySortPreference(libraryBrowseKey(activeTab, localScope, browseStorageScope), librarySort, direction);
@@ -683,6 +686,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     setWorkPage(1);
     setStatusFilter(status);
   };
+  const remoteSelected = activeTab.kind === "source";
   const openRecentWork = (work: Work) => openWork(work, recentWorkSourceIntent(work));
   const browseRefreshing =
     activeTab.kind === "source" ? remoteWorks.isLoading && remoteWorks.result !== null : localWorks.isLoading;
@@ -708,51 +712,52 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
     onReshuffle: reshuffle,
     reshuffling: librarySort === "recommend" && localWorks.isLoading,
   };
-  const displayPicker = (
-    <WorkCollectionDisplayPicker
-      mobileColumns={mobileColumns}
-      desktopColumns={desktopColumns}
-      onMobileColumnsChange={setMobileColumns}
-      onDesktopColumnsChange={setDesktopColumns}
-      cardModes={{
-        mobile: mobileCardMode,
-        desktop: desktopCardMode,
-        onMobileChange: setMobileCardMode,
-        onDesktopChange: setDesktopCardMode,
-      }}
-      pageSize={activePageSize}
-      pageSizeOptions={activePageSizeOptions}
-      onPageSizeChange={(value) => {
-        queueResultsScroll();
-        if (activeTab.kind === "source") {
-          updateRemoteSourceState(activeTab.source.id, { pageSize: libraryPageSize(value), page: 1 });
-          return;
-        }
-        changeWorkPageSize(libraryPageSize(value));
-      }}
-      coverSources={{ mode: coverSourceMode, onChange: setCoverSourceMode }}
+  const displayOptions: WorkCollectionDisplayOptionsProps = {
+    mobileColumns,
+    desktopColumns,
+    onMobileColumnsChange: setMobileColumns,
+    onDesktopColumnsChange: setDesktopColumns,
+    cardModes: {
+      mobile: mobileCardMode,
+      desktop: desktopCardMode,
+      onMobileChange: setMobileCardMode,
+      onDesktopChange: setDesktopCardMode,
+    },
+    pageSize: activePageSize,
+    pageSizeOptions: activePageSizeOptions,
+    onPageSizeChange: (value) => {
+      queueResultsScroll();
+      if (activeTab.kind === "source") {
+        updateRemoteSourceState(activeTab.source.id, { pageSize: libraryPageSize(value), page: 1 });
+        return;
+      }
+      changeWorkPageSize(libraryPageSize(value));
+    },
+    coverSources: { mode: coverSourceMode, onChange: setCoverSourceMode },
+  };
+  const phone = mobileNavigationLayout;
+  const controlSize = phone ? "sm" : "md";
+  const sortControl = <LibrarySortButton {...sort} size={controlSize} phone={phone} />;
+  // Remote sources cannot filter by the viewer's quick marks.
+  const markFilter = remoteSelected ? null : (
+    <LibraryMarkFilter value={statusFilter} onChange={changeStatusFilter} size={controlSize} phone={phone} />
+  );
+  const recentlyPlayed = <RecentlyPlayedPicker phone={phone} size={controlSize} onOpen={openRecentWork} />;
+  const viewMenu = (
+    <LibraryViewMenu
+      phone={phone}
+      display={displayOptions}
+      // The recommended order scores every work, so it has no score switch.
+      recommendationScores={
+        librarySort === "recommend" ? null : { enabled: recommendBadgesEnabled, onToggle: recommendations.toggleBadges }
+      }
+      selection={
+        remoteSelected
+          ? { active: remoteSelectionMode, onToggle: () => setRemoteSelectionMode((current) => !current) }
+          : null
+      }
     />
   );
-  // The recommended order scores every work, so it has no badge switch.
-  const recommendationBadgeToggle =
-    librarySort === "recommend" ? null : (
-      <IconButton
-        title={recommendBadgesEnabled ? t("library.hideRecommendationBadges") : t("library.showRecommendationBadges")}
-        onClick={recommendations.toggleBadges}
-      >
-        <Sparkles className={`h-4 w-4 ${recommendBadgesEnabled ? "fill-current text-primary" : ""}`} />
-      </IconButton>
-    );
-  const selectionToggle =
-    activeTab.kind === "source" ? (
-      <IconButton
-        title={remoteSelectionMode ? t("library.cancelSelection") : t("library.select")}
-        aria-pressed={remoteSelectionMode}
-        onClick={() => setRemoteSelectionMode((current) => !current)}
-      >
-        <ListChecks className={`h-4 w-4 ${remoteSelectionMode ? "text-primary" : ""}`} />
-      </IconButton>
-    ) : null;
   const cardLayout = workCardLayout(
     mobileNavigationLayout ? mobileCardMode : desktopCardMode,
     !mobileNavigationLayout,
@@ -769,7 +774,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
       <MetadataOnboardingNotice active={active && showBrowse} />
       {mobileNavigationLayout ? (
         <MobileLibraryToolbar
-          sourceMenu={<LibrarySourceMenu {...primaryTabs} />}
+          source={primaryTabs}
           searchQuery={searchQuery}
           onSearchChange={changeSearchQuery}
           onAddClause={clauseEditor.openAdd}
@@ -786,18 +791,18 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
                 }
               : { page: currentWorkPage, totalPages: totalWorkPages }
           }
-          sort={sort}
-          extras={recommendationBadgeToggle}
-          actions={
+          resultControls={
             <>
-              {displayPicker}
-              {selectionToggle}
+              {sortControl}
+              {markFilter}
             </>
           }
-          statusFilter={activeTab.kind === "source" ? null : statusFilter}
-          onStatusFilterChange={changeStatusFilter}
-          onOpenRecent={openRecentWork}
-          active={active}
+          viewControls={
+            <>
+              {recentlyPlayed}
+              {viewMenu}
+            </>
+          }
         />
       ) : (
         <LibraryDesktopToolbar
@@ -806,13 +811,14 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
           onSearchChange={changeSearchQuery}
           onAddClause={clauseEditor.openAdd}
           addClauseOpen={clauseEditor.editor?.mode === "add"}
-          onOpenRecent={openRecentWork}
-          displayPicker={displayPicker}
-          recommendationAction={recommendationBadgeToggle}
-          sort={sort}
-          selectionToggle={selectionToggle}
-          statusFilter={statusFilter}
-          onStatusFilterChange={changeStatusFilter}
+          controls={
+            <>
+              {sortControl}
+              {markFilter}
+              {recentlyPlayed}
+              {viewMenu}
+            </>
+          }
         />
       )}
       <SearchClauseBadges
@@ -874,6 +880,7 @@ export function LibraryPage({ active = true }: { active?: boolean }) {
             totalPages: totalWorkPages,
             onPageChange: changeWorkPage,
           }}
+          resultCount={localWorks.total}
           loadError={localWorks.loadError}
           isLoading={localWorks.isLoading}
           onRetry={() => localWorks.loadNow(librarySearchQuery, currentWorkPage)}

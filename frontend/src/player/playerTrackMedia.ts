@@ -1,43 +1,5 @@
-import { audioHlsPlayback, mediaHlsPlaylistURL, playbackURL, remoteMediaPlaybackURL } from "./mediaPlayback";
-import { audioNeedsConversion } from "./nextTrackPreload";
 import { playbackKeyForLocation, remotePlaybackKey } from "./playbackIdentity";
 import type { PlayerTrack } from "./playerTypes";
-
-/**
- * Where the player element loads a track from. "direct" is the original file,
- * "hls" a playlist whose segments the server converts as they are needed, and
- * "prepared" one complete conversion for a browser without HLS playback.
- */
-export type PlayerAudioSource = {
-  delivery: "direct" | "hls" | "prepared";
-  url: string;
-};
-
-export function playerTrackAudioSource(
-  track: PlayerTrack,
-  compatibilityMode = false,
-  serverBoost = false,
-): PlayerAudioSource {
-  if (track.locationType === "remote_stream" && track.remoteSourceId && track.remoteWorkCode && track.remotePath) {
-    return {
-      delivery: "direct",
-      url: remoteMediaPlaybackURL(track.remoteSourceId, track.remoteWorkCode, track.remotePath, "audio"),
-    };
-  }
-  // The server can only boost files it reads itself.
-  const boost = serverBoost && supportsCompatibilityPlayback(track);
-  if (!supportsCompatibilityPlayback(track) || !audioNeedsConversion(track.title, compatibilityMode)) {
-    return { delivery: "direct", url: playbackURL(track.streamUrl, "audio", false, true, boost) };
-  }
-  // A video file plays only its audio, never video segments.
-  if (track.locationId > 0 && audioHlsPlayback()) {
-    return {
-      delivery: "hls",
-      url: mediaHlsPlaylistURL(track.locationId, track.kind === "video" ? "audio" : undefined, boost),
-    };
-  }
-  return { delivery: "prepared", url: playbackURL(track.streamUrl, "audio", true, false, boost) };
-}
 
 export function trackPlaybackKey(track: PlayerTrack | null) {
   if (!track) return null;
@@ -60,5 +22,10 @@ export function playbackInstanceKey(track: PlayerTrack | null, reloadToken: numb
 
 /** Compatibility (transcoded) playback only applies to files the server reads itself. */
 export function supportsCompatibilityPlayback(track: Pick<PlayerTrack, "locationType"> | null | undefined) {
-  return track?.locationType === "local" || track?.locationType === "cache";
+  return (
+    track?.locationType === "local" || track?.locationType === "cache" || track?.locationType === RECORD_LOCATION_TYPE
+  );
 }
+
+/** The location type of a Record file in the player. */
+export const RECORD_LOCATION_TYPE = "record";

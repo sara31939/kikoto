@@ -21,19 +21,57 @@ function apiURL(path: string, base = API_BASE()) {
   return `${base}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
+/**
+ * Whether `path` addresses this Kikoto server: a relative path, or an absolute
+ * URL on the origin of the API base, or of the page when there is no base. A
+ * request carries the session only to such an address; a source-returned
+ * upstream URL never receives it.
+ */
+function addressesKikoto(path: string, base = API_BASE()) {
+  if (!/^https?:\/\//i.test(path)) return true;
+  try {
+    return new URL(path).origin === new URL(base || globalThis.location.href).origin;
+  } catch {
+    return false;
+  }
+}
+
 export function assetURL(path: string) {
   if (!path) return "";
   return nativeAssetURL(apiURL(path), API_BASE());
 }
 
-/** Reads a plain-text resource, such as a lyrics file the server generated. */
-export async function getText(path: string, signal?: AbortSignal) {
+/** A text resource longer than the caller's `maxLength`. */
+export class TextTooLargeError extends Error {
+  constructor() {
+    super("The text is too large to read.");
+    this.name = "TextTooLargeError";
+  }
+}
+
+/**
+ * Reads a plain-text resource, such as a lyrics file the server generated.
+ * With `maxLength`, a body declared or read longer than that many bytes or
+ * characters rejects with `TextTooLargeError`. A URL on another host, such as
+ * a remote source's visible file address, is read without the session.
+ */
+export async function getText(path: string, signal?: AbortSignal, { maxLength }: { maxLength?: number } = {}) {
   const version = apiSessionVersion();
   let response: Response | undefined;
   try {
-    response = await fetchAPI(path, { headers: { Accept: "text/plain,text/*" }, signal });
+    response = await fetchAPI(
+      path,
+      { headers: { Accept: "text/plain,text/*" }, signal },
+      undefined,
+      addressesKikoto(path),
+    );
     if (!response.ok) throw await responseError(response, `GET ${path} failed with ${response.status}`);
-    return await response.text();
+    if (maxLength !== undefined && Number(response.headers.get("content-length") ?? 0) > maxLength) {
+      throw new TextTooLargeError();
+    }
+    const text = await response.text();
+    if (maxLength !== undefined && text.length > maxLength) throw new TextTooLargeError();
+    return text;
   } finally {
     try {
       assertApiSession(version);
@@ -184,6 +222,14 @@ export function deleteJSON<T>(path: string): Promise<T> {
   return requestJSON<T>(path, { method: "DELETE" });
 }
 
+export function deleteJSONBody<T>(path: string, body: unknown): Promise<T> {
+  return requestJSON<T>(path, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 // A write that may outlive the page (a pagehide flush) opts into keepalive.
 export async function sendJSONBody<T>(
   method: "POST" | "PATCH" | "PUT",
@@ -219,12 +265,10 @@ function requestInit(init: RequestInit = {}, authenticate = true): RequestInit {
   const headers = new Headers(init.headers);
   const demoMetadataLanguages = demoMetadataLanguagesHeaderValue();
   if (authenticate && demoMetadataLanguages) headers.set(DEMO_METADATA_LANGUAGES_HEADER, demoMetadataLanguages);
-  if (isNativeApp()) {
+  if (isNativeApp() && authenticate) {
     headers.set("X-Kikoto-Mobile", "1");
-    if (authenticate) {
-      const token = getStoredSessionToken();
-      if (token) headers.set("Authorization", `Bearer ${token}`);
-    }
+    const token = getStoredSessionToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
   }
   return {
     ...init,

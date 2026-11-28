@@ -1,4 +1,5 @@
 import { NAVIGATION_EVENT } from "./browserHistory";
+import { workflowRunPath } from "./workflowLinks";
 
 export function openMetadataIssues(runId: number) {
   window.history.pushState({}, "", metadataIssuesURL(runId));
@@ -20,7 +21,5 @@ export function metadataIssueRunFromLocation() {
 // can still recover issues, through the unscoped Metadata issues category.
 export function metadataSyncResultURL(runId: number, needsAttention: boolean, canViewActivity: boolean) {
   if (needsAttention) return metadataIssuesURL(canViewActivity ? runId : undefined);
-  return canViewActivity && Number.isSafeInteger(runId) && runId > 0
-    ? `/workflows?workflow=metadata_sync&activity=1&run=${runId}`
-    : "/metadata";
+  return canViewActivity && Number.isSafeInteger(runId) && runId > 0 ? workflowRunPath(runId) : "/metadata";
 }

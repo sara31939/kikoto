@@ -16,10 +16,11 @@ import { subscriptionApi } from "@/lib/subscriptionApi";
 import { rankingApi } from "@/lib/rankingApi";
 import { customWorkApi } from "@/lib/customWorkApi";
 import { forYouApi } from "@/lib/forYouApi";
+import { recordsApi } from "@/lib/recordsApi";
+import { playbackQueueApi } from "@/lib/playbackQueueApi";
 
 export type { CatalogSyncState } from "@/lib/catalogSyncState";
-export { API_BASE, ApiError, apiTransport, assetURL } from "@/lib/apiTransport";
-export { mediaDownloadURL } from "@/lib/mediaApi";
+export { API_BASE, ApiError, TextTooLargeError, apiTransport, assetURL } from "@/lib/apiTransport";
 export type * from "@/lib/accountApi";
 export type * from "@/lib/libraryApi";
 export type * from "@/lib/workApi";
@@ -38,6 +39,8 @@ export type * from "@/lib/subscriptionApi";
 export type * from "@/lib/rankingApi";
 export type * from "@/lib/customWorkApi";
 export type * from "@/lib/forYouApi";
+export type * from "@/lib/recordsApi";
+export type * from "@/lib/playbackQueueApi";
 
 /**
  * Every domain API behind one object. Each domain module owns its requests and
@@ -62,4 +65,6 @@ export const api = {
   ...rankingApi,
   ...forYouApi,
   ...customWorkApi,
+  ...recordsApi,
+  ...playbackQueueApi,
 };

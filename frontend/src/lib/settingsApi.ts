@@ -8,6 +8,7 @@ import {
   sharedGetJSON,
 } from "@/lib/apiTransport";
 import type { RecommendationConfig } from "@/lib/libraryApi";
+import type { SourcePresenceCheckOptions } from "@/lib/workflowApi";
 
 export type FileSourceDetectResult = {
   detected: boolean;
@@ -44,6 +45,69 @@ export type DatabaseMaintenanceOverview = {
 export type DatabaseCleanupResult = {
   removed: number;
   results: Array<{ key: DatabaseCleanupTaskKey; removed: number; skipped: boolean }>;
+};
+
+/** One work family with local folders, carrying the viewer's own rating and Quick mark. */
+export type LocalWorkCleanupWork = {
+  workId: number;
+  primaryCode: string;
+  title: string;
+  /** The cached or manual cover; empty when the work has none. */
+  coverUrl: string;
+  rating: number | null;
+  listeningStatus: "none" | "want_to_listen" | "listening" | "finished" | "relisten" | "paused";
+  sizeBytes: number;
+  fileCount: number;
+  unknownSizeFiles: number;
+  folders: Array<{ id: number; path: string; online: boolean }>;
+  offline: boolean;
+  /** Another source still provides the work, so forgetting keeps it. */
+  sourceAvailable: boolean;
+};
+
+/** Settled works have no Quick mark or are finished: nothing queues them to be heard. */
+export type LocalWorkCleanupListening = "any" | "none" | "finished" | "settled";
+
+export type LocalWorkCleanupSort = "size" | "rating";
+
+/** One search for local works to clean up; it keeps at most `limit` works. */
+export type LocalWorkCleanupSearch = {
+  /** Any rating, only unrated works, or rated works up to that many stars. */
+  rating: "any" | "unrated" | number;
+  listening: LocalWorkCleanupListening;
+  minBytes: number;
+  /** A storage pool's path, or null for every pool. */
+  pool: string | null;
+  sort: LocalWorkCleanupSort;
+  direction: "asc" | "desc";
+  limit: number;
+};
+
+/** One page of a search: `total` counts the works it keeps, `matched` every matching work. */
+export type LocalWorkCleanupPage = {
+  works: LocalWorkCleanupWork[];
+  total: number;
+  matched: number;
+  limit: number;
+  page: number;
+  pageSize: number;
+  /** The storage pools of a pooled library; empty for a standard one. */
+  pools: Array<{ path: string; online: boolean }>;
+};
+
+export type LocalWorkCleanupRequest = {
+  works: Array<{ workId: number; folders: Array<{ id: number; path: string }> }>;
+  clearRating: boolean;
+  clearMark: boolean;
+  forget: boolean;
+  confirmHighRated: boolean;
+};
+
+export type LocalWorkCleanupQueued = {
+  runId: number;
+  jobId: number;
+  status: "queued";
+  works: number;
 };
 
 /** Compaction runs as a workflow job; an active run is returned instead of a second one. */
@@ -149,6 +213,40 @@ export type FileSource = {
   };
   healthStatus: string;
   lastCheckedAt: string | null;
+  /** Listed for a remote source that answers work checks. */
+  presenceCheck?: FileSourcePresenceCheck;
+};
+
+/**
+ * A remote source's library work check: its latest run, its next scheduled
+ * one, the options Run and the automatic checks share, and its startup and
+ * interval checks.
+ */
+export type FileSourcePresenceCheck = {
+  lastRun: {
+    id: number;
+    status: string;
+    at: string;
+    checkedWorks: number;
+    availableWorks: number;
+  } | null;
+  nextRunAt: string | null;
+  options: SourcePresenceCheckOptions;
+  startup: SourcePresenceAutomaticCheck;
+  schedule: SourcePresenceAutomaticCheck & { intervalMinutes: number };
+};
+
+export type SourcePresenceAutomaticCheck = {
+  enabled: boolean;
+  /** Why a switched-off check was paused, such as its source being disabled. */
+  pausedMessage?: string;
+};
+
+/** Replaces a source's check options and its startup and interval checks together. */
+export type SourcePresenceCheckSettings = {
+  options: SourcePresenceCheckOptions;
+  startup: { enabled: boolean };
+  schedule: { enabled: boolean; intervalMinutes: number };
 };
 
 /** Copy the work's own lyrics into Kikoto's lyrics folder, or move them there. */
@@ -166,6 +264,7 @@ export type VideoHardwareStatus = {
 
 export type RuntimeSettings = {
   anonymousAccessEnabled: boolean;
+  anonymousRemoteBrowsingEnabled?: boolean;
   cacheEnabled: boolean;
   mode: "development" | "production" | "demo";
   demoMode: boolean;
@@ -173,6 +272,8 @@ export type RuntimeSettings = {
   recommendationThreshold: number;
   /** How a lyrics edit brings lyrics of the work folder into Kikoto's lyrics folder by default; signed-in readers only. */
   folderLyricsMode?: FolderLyricsMode;
+  /** Whether the Record library is on; signed-in readers only. */
+  recordLibraryEnabled?: boolean;
 };
 
 export type AppUpdate = {
@@ -185,6 +286,7 @@ export type AppUpdate = {
 
 export type AppSettings = {
   anonymousAccessEnabled: boolean;
+  anonymousRemoteBrowsingEnabled?: boolean;
   localScanDepth: number;
   /** Shallowest scan depth that still reaches every Fetch folder. */
   localScanDepthMinimum?: number;
@@ -215,6 +317,8 @@ export type AppSettings = {
   hideRemoteSourceAddresses: boolean;
   /** How a lyrics edit brings lyrics of the work folder into Kikoto's lyrics folder unless it chooses. */
   folderLyricsMode: FolderLyricsMode;
+  /** Offers the Record library and its API. */
+  recordLibraryEnabled: boolean;
   directoryRoutingRules: DirectoryRoutingRule[];
   recommendationThreshold: number;
   recommendationConfig: RecommendationConfig;
@@ -325,6 +429,7 @@ export const settingsApi = {
     kikoeruImportPrivateAddresses?: boolean;
     hideRemoteSourceAddresses?: boolean;
     folderLyricsMode?: FolderLyricsMode;
+    recordLibraryEnabled?: boolean;
     directoryRoutingRules?: DirectoryRoutingRule[];
     recommendationThreshold?: number;
     recommendationConfig?: RecommendationConfig;
@@ -350,12 +455,30 @@ export const settingsApi = {
   ) => patchJSONBody<FileSource>(`/api/file-sources/${id}`, payload),
   deleteFileSource: (id: number) => deleteJSON<{ ok: boolean }>(`/api/file-sources/${id}`),
   checkFileSourceHealth: (id: number) => postJSON<FileSourceHealthCheckResult>(`/api/file-sources/${id}/health-check`),
+  updateSourcePresenceCheck: (id: number, payload: SourcePresenceCheckSettings) =>
+    putJSONBody<FileSourcePresenceCheck>(`/api/file-sources/${id}/presence-check`, payload),
   detectFileSource: (url: string, signal?: AbortSignal) =>
     postJSONBody<FileSourceDetectResult>("/api/file-sources/detect", { url }, signal),
   getDatabaseMaintenance: () => getJSON<DatabaseMaintenanceOverview>("/api/maintenance/database"),
   cleanupDatabase: (tasks: DatabaseCleanupTaskKey[]) =>
     postJSONBody<DatabaseCleanupResult>("/api/maintenance/database/cleanup", { tasks }),
   optimizeDatabase: () => postJSONBody<DatabaseOptimizeResult>("/api/maintenance/database/optimize", {}),
+  listLocalWorkCleanup: (search: LocalWorkCleanupSearch, page: number, pageSize: number, signal?: AbortSignal) => {
+    const params = new URLSearchParams({
+      rating: String(search.rating),
+      listening: search.listening,
+      minBytes: String(search.minBytes),
+      sort: search.sort,
+      direction: search.direction,
+      limit: String(search.limit),
+      page: String(page),
+      pageSize: String(pageSize),
+    });
+    if (search.pool !== null) params.set("pool", search.pool);
+    return getJSON<LocalWorkCleanupPage>(`/api/maintenance/local-works/cleanup?${params.toString()}`, signal);
+  },
+  cleanupLocalWorks: (request: LocalWorkCleanupRequest) =>
+    postJSONBody<LocalWorkCleanupQueued>("/api/maintenance/local-works/cleanup", request),
   getLibraryLayout: (signal?: AbortSignal) => getJSON<LibraryLayout>("/api/library/layout", signal),
   updateLibraryLayout: (payload: LibraryLayoutUpdate) => putJSONBody<LibraryLayout>("/api/library/layout", payload),
   previewLibraryMigration: (layout: LibraryLayoutUpdate) =>

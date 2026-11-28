@@ -2,7 +2,7 @@ import { apiSessionVersion, assertApiSession } from "@/lib/apiSession";
 import { deleteJSON, getJSON, postJSONBody } from "@/lib/apiTransport";
 import type { LibrarySort, ListeningStatus, SortDirection, SourcePresenceItem, UserTag } from "@/lib/libraryApi";
 import type { LocalFolderAvailability } from "@/lib/localAvailability";
-import type { MediaCacheResult } from "@/lib/mediaApi";
+import type { LyricsChoiceReason, MediaCacheResult } from "@/lib/mediaApi";
 import type { WorkMetadataPresentation } from "@/lib/metadataApi";
 
 export type RemoteWorksResponse = {
@@ -82,7 +82,12 @@ export type RemoteTrack = {
   localPath: string;
   localAvailable: boolean;
   children: RemoteTrack[];
+  /** The lyrics files of the same tree that name matching picks for an audio or video file, best first. */
+  lyricsChoices?: RemoteLyricsChoice[];
 };
+
+/** A lyrics file of a remote edition's tree, by its path in the tree. */
+export type RemoteLyricsChoice = { path: string; reason: LyricsChoiceReason };
 
 export type RemoteWorkDetail = {
   sourceId: number;
@@ -170,6 +175,8 @@ export type RemoteWorkSyncResult = {
   syncedMediaItems: number;
   syncedLocations: number;
   triggerReason: string;
+  /** The mark the sync set, when the request asked for one. */
+  listeningStatus?: ListeningStatus;
 };
 
 export type RemoteWorkTrackResult = {
@@ -265,6 +272,8 @@ export type RemoteWorkSavePlan = {
   fetchRoot: RemoteFetchRootReview;
   localFiles: RemoteWorkSaveLocalFile[];
   items: RemoteWorkSavePlanItem[];
+  /** Folders archived for review once the Fetch is published: those its copied local files came from. */
+  archiveRoots?: string[];
   summary: RemoteWorkSaveSummary;
   preparation: RemoteFetchPreparation;
 };
@@ -345,7 +354,8 @@ export type RemoteEntityRef = {
 export const DEFAULT_MANUAL_FETCH_MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024;
 
 export const remoteSourceApi = {
-  getRemoteTrackRunStatus: (id: number) => getJSON<RemoteTrackRunStatus>(`/api/remote-track-runs/${id}`),
+  getRemoteTrackRunStatus: (id: number, signal?: AbortSignal) =>
+    getJSON<RemoteTrackRunStatus>(`/api/remote-track-runs/${id}`, signal),
   listRemoteSourceWorks: (
     id: number,
     page = 1,
@@ -461,9 +471,11 @@ export const remoteSourceApi = {
     postJSONBody<RemoteWorkTrackResult>(`/api/remote-sources/${id}/works/${encodeURIComponent(code)}/track`, {
       triggerReason,
     }),
-  syncRemoteSourceWork: (id: number, code: string, triggerReason: string) =>
+  /** A listeningStatus also marks the added work, in the same transaction. */
+  syncRemoteSourceWork: (id: number, code: string, triggerReason: string, listeningStatus?: ListeningStatus) =>
     postJSONBody<RemoteWorkSyncResult>(`/api/remote-sources/${id}/works/${encodeURIComponent(code)}/sync`, {
       triggerReason,
+      ...(listeningStatus ? { listeningStatus } : {}),
     }),
   untrackWorkSource: (workId: number, sourceId: number) =>
     deleteJSON<WorkSourceUntrackResult>(`/api/works/${workId}/tracked-sources/${sourceId}`),

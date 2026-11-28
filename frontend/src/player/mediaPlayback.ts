@@ -148,6 +148,18 @@ export async function videoPlaybackCapabilities(): Promise<string[]> {
   return [...videoCapabilities, ...hlsVideoCapabilities].filter((_, index) => kept[index]).map(({ key }) => key);
 }
 
+/** The capability a client declares when it plays an audio HLS playlist. */
+const AUDIO_HLS_CAPABILITY = "audio-hls";
+
+/**
+ * What the audio player declares to playback info: the formats the element
+ * decodes and whether it plays an audio HLS playlist.
+ */
+export function audioPlaybackCapabilities(): string[] {
+  const capabilities = playbackCapabilities("audio");
+  return audioHlsPlayback() ? [...capabilities, AUDIO_HLS_CAPABILITY] : capabilities;
+}
+
 export type AudioHlsPlayback = "native" | "mse";
 
 /**
@@ -202,19 +214,6 @@ function mediaSourceSupports(mime: string) {
   }
 }
 
-/**
- * The HLS VOD playlist of a local or cached location. The "audio" profile
- * plays only the audio of a video; the media kind is played otherwise.
- */
-export function mediaHlsPlaylistURL(locationId: number, profile?: PlaybackProfile, serverBoost = false) {
-  const url = `/api/media/${encodeURIComponent(String(locationId))}/hls/index.m3u8`;
-  const query = new URLSearchParams();
-  if (profile) query.set("profile", profile);
-  if (serverBoost) query.set("boost", "auto");
-  const suffix = query.toString();
-  return suffix ? `${url}?${suffix}` : url;
-}
-
 function appendQuery(url: string, query: URLSearchParams) {
   const hashIndex = url.indexOf("#");
   const base = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
@@ -223,20 +222,13 @@ function appendQuery(url: string, query: URLSearchParams) {
   return `${base}${separator}${query.toString()}${hash}`;
 }
 
-export function playbackURL(
-  url: string,
-  profile: PlaybackProfile,
-  forceTranscode = false,
-  forceDirect = false,
-  serverBoost = false,
-) {
+export function playbackURL(url: string, profile: PlaybackProfile, forceTranscode = false, serverBoost = false) {
   if (!url) return "";
   const query = new URLSearchParams();
   query.set("profile", profile);
   const capabilities = playbackCapabilities(profile);
   if (capabilities.length > 0) query.set("capabilities", capabilities.join(","));
   if (forceTranscode) query.set("forceTranscode", "1");
-  if (forceDirect) query.set("forceDirect", "1");
   if (serverBoost) query.set("boost", "auto");
   return appendQuery(url, query);
 }
@@ -258,11 +250,5 @@ export function remoteMediaURL(sourceId: number, workCode: string, remotePath: s
 export function forcePlaybackTranscodeURL(url: string) {
   if (!url) return "";
   const query = new URLSearchParams({ forceTranscode: "1" });
-  return appendQuery(url, query);
-}
-
-export function forcePlaybackDirectURL(url: string) {
-  if (!url) return "";
-  const query = new URLSearchParams({ forceDirect: "1" });
   return appendQuery(url, query);
 }

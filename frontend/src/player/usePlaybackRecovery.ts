@@ -5,8 +5,10 @@ import { useToast } from "@/components/ui/toast";
 import { assetURL } from "@/lib/api";
 import { originalFileNamesShown } from "@/lib/originalFileNames";
 
-import { playerTrackAudioSource, supportsCompatibilityPlayback } from "./playerTrackMedia";
+import { audioSourceCheckURL, forgetAudioSource } from "./audioPlaybackSource";
+import { supportsCompatibilityPlayback } from "./playerTrackMedia";
 import { playerTrackTitle } from "./playerTrackTitle";
+import { probePlaybackStorageOffline, type PlaybackStorageOfflineCode } from "./playbackStorageOffline";
 import type { PlaybackCompatibilityScope, PlayerTrack } from "./playerTypes";
 import {
   applyTrackLocation,
@@ -17,7 +19,8 @@ import {
 import type { PlaybackEngine } from "./usePlaybackEngine";
 
 /**
- * Handles a failed source: when source fallback is enabled a missing file
+ * Handles a failed source: a file on an offline library or storage pool pauses
+ * with a notice that says so, when source fallback is enabled a missing file
  * moves to the item's next location, a local file the browser cannot decode offers compatibility playback, and a
  * track with no usable location stops with a retry action.
  */
@@ -48,6 +51,48 @@ export function usePlaybackRecovery(
     resetTrackLocationFailures(locationFailures);
   }, [currentMediaItemId, currentQueueItemId, locationFailures]);
 
+  /** Stops on the failed track with a notice whose action reloads it from the position it reached. */
+  const stopWithRetry = useCallback(
+    (activeTrack: PlayerTrack, instanceKey: string, message: string, kind: "warning" | "error") => {
+      refs.sourceLoadingRef.current = false;
+      updatePlayingState(false);
+      const failureSequence = refs.playbackErrorSequenceRef.current;
+      toast.notify({
+        kind,
+        message,
+        actionLabel: t("common.retry"),
+        onAction: () => {
+          if (
+            refs.currentPlaybackInstanceKeyRef.current !== instanceKey ||
+            refs.playbackErrorSequenceRef.current !== failureSequence
+          )
+            return;
+          resetTrackLocationFailures(locationFailures);
+          if (activeTrack.queueItemId) {
+            refs.pendingPlaybackStartRef.current = {
+              queueItemId: activeTrack.queueItemId,
+              positionSeconds: carriedPlaybackPosition(),
+            };
+          }
+          reloadPlayback();
+          updatePlayingState(true);
+        },
+      });
+    },
+    [carriedPlaybackPosition, locationFailures, refs, reloadPlayback, t, toast, updatePlayingState],
+  );
+
+  /** The disk holding the file is not mounted: another location would only hide that, so playback pauses. */
+  const pauseForOfflineStorage = useCallback(
+    (failedTrack: PlayerTrack, instanceKey: string, code: PlaybackStorageOfflineCode) => {
+      if (refs.currentPlaybackInstanceKeyRef.current !== instanceKey) return;
+      const activeTrack = refs.currentTrackRef.current;
+      if (!activeTrack || activeTrack.locationId !== failedTrack.locationId) return;
+      stopWithRetry(activeTrack, instanceKey, t(`libraryOffline.${code}`), "warning");
+    },
+    [refs, stopWithRetry, t],
+  );
+
   const switchAfterLocationFailure = useCallback(
     (failedTrack: PlayerTrack, instanceKey: string | null) => {
       if (!instanceKey || refs.currentPlaybackInstanceKeyRef.current !== instanceKey) return;
@@ -67,25 +112,12 @@ export function usePlaybackRecovery(
         return;
       }
       if (result.kind === "terminal") {
-        refs.sourceLoadingRef.current = false;
-        updatePlayingState(false);
-        const failureSequence = refs.playbackErrorSequenceRef.current;
-        toast.notify({
-          kind: "error",
-          message: t("player.playbackFailed", { title: playerTrackTitle(activeTrack, originalFileNamesShown()) }),
-          actionLabel: t("common.retry"),
-          onAction: () => {
-            if (
-              refs.currentPlaybackInstanceKeyRef.current !== instanceKey ||
-              refs.playbackErrorSequenceRef.current !== failureSequence
-            )
-              return;
-            resetTrackLocationFailures(locationFailures);
-            carryPosition();
-            reloadPlayback();
-            updatePlayingState(true);
-          },
-        });
+        stopWithRetry(
+          activeTrack,
+          instanceKey,
+          t("player.playbackFailed", { title: playerTrackTitle(activeTrack, originalFileNamesShown()) }),
+          "error",
+        );
         return;
       }
       const nextLocation = result.location;
@@ -115,9 +147,9 @@ export function usePlaybackRecovery(
       flushProgress,
       locationFailures,
       refs,
-      reloadPlayback,
       setQueue,
       sourceFallback,
+      stopWithRetry,
       t,
       toast,
       updatePlayingState,
@@ -140,8 +172,10 @@ export function usePlaybackRecovery(
     }, 3_000);
     // An HLS playlist played through Media Source Extensions has a blob: source.
     const elementSource = audio.currentSrc.startsWith("blob:") ? "" : audio.currentSrc;
-    const sourceURL =
-      elementSource || assetURL(playerTrackAudioSource(failedTrack, refs.compatibilityPlaybackEnabledRef.current).url);
+    const compatibility = refs.compatibilityPlaybackEnabledRef.current;
+    const sourceURL = elementSource || assetURL(audioSourceCheckURL(failedTrack, compatibility));
+    // A retry asks the server again rather than reuse a decision that just failed.
+    forgetAudioSource(failedTrack, compatibility);
     refs.sourceLoadingRef.current = false;
     setIsBuffering(false);
     updatePlayingState(false);
@@ -149,6 +183,7 @@ export function usePlaybackRecovery(
     void (async () => {
       let status: number | null = null;
       let alreadyTranscoded = false;
+      let offline: PlaybackStorageOfflineCode | null = null;
       try {
         if (typeof fetch === "function") {
           const response = await fetch(sourceURL, {
@@ -160,6 +195,7 @@ export function usePlaybackRecovery(
           });
           status = response.status;
           alreadyTranscoded = response.headers.get("X-Kikoto-Playback-Delivery") === "transcoded";
+          if (status === 409) offline = await probePlaybackStorageOffline(sourceURL, controller.signal);
         }
       } catch {
         if (controller.signal.aborted && !timedOut) return;
@@ -172,6 +208,10 @@ export function usePlaybackRecovery(
       )
         return;
       refs.playbackErrorAbortRef.current = null;
+      if (offline) {
+        pauseForOfflineStorage(failedTrack, instanceKey, offline);
+        return;
+      }
       if (status === 404) {
         switchAfterLocationFailure(failedTrack, instanceKey);
         return;
@@ -194,7 +234,16 @@ export function usePlaybackRecovery(
       }
       switchAfterLocationFailure(failedTrack, instanceKey);
     })();
-  }, [refs, setIsBuffering, setPlaybackCompatibility, switchAfterLocationFailure, t, toast, updatePlayingState]);
+  }, [
+    pauseForOfflineStorage,
+    refs,
+    setIsBuffering,
+    setPlaybackCompatibility,
+    switchAfterLocationFailure,
+    t,
+    toast,
+    updatePlayingState,
+  ]);
 
   // play() rejections reach the handler through the engine, which is created first.
   refs.playbackErrorHandlerRef.current = handlePlaybackError;

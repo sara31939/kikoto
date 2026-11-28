@@ -23,6 +23,7 @@ import type {
   LibrarySource,
   MediaFileLocation,
   MediaItem,
+  MediaPlaybackLocation,
   MetadataIssueWork,
   MetadataTag,
   MetadataCircle,
@@ -42,9 +43,16 @@ import type {
   VoiceWorksPage,
   Work,
   WorkDetail,
+  WorkFolderLocation,
+  WorkflowDefinition,
+  WorkflowNotificationsPage,
+  NotificationAttention,
+  NotificationSummary,
   WorkflowRun,
   WorkflowRunDetail,
   WorkflowRunsPage,
+  WorkflowStatus,
+  WorkflowTrigger,
   WorkProgressSummary,
   WorkResolveResponse,
   WorksPage,
@@ -245,9 +253,67 @@ export function mediaLocationFixture(overrides: Partial<MediaFileLocation> = {})
   };
 }
 
+/**
+ * The playback locations the server lists for an item: its usable locations,
+ * local first, then cached, then remote, with remote audio and video streamed
+ * through the location's own route.
+ */
+export function playbackLocationsFixture(item: Pick<MediaItem, "kind" | "locations">): MediaPlaybackLocation[] {
+  const rank = (locationType: string) => ["local", "cache", "remote_stream"].indexOf(locationType) + 1 || 4;
+  return item.locations
+    .filter((location) => location.availability === "available" || location.availability === "remote")
+    .map((location) => {
+      const raw = location.streamUrl || (location.locationType === "remote_stream" ? location.downloadUrl : "");
+      const remoteMedia = location.locationType === "remote_stream" && (item.kind === "audio" || item.kind === "video");
+      return {
+        locationId: location.id,
+        locationType: location.locationType,
+        streamUrl: raw && remoteMedia ? `/api/media/${location.id}/stream` : raw,
+        sourceId: location.fileSourceId,
+        sourceName: location.fileSourceName,
+        availability: location.availability,
+      };
+    })
+    .filter((location) => location.streamUrl)
+    .sort((left, right) => rank(left.locationType) - rank(right.locationType));
+}
+
+/**
+ * The media items with the work folder the server names on each local
+ * location: the deepest of the given folders on the location's source whose
+ * root holds its path, compared case-sensitively. A fixture work without
+ * recorded folders lies in the folder named by its code, so a location below
+ * a work-code segment is placed there. A location that already names its
+ * folder keeps it.
+ */
+export function withLocationFoldersFixture(
+  items: MediaItem[],
+  folders: Pick<WorkFolderLocation, "id" | "fileSourceId" | "rootPath">[] = [],
+): MediaItem[] {
+  const codeFolders = new Map<string, number>();
+  const place = (location: MediaFileLocation) => {
+    if (location.locationType !== "local" || location.folderId !== undefined) return location;
+    const path = location.path.replace(/^\/+|\/+$/g, "");
+    const recorded = folders
+      .filter((folder) => folder.fileSourceId === location.fileSourceId && path.startsWith(`${folder.rootPath}/`))
+      .sort((left, right) => right.rootPath.length - left.rootPath.length)[0];
+    if (recorded) {
+      return { ...location, folderId: recorded.id, relativePath: path.slice(recorded.rootPath.length + 1) };
+    }
+    if (folders.length > 0) return location;
+    const parts = path.split("/");
+    const codeIndex = parts.findIndex((part) => /^(RJ|BJ|VJ|CC)\d{8}$/.test(part));
+    if (codeIndex < 0 || codeIndex === parts.length - 1) return location;
+    const root = parts.slice(0, codeIndex + 1).join("/");
+    if (!codeFolders.has(root)) codeFolders.set(root, 9000 + codeFolders.size);
+    return { ...location, folderId: codeFolders.get(root), relativePath: parts.slice(codeIndex + 1).join("/") };
+  };
+  return items.map((item) => ({ ...item, locations: item.locations.map(place) }));
+}
+
 export function mediaItemFixture(overrides: Partial<MediaItem> = {}): MediaItem {
   const id = overrides.id ?? 1;
-  return {
+  const item: MediaItem = {
     id,
     parentId: null,
     kind: "audio",
@@ -261,6 +327,7 @@ export function mediaItemFixture(overrides: Partial<MediaItem> = {}): MediaItem 
     locations: [],
     ...overrides,
   };
+  return { ...item, playbackLocations: overrides.playbackLocations ?? playbackLocationsFixture(item) };
 }
 
 const userPermissions = ["library:read", "playback:use", "favorites:write", "tags:write"];
@@ -384,6 +451,7 @@ export function appSettingsFixture(overrides: Partial<AppSettings> = {}): AppSet
     kikoeruImportPrivateAddresses: false,
     hideRemoteSourceAddresses: true,
     folderLyricsMode: "copy",
+    recordLibraryEnabled: false,
     directoryRoutingRules: [],
     recommendationThreshold: 50,
     recommendationConfig: recommendationConfigFixture(),
@@ -942,6 +1010,64 @@ export function workflowRunsPageFixture(
     total: runs.length,
     viewTotals: { running: 0, review: 0, failed: 0, completed: 0 },
     ...overrides,
+  };
+}
+
+/**
+ * The status the server states for a workflow, from the runs and triggers a
+ * mock holds: the running run, else the newest queued one, else the newest run
+ * is current; a run that ended with something to decide needs review.
+ */
+export function workflowStatusFixture(
+  definition: Pick<WorkflowDefinition, "id" | "code" | "definitionJson">,
+  runs: readonly WorkflowRun[],
+  triggers: readonly WorkflowTrigger[] = [],
+): WorkflowStatus {
+  const own = runs.filter((run) => run.workflowCode === definition.code).sort((left, right) => right.id - left.id);
+  const active = own.filter((run) => run.status === "queued" || run.status === "running");
+  const currentRun = active.find((run) => run.status === "running") ?? active[0] ?? own[0] ?? null;
+  const nextRuns = triggers
+    .filter(
+      (trigger) =>
+        trigger.workflowDefinitionId === definition.id &&
+        trigger.enabled &&
+        trigger.triggerType === "schedule" &&
+        trigger.nextRunAt,
+    )
+    .map((trigger) => trigger.nextRunAt as string)
+    .sort();
+  let stageCount = 0;
+  try {
+    const nodes = (JSON.parse(definition.definitionJson) as { nodes?: unknown }).nodes;
+    stageCount = Array.isArray(nodes) ? nodes.length : 0;
+  } catch {
+    stageCount = 0;
+  }
+  return {
+    definitionId: definition.id,
+    code: definition.code,
+    stageCount,
+    latestRun: own[0] ?? null,
+    currentRun,
+    activeRuns: active.length,
+    needsReview:
+      currentRun !== null &&
+      currentRun.status !== "queued" &&
+      currentRun.status !== "running" &&
+      (currentRun.pendingCandidates > 0 || (currentRun.pendingFailedMetadata ?? 0) > 0),
+    nextRunAt: nextRuns[0] ?? null,
+  };
+}
+
+/** The header bell's summary: the server adds the notifications total and the attention total into the badge. */
+export function notificationSummaryFixture(
+  notifications: WorkflowNotificationsPage | null,
+  attention: NotificationAttention | null,
+): NotificationSummary {
+  return {
+    unreadCount: (notifications?.total ?? 0) + (attention?.total ?? 0),
+    notifications,
+    attention,
   };
 }
 

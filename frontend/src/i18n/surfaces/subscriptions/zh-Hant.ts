@@ -9,7 +9,6 @@ export const subscriptionsHant = {
     },
     views: {
       label: "發現檢視",
-      "for-you": "為你推薦",
       releases: "新作",
       rankings: "排行榜",
       watch: "監視",
@@ -17,16 +16,9 @@ export const subscriptionsHant = {
     },
     forYou: {
       label: "為你推薦",
+      settings: "為你推薦設定",
       temperature: {
-        label: "探索程度",
-        safe: "穩妥",
-        balanced: "均衡",
-        adventurous: "大膽",
-        hints: {
-          safe: "貼近你已經喜歡的作品。",
-          balanced: "在喜歡的作品之外加一點意外。",
-          adventurous: "離你平常聽的更遠一些。",
-        },
+        label: "溫度",
       },
       columnsLabel: "推薦欄",
       columns: {
@@ -34,21 +26,14 @@ export const subscriptionsHant = {
         try_new: "嘗鮮",
         listen_again: "再聽一次",
       },
-      descriptions: {
-        maybe_like: "還沒聽過、貼近你口味的作品",
-        try_new: "你很少聽的社團、聲優和標籤",
-        listen_again: "喜歡過、已有一段時間沒聽的作品",
-      },
-      drawAgain: "重新抽取",
       drawAgainColumn: "重新抽取「{{column}}」",
-      coldStart: "為作品評分、收藏或標記後，推薦會學習你的喜好。在此之前，「可能喜歡」依 DLsite 評分和銷量排列。",
       preparing: "推薦仍在準備中。",
       failed: "無法抽取推薦。",
       columnFailed: "無法抽取這一欄。",
       empty: {
         maybe_like: "所有未聽過的本機作品都在其他欄中。",
-        try_new: "在這個探索程度下沒有足夠新的作品。",
-        listen_again: "在這個探索程度下沒有可以再聽的作品。",
+        try_new: "在這個溫度下沒有足夠新的作品。",
+        listen_again: "在這個溫度下沒有可以再聽的作品。",
         listenAgainCold: "播放過的作品過一段時間後會顯示在這裡。",
       },
       elapsed: {
@@ -84,6 +69,7 @@ export const subscriptionsHant = {
       label: "目前作品的操作",
       button: "操作",
       viewRun: "查看執行",
+      viewRuns: "查看執行記錄",
       metadata: {
         label: "同步中繼資料",
         hint: "針對沒有中繼資料或同步已超過一天的作品。媒體庫中沒有的作品會被加入。",
@@ -109,7 +95,7 @@ export const subscriptionsHant = {
         partial: "來源檢測已完成，部分作品未能檢測。",
         failed: "來源檢測失敗。",
         queueFailed: "無法將來源檢測加入佇列。",
-        noSource: "沒有可檢測的遠端來源。請先在設定中加入相容來源。",
+        noSource: "沒有可檢測的遠端來源。請先在「系統 → 媒體庫」中加入相容來源。",
       },
     },
     feed: {
@@ -196,9 +182,8 @@ export const subscriptionsHant = {
       availabilityWatch: "檢查可用性監視",
       availabilityWatchDescription: "每次重新整理後執行可用性監視檢查。",
       nextRun: "下次重新整理：",
-      lastRun: "上次重新整理：",
       off: "關閉",
-      viewRun: "查看最近一次執行",
+      latestRun: "最近一次重新整理",
       lastErrorNotice: "上次重新整理需要處理，請開啟最近一次執行查看詳情。",
       saveFailed: "無法儲存排程。",
       queued: "重新整理已加入佇列。",

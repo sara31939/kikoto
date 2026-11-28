@@ -1,30 +1,37 @@
-import { ArrowUpRight, CircleAlert, Heart, Image, Loader2, RefreshCw, SlidersHorizontal } from "lucide-react";
+import { ArrowUpRight, CircleAlert, Image, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { BrowseLoadingIndicator } from "@/components/collection/BrowseLoadingIndicator";
 import { useCollectionResultsScroll } from "@/components/collection/useCollectionResultsScroll";
 import { toastFromError, useToast } from "@/components/ui/toast";
 import { UserTagRow } from "@/components/UserTagRow";
+import { CatalogStatStrip } from "@/components/creator/CatalogStatStrip";
 import { CatalogSyncBadge } from "@/components/creator/CatalogSyncBadge";
-import { ActionMenu } from "@/components/ui/action-menu";
+import type { ActionMenuItem } from "@/components/ui/action-menu";
 import { CreatorCoverDialog, type CreatorCoverWorksRequest } from "@/components/creator/CreatorCoverDialog";
+import {
+  CreatorActionRow,
+  CreatorFavoriteButton,
+  CreatorMoreMenu,
+  CreatorRefreshButton,
+} from "@/components/creator/CreatorDetailActions";
 import { CreatorDetailHeader } from "@/components/creator/CreatorDetailHeader";
+import { CreatorWorkCaption } from "@/components/creator/CreatorWorkResults";
+import { CreatorWorkViewMenu } from "@/components/creator/CreatorWorkViewMenu";
 import { CatalogWorkToolbar } from "@/components/creator/CatalogWorkToolbar";
 import { WorkCollectionLoadingState } from "@/components/work-collection/WorkCollectionLoadingState";
 import { WorkCollectionPagination } from "@/components/work-collection/WorkCollectionPagination";
-import { VoiceWorkOptionsSheet, type VoiceWorkFilter } from "@/pages/VoiceWorkOptionsSheet";
+import { formatDateTime } from "@/i18n/format";
+import { useLocale } from "@/i18n/LocaleProvider";
 import { CreatorWorkFetchConfirm, CreatorWorkSelectionBar } from "@/pages/creator/CreatorWorkSelectionBar";
 import { useCreatorWorkSelection } from "@/pages/creator/useCreatorWorkSelection";
 import { useCreatorWorksBrowse } from "@/pages/creator/useCreatorWorksBrowse";
 import { LibrarySortButton } from "@/pages/library/LibrarySortButton";
 import { creatorWorkPageSizeOptions } from "@/lib/creatorWorksBrowse";
 import { useMobileNavigationLayout } from "@/hooks/useMobileNavigationLayout";
-import { openWorkflowPath, workflowActivityRunPath } from "@/features/workflows/workflowLinks";
 import { useAuth } from "@/auth/AuthProvider";
 import { REMOTE_TRACK_PERMISSIONS, usePermissionGate } from "@/auth/usePermissionGate";
 import { NotFoundPage } from "@/app/NotFoundPage";
@@ -55,13 +62,15 @@ import {
 import { creatorCoverUrl } from "@/lib/creatorApi";
 import { NAVIGATION_EVENT, navigateToHistoryReturn } from "@/lib/browserHistory";
 import { currentClientStorageScope } from "@/lib/clientStorageScope";
+import { createEffectScope, startLoad } from "@/lib/effectScope";
+import { openWorkflowRun } from "@/lib/workflowLinks";
 import { useRemoteWorkActions } from "@/pages/useRemoteWorkActions";
 import {
   readLastVoiceListLocation,
   replaceVoiceRouteKey,
   voiceReturnLabelForLocation,
 } from "@/lib/voiceNavigationState";
-import { voiceWorkRemoteTarget, type VoiceWorkView } from "@/pages/voiceWorkModel";
+import { voiceWorkRemoteTarget, type VoiceWorkFilter, type VoiceWorkView } from "@/pages/voiceWorkModel";
 import {
   isVoiceBulkSelectable,
   isVoiceWorkFetchable,
@@ -107,12 +116,9 @@ export function VoiceDetailPage({ routeKey, active }: { routeKey: string; active
   const resolved = route.status !== "loading" && route.keys.includes(routeKey);
   useEffect(() => {
     if (!active || resolved) return;
-    const controller = new AbortController();
     setRoute({ status: "loading" });
-    void (async () => {
-      try {
-        const next = await api.resolveVoiceRoute(routeKey, controller.signal);
-        if (controller.signal.aborted) return;
+    return startLoad((signal) => api.resolveVoiceRoute(routeKey, signal), {
+      onSuccess: (next) => {
         setRoute({
           status: "found",
           keys: [routeKey, next.routeKey],
@@ -120,14 +126,13 @@ export function VoiceDetailPage({ routeKey, active }: { routeKey: string; active
           routeKey: next.routeKey,
         });
         replaceVoiceRouteKey(routeKey, next.routeKey);
-      } catch (error) {
-        if (controller.signal.aborted) return;
+      },
+      onError: (error) => {
         const notFound = error instanceof ApiError && error.status === 404;
         setRoute({ status: notFound ? "not-found" : "error", keys: [routeKey] });
         if (!notFound) toast.notify(toastFromError(error, t("errors.unavailable")));
-      }
-    })();
-    return () => controller.abort();
+      },
+    });
   }, [active, resolved, routeKey, t, toast]);
 
   if (route.status === "found" && resolved) {
@@ -174,6 +179,7 @@ function VoiceNotFound({ routeKey }: { routeKey: string }) {
 
 function VoiceDetailView({ personId, routeKey, active }: { personId: number; routeKey: string; active: boolean }) {
   const { t } = useTranslation();
+  const { resolvedLocale } = useLocale();
   const auth = useAuth();
   const toast = useToast();
   const requireTrack = usePermissionGate(REMOTE_TRACK_PERMISSIONS, { deferDemo: true });
@@ -202,7 +208,6 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
   const [query, setQuery] = useState("");
   const [requestQuery, setRequestQuery] = useState("");
   const [filter, setFilter] = useState<VoiceWorkFilter>("all");
-  const [workOptionsOpen, setWorkOptionsOpen] = useState(false);
   const [page, setPage] = useState(1);
   const resultsScroll = useCollectionResultsScroll<HTMLElement>();
   const completeResultsScroll = resultsScroll.complete;
@@ -243,9 +248,7 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
 
   useEffect(() => {
     if (!active || loadedPersonID.current === personId) return;
-    const controller = new AbortController();
     setIsLoading(true);
-    setWorkOptionsOpen(false);
     setRemoteMatches([]);
     setCatalogRefresh(null);
     setNotFound(false);
@@ -253,17 +256,15 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
     setTotalWorks(0);
     setPage(1);
     loadedWorksKey.current = "";
-    void (async () => {
-      try {
-        const item = await api.getVoiceSummary(personId, controller.signal);
-        if (controller.signal.aborted) return;
+    return startLoad((signal) => api.getVoiceSummary(personId, signal), {
+      onSuccess: (item) => {
         loadedPersonID.current = personId;
         setDetail(item);
         setMessage("");
         // The works load starts once the summary is shown.
         setIsWorksLoading(true);
-      } catch (error) {
-        if (controller.signal.aborted) return;
+      },
+      onError: (error) => {
         setDetail(null);
         if (error instanceof ApiError && error.status === 404) {
           loadedPersonID.current = personId;
@@ -271,11 +272,9 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
           return;
         }
         toast.notify(toastFromError(error, t("errors.unavailable")));
-      } finally {
-        if (!controller.signal.aborted) setIsLoading(false);
-      }
-    })();
-    return () => controller.abort();
+      },
+      onSettled: () => setIsLoading(false),
+    });
   }, [active, personId, t, toast]);
 
   useEffect(() => {
@@ -306,36 +305,34 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
       completeResultsScroll();
       return;
     }
-    const controller = new AbortController();
     setIsWorksLoading(true);
-    api
-      .getVoiceWorks(personId, {
-        page,
-        pageSize,
-        query: requestQuery,
-        availability: filter,
-        sort: workSort,
-        direction: workSortDirection,
-        signal: controller.signal,
-      })
-      .then((result) => {
-        if (controller.signal.aborted) return;
-        // A page past the end resolves to the last page.
-        loadedWorksKey.current = requestKey(result.page);
-        setWorks(result.works);
-        setTotalWorks(result.total);
-        if (result.page !== page) setPage(result.page);
-        completeResultsScroll();
-      })
-      .catch((error) => {
-        if (controller.signal.aborted) return;
-        cancelResultsScroll();
-        toast.notify(toastFromError(error, t("errors.unavailable")));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setIsWorksLoading(false);
-      });
-    return () => controller.abort();
+    return startLoad(
+      (signal) =>
+        api.getVoiceWorks(personId, {
+          page,
+          pageSize,
+          query: requestQuery,
+          availability: filter,
+          sort: workSort,
+          direction: workSortDirection,
+          signal,
+        }),
+      {
+        onSuccess: (result) => {
+          // A page past the end resolves to the last page.
+          loadedWorksKey.current = requestKey(result.page);
+          setWorks(result.works);
+          setTotalWorks(result.total);
+          if (result.page !== page) setPage(result.page);
+          completeResultsScroll();
+        },
+        onError: (error) => {
+          cancelResultsScroll();
+          toast.notify(toastFromError(error, t("errors.unavailable")));
+        },
+        onSettled: () => setIsWorksLoading(false),
+      },
+    );
   }, [
     active,
     cancelResultsScroll,
@@ -384,37 +381,25 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
   useEffect(() => {
     // Loads once per voice; the ref makes re-runs for a new `t` no-ops.
     if (!active || !hasDetail || loadedCatalogPersonID.current === personId) return;
-    const controller = new AbortController();
-    let cancelled = false;
-    const loadPersistedCatalog = async () => {
-      setIsRemoteLoading(true);
-      try {
-        const persisted = await api.getVoiceRemoteMatches(personId, controller.signal);
-        if (cancelled) return;
+    setIsRemoteLoading(true);
+    return startLoad((signal) => api.getVoiceRemoteMatches(personId, signal), {
+      onSuccess: (persisted) => {
         loadedCatalogPersonID.current = personId;
         setRemoteMatches(persisted.remoteMatches);
         setCatalogRefresh(persisted.refresh);
-      } catch (error) {
-        if (cancelled) return;
-        toast.notify(toastFromError(error, t("errors.unavailable")));
-      } finally {
-        if (!cancelled) setIsRemoteLoading(false);
-      }
-    };
-    void loadPersistedCatalog();
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
+      },
+      onError: (error) => toast.notify(toastFromError(error, t("errors.unavailable"))),
+      onSettled: () => setIsRemoteLoading(false),
+    });
   }, [active, hasDetail, personId, t, toast]);
 
   const canOpenWorkflows = auth.hasPermission("workflows:run") && !auth.demoMode;
   // Demo lists the covers and the catalog sync form for inspection and saves or runs neither.
   const canChangeCover = auth.demoMode || auth.hasPermission("favorites:write");
   const [coverDialogOpen, setCoverDialogOpen] = useState(false);
-  const openRefreshRun = (runId: number) => openWorkflowPath(workflowActivityRunPath(runId));
+  const openRefreshRun = openWorkflowRun;
   const runAction = (runId?: number) =>
-    canOpenWorkflows && runId ? { actionLabel: t("nav.activity"), onAction: () => openRefreshRun(runId) } : {};
+    canOpenWorkflows && runId ? { actionLabel: t("workflowPage.viewRun"), onAction: () => openRefreshRun(runId) } : {};
   // Stable so the refresh poll does not restart on every render.
   const notifyRefreshSettled = useStableCallback((refresh: VoiceCatalogRefreshState) => {
     const failed = refresh.status === "failed";
@@ -428,45 +413,48 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
   const catalogRefreshActive = catalogRefresh?.status === "queued" || catalogRefresh?.status === "running";
   useEffect(() => {
     if (!active || !catalogRefreshActive) return;
-    let cancelled = false;
+    const scope = createEffectScope();
     let requestRunning = false;
     let catalogSignature: string | null = null;
-    const poll = async () => {
+    const poll = () => {
       // A hidden tab skips ticks and catches up as soon as it is shown again.
       if (requestRunning || document.hidden) return;
       requestRunning = true;
-      try {
-        const result = await api.getVoiceRemoteMatches(personId);
-        if (cancelled) return;
-        setRemoteMatches(result.remoteMatches);
-        const stillActive = result.refresh.status === "queued" || result.refresh.status === "running";
-        // The works page follows the catalog as each source's pass lands.
-        const signature = voiceCatalogSignature(result.remoteMatches);
-        if (!stillActive || (catalogSignature !== null && catalogSignature !== signature)) reloadWorks();
-        catalogSignature = signature;
-        if (!stillActive) {
-          notifyRefreshSettled(result.refresh);
-          try {
-            const summary = await api.getVoiceSummary(personId);
-            if (!cancelled) setDetail((current) => (current ? summary : current));
-          } catch {
-            // The persisted catalog remains usable if only the summary refresh fails.
+      scope.load(
+        async (signal) => {
+          const result = await api.getVoiceRemoteMatches(personId, signal);
+          setRemoteMatches(result.remoteMatches);
+          const stillActive = result.refresh.status === "queued" || result.refresh.status === "running";
+          // The works page follows the catalog as each source's pass lands.
+          const signature = voiceCatalogSignature(result.remoteMatches);
+          if (!stillActive || (catalogSignature !== null && catalogSignature !== signature)) reloadWorks();
+          catalogSignature = signature;
+          if (!stillActive) {
+            notifyRefreshSettled(result.refresh);
+            try {
+              const summary = await api.getVoiceSummary(personId, signal);
+              setDetail((current) => (current ? summary : current));
+            } catch {
+              // The persisted catalog remains usable if only the summary refresh fails.
+            }
           }
-        }
-        if (!cancelled) setCatalogRefresh(result.refresh);
-      } catch {
-        // A failed poll keeps the known state; the next tick retries.
-      } finally {
-        requestRunning = false;
-      }
+          return result.refresh;
+        },
+        {
+          onSuccess: setCatalogRefresh,
+          // A failed poll keeps the known state; the next tick retries.
+          onSettled: () => {
+            requestRunning = false;
+          },
+        },
+      );
     };
-    const pollNow = () => void poll();
-    const timer = window.setInterval(pollNow, 2_000);
-    document.addEventListener("visibilitychange", pollNow);
+    const timer = window.setInterval(poll, 2_000);
+    document.addEventListener("visibilitychange", poll);
     return () => {
-      cancelled = true;
+      scope.cancel();
       window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", pollNow);
+      document.removeEventListener("visibilitychange", poll);
     };
   }, [active, catalogRefresh?.runId, catalogRefreshActive, notifyRefreshSettled, personId]);
 
@@ -502,7 +490,17 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
       { catalogRefresh: "stored", metadataRefresh: "missing" },
       t("creatorBrowse.voiceMetadataQueued"),
     );
+  const refreshVoice = () =>
+    void refreshVoiceCatalog(
+      { catalogRefresh: "incremental", metadataRefresh: "missing" },
+      t("creatorBrowse.voiceRefreshQueued"),
+    );
   const firstPull = detail?.syncState === "never";
+  const firstPullVoiceCatalog = () =>
+    void refreshVoiceCatalog(
+      { catalogRefresh: "full", metadataRefresh: "missing" },
+      t("creatorBrowse.firstVoiceCatalogQueued"),
+    );
 
   const failedRemoteSources = remoteMatches.filter(remoteSourceFailed).length;
   const totalPages = Math.max(1, Math.ceil(totalWorks / pageSize));
@@ -615,8 +613,7 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
     await selection.runBusy(async () => {
       setMessage("");
       try {
-        const syncResult = await api.syncRemoteSourceWork(target.sourceId, target.code, "voice_mark_interest");
-        await api.updateWorkUserState(syncResult.workId, { listeningStatus: status });
+        const syncResult = await api.syncRemoteSourceWork(target.sourceId, target.code, "voice_mark_interest", status);
         toast.success(t("creatorBrowse.savedAndMarked", { code: syncResult.primaryCode }));
         await refreshDetail();
       } catch (error) {
@@ -678,19 +675,76 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
     );
   }
 
+  const canManageAliases = auth.demoMode || auth.hasPermission("metadata:sync");
+  const voiceSyncedTime = detail.lastSyncedAt ? formatDateTime(detail.lastSyncedAt, resolvedLocale) : "";
+  const metadataMissingWorks = detail.metadataMissingWorks ?? 0;
+  // First pull and Refresh stand beside More; the rest of catalog management
+  // waits in More, each entry only for a viewer allowed to run it.
+  const moreMenuItems: ActionMenuItem[] = [
+    ...(canChangeCover
+      ? [
+          {
+            key: "cover",
+            label: t("detailActions.changeCover"),
+            icon: <Image className="h-4 w-4" />,
+            onSelect: () => setCoverDialogOpen(true),
+          },
+        ]
+      : []),
+    ...(canForceRefreshCatalog && !firstPull && metadataMissingWorks > 0
+      ? [
+          {
+            key: "retryMetadata",
+            label: t("detailActions.retryMetadata"),
+            icon: <RefreshCw className="h-4 w-4" />,
+            disabled: isRemoteLoading || catalogRefreshActive,
+            hint: t("detailActions.retryMetadataCount", { count: metadataMissingWorks }),
+            onSelect: retryVoiceMetadata,
+          },
+        ]
+      : []),
+    ...(canManageAliases
+      ? [
+          {
+            key: "aliases",
+            label: t("detailActions.manageAliases"),
+            icon: <ArrowUpRight className="h-4 w-4" />,
+            onSelect: () => openVoiceAliasMaintenance(detail.personId),
+          },
+        ]
+      : []),
+  ];
+  const worksBusy = isWorksLoading || isRemoteLoading || catalogRefreshActive;
+
   return (
     <div className="relative space-y-5">
       {message && <div className="rounded-md border bg-card px-3 py-2 text-sm text-muted-foreground">{message}</div>}
 
       <CreatorDetailHeader
+        label={t("detailActions.voiceActorSummary")}
         name={detail.displayName}
         coverUrl={creatorCoverUrl(detail)}
         aliases={detail.aliases}
         eyebrow={
           <>
-            <span className="font-mono tracking-tight">#{detail.personId}</span>
-            <CatalogSyncBadge state={detail.syncState} appearance="dot" />
-            {failedRemoteSources > 0 && (
+            <CatalogStatStrip
+              label={t("detailActions.voiceActorStatistics")}
+              stats={[
+                { key: "works", label: t("detailActions.works"), count: detail.knownWorks },
+                { key: "local", label: t("detailActions.local"), count: detail.localWorks },
+                { key: "remote", label: t("detailActions.remote"), count: detail.remoteWorks },
+                {
+                  key: "missing",
+                  label: t("detailActions.missing"),
+                  count: Math.max(0, detail.knownWorks - detail.playableWorks),
+                },
+              ]}
+            />
+            {/* Sync attention and failed sources only matter to someone who can refresh the catalog. */}
+            {canForceRefreshCatalog && detail.syncState === "attention" && (
+              <CatalogSyncBadge state={detail.syncState} appearance="dot" />
+            )}
+            {canForceRefreshCatalog && failedRemoteSources > 0 && (
               <RemoteSourceWarning
                 count={failedRemoteSources}
                 onOpen={
@@ -700,181 +754,68 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
             )}
           </>
         }
-        meta={
-          <div
-            className="mt-2.5 flex min-w-0 flex-wrap items-center gap-1.5"
-            aria-label={t("detailActions.voiceActorStatistics")}
-          >
-            <Badge variant={detail.localWorks > 0 ? "success" : "outline"} className="tabular-nums">
-              {t("detailActions.localCount", { count: detail.localWorks })}
-            </Badge>
-            <Badge variant="outline" className="tabular-nums">
-              {t("detailActions.remoteCount", { count: detail.remoteWorks })}
-            </Badge>
-            <UserTagRow tags={detail.userTags} scope="voice" onSave={saveVoiceTags} className="min-w-0 flex-1" />
-          </div>
-        }
         actions={
-          <div
-            className="flex flex-nowrap shrink-0 gap-1.5 lg:gap-2"
-            role="group"
-            aria-label={t("detailActions.voiceActorActions")}
-          >
-            <Button
-              variant={detail.favorite ? "default" : "outline"}
-              size="icon"
-              className="h-[var(--control-icon-size)] w-[var(--control-icon-size)] lg:h-[var(--control-height-sm)] lg:w-auto lg:px-[var(--control-padding-sm-x)] lg:text-xs"
-              aria-label={detail.favorite ? t("creator.removeFavorite") : t("creator.addFavorite")}
-              aria-pressed={detail.favorite}
-              title={detail.favorite ? t("creator.removeFavorite") : t("creator.addFavorite")}
-              onClick={() => void toggleFavorite()}
-            >
-              <Heart className={`h-4 w-4 ${detail.favorite ? "fill-current" : ""}`} />
-              <span className="hidden lg:inline">{t("detailActions.favorite")}</span>
-            </Button>
-            {!firstPull && !catalogRefreshActive && (detail.metadataMissingWorks ?? 0) > 0 && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-[var(--control-icon-size)] gap-1.5 px-2 lg:h-[var(--control-height-sm)] lg:gap-2 lg:px-[var(--control-padding-sm-x)] lg:text-xs"
-                aria-label={t("detailActions.retryMetadata")}
-                title={t("detailActions.retryMetadataCount", { count: detail.metadataMissingWorks ?? 0 })}
-                disabled={!canForceRefreshCatalog || isRemoteLoading}
-                onClick={retryVoiceMetadata}
-              >
-                <RefreshCw className="h-4 w-4" />
-                <span className="lg:hidden">{t("detailActions.metadata")}</span>
-                <span className="hidden lg:inline">{t("detailActions.retryMetadata")}</span>
-              </Button>
+          <CreatorActionRow label={t("detailActions.voiceActorActions")}>
+            <CreatorFavoriteButton favorite={detail.favorite} onToggle={() => void toggleFavorite()} />
+            {canForceRefreshCatalog && (
+              <CreatorRefreshButton
+                firstPull={firstPull}
+                refreshing={catalogRefreshActive}
+                disabled={isRemoteLoading}
+                syncedAt={voiceSyncedTime}
+                onRefresh={firstPull ? firstPullVoiceCatalog : refreshVoice}
+                onOpenRun={
+                  canOpenWorkflows && catalogRefresh?.runId ? () => openRefreshRun(catalogRefresh.runId!) : undefined
+                }
+              />
             )}
-            {catalogRefreshActive && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-[var(--control-icon-size)] gap-1.5 px-2 lg:h-[var(--control-height-sm)] lg:gap-2 lg:px-[var(--control-padding-sm-x)] lg:text-xs"
-                aria-label={t("detailActions.refreshRunning")}
-                title={canOpenWorkflows ? t("detailActions.viewRefreshRun") : undefined}
-                disabled={!canOpenWorkflows || !catalogRefresh?.runId}
-                onClick={() => catalogRefresh?.runId && openRefreshRun(catalogRefresh.runId)}
-              >
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span>{t("detailActions.refreshRunning")}</span>
-              </Button>
-            )}
-            <ActionMenu
-              label={t("detailActions.moreVoiceActions")}
-              buttonLabel={t("detailActions.more")}
-              items={[
-                ...(canChangeCover
-                  ? [
-                      {
-                        key: "cover",
-                        label: t("detailActions.changeCover"),
-                        icon: <Image className="h-4 w-4" />,
-                        onSelect: () => setCoverDialogOpen(true),
-                      },
-                    ]
-                  : []),
-                ...(auth.demoMode || auth.hasPermission("metadata:sync")
-                  ? [
-                      {
-                        key: "aliases",
-                        label: t("detailActions.manageAliases"),
-                        icon: <ArrowUpRight className="h-4 w-4" />,
-                        onSelect: () => openVoiceAliasMaintenance(detail.personId),
-                      },
-                    ]
-                  : []),
-              ]}
-            />
-          </div>
+            <CreatorMoreMenu label={t("detailActions.moreVoiceActions")} items={moreMenuItems} />
+          </CreatorActionRow>
         }
-      ></CreatorDetailHeader>
+      >
+        <UserTagRow tags={detail.userTags} scope="voice" onSave={saveVoiceTags} variant="chip" />
+      </CreatorDetailHeader>
 
       <section ref={resultsScroll.anchorRef} className="scroll-mt-24 space-y-3">
         <CatalogWorkToolbar
           query={query}
           searchLabel={t("sheets.searchVoiceWorks")}
           onQueryChange={setQuery}
-          sort={<LibrarySortButton {...sortProps} variant="toolbar" />}
-          mobileSort={<LibrarySortButton {...sortProps} />}
-          cardModes={{
-            mobile: mobileCardMode,
-            desktop: desktopCardMode,
-            onMobileChange: setMobileCardMode,
-            onDesktopChange: setDesktopCardMode,
-          }}
+          sort={<LibrarySortButton {...sortProps} />}
           filterLabel={t("sheets.voiceWorkAvailability")}
           filter={filter}
           defaultFilter="all"
           filterOptions={voiceWorkFilterOptions(t)}
           onFilterChange={changeWorkFilter}
-          pageSize={pageSize}
-          pageSizeOptions={creatorWorkPageSizeOptions}
-          onPageSizeChange={changeWorkPageSize}
-          mobileColumns={mobileColumns}
-          desktopColumns={desktopColumns}
-          onMobileColumnsChange={setMobileColumns}
-          onDesktopColumnsChange={setDesktopColumns}
-          selectionMode={selection.selectionMode}
-          onSelectionModeChange={selection.setSelectionMode}
-        />
-        <div>
-          <WorkCollectionPagination
-            placement="top"
-            page={currentPage}
-            pageSize={pageSize}
-            totalItems={totalWorks}
-            totalPages={totalPages}
-            compactMobile
-            refreshing={isWorksLoading || isRemoteLoading || catalogRefreshActive}
-            refreshingLabel={t("creatorBrowse.refreshingVoiceWorks")}
-            leadingControls={
-              <Button
-                variant="outline"
-                size="icon"
-                className="relative h-11 w-11 lg:hidden"
-                aria-label={t("creatorBrowse.openVoiceWorkOptions")}
-                title={t("sheets.voiceWorkOptions")}
-                aria-haspopup="dialog"
-                aria-expanded={workOptionsOpen}
-                onClick={() => setWorkOptionsOpen(true)}
-              >
-                <SlidersHorizontal className="h-4 w-4" />
-                {(query.trim() || filter !== "all" || selection.selectionMode) && (
-                  <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-primary" aria-hidden="true" />
-                )}
-              </Button>
-            }
-            onPageChange={changePage}
-          />
-        </div>
-        <VoiceWorkOptionsSheet
-          open={workOptionsOpen}
-          onClose={() => setWorkOptionsOpen(false)}
-          filter={filter}
-          onFilterChange={changeWorkFilter}
-          query={query}
-          onQueryChange={setQuery}
-          pageSize={pageSize}
-          pageSizeOptions={creatorWorkPageSizeOptions}
-          onPageSizeChange={changeWorkPageSize}
-          mobileColumns={mobileColumns}
-          onMobileColumnsChange={setMobileColumns}
-          cardMode={mobileCardMode}
-          onCardModeChange={setMobileCardMode}
-          selectionMode={selection.selectionMode}
-          onSelectWorks={() => {
-            setWorkOptionsOpen(false);
-            selection.toggleSelectionMode();
-          }}
+          // The summary's Works count states the size, so the caption keeps only the page.
+          caption={<CreatorWorkCaption page={currentPage} totalPages={totalPages} />}
+          view={
+            <CreatorWorkViewMenu
+              display={{
+                cardModes: {
+                  mobile: mobileCardMode,
+                  desktop: desktopCardMode,
+                  onMobileChange: setMobileCardMode,
+                  onDesktopChange: setDesktopCardMode,
+                },
+                mobileColumns,
+                desktopColumns,
+                onMobileColumnsChange: setMobileColumns,
+                onDesktopColumnsChange: setDesktopColumns,
+                pageSize,
+                pageSizeOptions: creatorWorkPageSizeOptions,
+                onPageSizeChange: changeWorkPageSize,
+              }}
+              selection={{ active: selection.selectionMode, onToggle: selection.toggleSelectionMode }}
+            />
+          }
         />
         <CreatorWorkSelectionBar selection={selection} />
         {pageWorks.length > 0 ? (
           <div
             className={workCollectionClassName()}
             style={workCollectionStyle(mobileColumns, desktopColumns, cardLayout)}
-            aria-busy={isWorksLoading || isRemoteLoading || catalogRefreshActive}
+            aria-busy={worksBusy}
           >
             {pageWorks.map((work) => (
               <div key={`${"sourceId" in work ? work.sourceId : "known"}:${work.primaryCode}`}>
@@ -901,7 +842,7 @@ function VoiceDetailView({ personId, routeKey, active }: { personId: number; rou
               </div>
             ))}
           </div>
-        ) : isWorksLoading || isRemoteLoading || catalogRefreshActive ? (
+        ) : worksBusy ? (
           <WorkCollectionLoadingState
             label={t("creatorBrowse.loadingVoiceWorks")}
             mobileColumns={mobileColumns}

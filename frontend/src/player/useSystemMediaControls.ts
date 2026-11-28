@@ -1,6 +1,7 @@
 import { useCallback, useEffect, type RefObject } from "react";
 
 import { assetURL } from "@/lib/api";
+import { createEffectScope } from "@/lib/effectScope";
 import { addNativeMediaListeners, stopNativeMedia, supportsNativeMedia, updateNativeMedia } from "@/lib/nativeMedia";
 import { addNativeOutputLostListener } from "@/lib/nativePrivacy";
 import { useOriginalFileNames } from "@/lib/originalFileNames";
@@ -8,6 +9,7 @@ import { useOriginalFileNames } from "@/lib/originalFileNames";
 import type { PlaybackSeekPreferences } from "./playbackPreferences";
 import { NATIVE_MEDIA_POSITION_INTERVAL_MS } from "./playerProgress";
 import { bindMediaSessionActions, type PlayerRemoteControls } from "./playerRemoteControls";
+import { playerTrackArtist } from "./playerTrackArtist";
 import { playerTrackTitle } from "./playerTrackTitle";
 import type { PlayerTrack } from "./playerTypes";
 import { systemMediaDetails, useMediaSessionContent } from "./systemMediaPrivacy";
@@ -47,46 +49,40 @@ export function useNativeMediaBridge({
 }) {
   useEffect(() => {
     if (!supportsNativeMedia()) return;
-    let removeListeners: (() => void) | null = null;
-    let disposed = false;
-    addNativeMediaListeners({
-      onControl: (event) => {
-        const controls = controlsRef.current;
-        switch (event.command) {
-          case "play":
-            controls.play();
-            break;
-          case "pause":
-            controls.pause();
-            break;
-          case "previous":
-            controls.previous();
-            break;
-          case "next":
-            controls.next();
-            break;
-          case "seekBackward":
-            controls.seekBackward();
-            break;
-          case "seekForward":
-            controls.seekForward();
-            break;
-          case "seekTo":
-            controls.seekTo((event.positionMs ?? 0) / 1000);
-            break;
-        }
-      },
-    }).then((remove) => {
-      if (disposed) {
-        remove();
-        return;
-      }
-      removeListeners = remove;
-    });
-    return () => {
-      disposed = true;
-      removeListeners?.();
-    };
+    const scope = createEffectScope();
+    scope.listen(
+      () =>
+        addNativeMediaListeners({
+          onControl: (event) => {
+            const controls = controlsRef.current;
+            switch (event.command) {
+              case "play":
+                controls.play();
+                break;
+              case "pause":
+                controls.pause();
+                break;
+              case "previous":
+                controls.previous();
+                break;
+              case "next":
+                controls.next();
+                break;
+              case "seekBackward":
+                controls.seekBackward();
+                break;
+              case "seekForward":
+                controls.seekForward();
+                break;
+              case "seekTo":
+                controls.seekTo((event.positionMs ?? 0) / 1000);
+                break;
+            }
+          },
+        }),
+      (remove) => remove(),
+    );
+    return scope.cancel;
   }, [controlsRef]);
 
   const { seekBackwardSeconds, seekForwardSeconds } = seekPreferences;
@@ -104,7 +100,7 @@ export function useNativeMediaBridge({
     const positionMs = Math.min(Math.max(0, Math.floor(positionSeconds * 1000)), durationMs || Number.MAX_SAFE_INTEGER);
     void updateNativeMedia({
       title: playerTrackTitle(currentTrack, originalNames) || currentTrack.workTitle || "Kikoto",
-      artist: currentTrack.circle || currentTrack.workTitle || "Kikoto",
+      artist: playerTrackArtist(currentTrack) || "Kikoto",
       album: currentTrack.workTitle || currentTrack.workCode || "Kikoto",
       coverUrl: currentTrack.coverUrl ? absoluteAssetURL(currentTrack.coverUrl) : "",
       playing: isPlaying,
@@ -192,16 +188,12 @@ export function useBrowserMediaSession({
   // The iOS shell reports a lost audio output, such as disconnected
   // headphones, so playback pauses instead of moving to the speaker.
   useEffect(() => {
-    let removeListener: (() => void) | null = null;
-    let disposed = false;
-    void addNativeOutputLostListener(() => controlsRef.current.pause()).then((remove) => {
-      if (disposed) remove();
-      else removeListener = remove;
-    });
-    return () => {
-      disposed = true;
-      removeListener?.();
-    };
+    const scope = createEffectScope();
+    scope.listen(
+      () => addNativeOutputLostListener(() => controlsRef.current.pause()),
+      (remove) => remove(),
+    );
+    return scope.cancel;
   }, [controlsRef]);
 
   useEffect(() => {

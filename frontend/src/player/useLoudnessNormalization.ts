@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { api, ApiError, type MediaLoudness } from "@/lib/api";
 import type { ClientPrincipalID } from "@/lib/clientStorageScope";
+import { createEffectScope, type EffectScope } from "@/lib/effectScope";
 
 import {
   isLoudnessRouted,
@@ -117,13 +118,13 @@ export function useLoudnessNormalization(
   // A measurement keeps running when the track changes, since the next track
   // usually becomes the current one; only leaving the player cancels it. A
   // player that mounts again, as under StrictMode, measures with a new
-  // controller and forgets the cancelled requests.
-  const controllerRef = useRef<AbortController | null>(null);
+  // scope and forgets the cancelled requests.
+  const scopeRef = useRef<EffectScope | null>(null);
   const retriesRef = useRef(createMeasurementRetries(MEASUREMENT_BUSY_RETRY_MS));
   useEffect(
     () => () => {
-      controllerRef.current?.abort();
-      controllerRef.current = null;
+      scopeRef.current?.cancel();
+      scopeRef.current = null;
       pendingRef.current = new Set();
       retriesRef.current.clear();
     },
@@ -151,17 +152,14 @@ export function useLoudnessNormalization(
         candidate !== null && !knownRef.current.has(candidate) && !failedRef.current.has(candidate),
     );
     if (id === undefined) return;
-    controllerRef.current ??= new AbortController();
-    const { signal } = controllerRef.current;
+    scopeRef.current ??= createEffectScope();
     pending.add(id);
-    api
-      .getMediaLoudness(id, signal)
-      .then((loudness) => {
+    scopeRef.current.load((signal) => api.getMediaLoudness(id, signal), {
+      onSuccess: (loudness) => {
         knownRef.current.set(id, loudness);
         setMeasured((value) => value + 1);
-      })
-      .catch((error: unknown) => {
-        if (signal.aborted) return;
+      },
+      onError: (error) => {
         // An unavailable measurement leaves the track at its own level.
         failedRef.current.add(id);
         if (error instanceof ApiError && error.code === "media_loudness_busy") {
@@ -170,12 +168,13 @@ export function useLoudnessNormalization(
             setSettled((value) => value + 1);
           });
         }
-      })
-      .finally(() => {
+      },
+      onSettled: () => {
         if (pendingRef.current !== pending) return;
         pending.delete(id);
         setSettled((value) => value + 1);
-      });
+      },
+    });
   }, [locationId, mode, nextLocationId, serverBoostEnabled, settled]);
 
   const loudness = locationId === null ? undefined : knownRef.current.get(locationId);
@@ -262,7 +261,16 @@ export function useLoudnessNormalization(
     });
     setRouted(elementRouted);
     return rampElementLoudness(refs, elementRouted ? 1 : Math.min(1, gain), ramp && !elementRouted);
-  }, [audioElementKey, audioReady, currentPlaybackInstanceKey, effectiveMode, gain, measured, refs, replaceAudioElement]);
+  }, [
+    audioElementKey,
+    audioReady,
+    currentPlaybackInstanceKey,
+    effectiveMode,
+    gain,
+    measured,
+    refs,
+    replaceAudioElement,
+  ]);
 
   // Leaving full normalization returns playback to an element's own output
   // without cutting into the current track: the routed element keeps playing

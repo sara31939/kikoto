@@ -10,6 +10,7 @@ import type {
   VoiceMergeReview,
   VoiceSummary,
   VoiceSummaryPage,
+  WorkflowPreset,
 } from "../../src/lib/api";
 import {
   authenticatedStateFixture,
@@ -28,6 +29,7 @@ import {
   type ApiErrorBody,
   type ApiResponse,
 } from "./fixtures/api";
+import { showFullWorkCards } from "./fixtures/library-view";
 
 const latestWork: CreatorLatestWork = {
   primaryCode: "RJ00000000",
@@ -227,6 +229,18 @@ function withoutCatalogSyncState<T extends CircleSummary | VoiceSummary>(creator
   return legacyCreator;
 }
 
+const circleCatalogSyncPreset: WorkflowPreset = {
+  code: "circle_catalog_sync",
+  displayName: "Sync a circle catalog",
+  description: "",
+  target: "circle",
+  defaultTagTemplate: "circle_{target}",
+  parameters: [
+    { key: "circleId", kind: "circle_id", group: "input", required: true },
+    { key: "metadata", kind: "boolean", group: "action", required: false, default: true },
+  ],
+};
+
 async function mockCreatorDetails(
   page: Page,
   options: {
@@ -264,7 +278,7 @@ async function mockCreatorDetails(
       missingWorks: 1,
       catalogWorks: circleWorks.length,
     },
-    { availableWorks: 1, works: circleWorks, series: options.circleSeries ?? [] },
+    { availableWorks: 1, works: circleWorks, series: options.circleSeries ?? [], metadataMissingWorks: 1 },
   );
 
   await page.route("**/api/**", async (route) => {
@@ -373,6 +387,8 @@ test("circle list uses cover tiles, one-tap filters, and shared pagination", asy
   await expect(filters.getByRole("button", { name: "Missing" })).toHaveAttribute("aria-pressed", "true");
   await expect(filters.getByRole("button", { name: "All circles" })).toHaveAttribute("aria-pressed", "false");
 
+  // A phone opens the search field from its icon at the end of the chip row.
+  await page.getByRole("button", { name: "Search", exact: true }).click();
   await page.getByPlaceholder("Search circles").fill("Example");
   await expect(page).toHaveURL(/q=Example/);
 
@@ -396,12 +412,7 @@ test("voice list keeps latest work, tags, and availability visible on mobile", a
   await expect(page.getByText("Drama", { exact: true })).toBeVisible();
   await expect(page.getByText("Synced", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("+1", { exact: true })).toHaveCount(0);
-  await expect(
-    page
-      .locator("div.inline-flex")
-      .filter({ hasText: /^Soft$/ })
-      .first(),
-  ).toBeVisible();
+  await expect(page.getByText("Soft", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Page 1 · 30 Voice actors", { exact: true })).toBeVisible();
   await expect(page.getByRole("group", { name: "Voice actor pages controls" })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Voice actor pages" })).toBeVisible();
@@ -457,7 +468,7 @@ test("creator lists render a label for legacy catalog sync responses", async ({ 
   await expect(page.getByText("Attention", { exact: true }).first()).toBeVisible();
 });
 
-test("creator detail does not auto-refresh and exposes First pull for a new catalog", async ({ page }) => {
+test("creator detail does not auto-refresh and offers First pull beside More", async ({ page }) => {
   const legacyAutoRefreshRequests: string[] = [];
   const refreshRequests: Array<{ path: string; payload: unknown }> = [];
   await mockCreatorDetails(page, {
@@ -475,8 +486,6 @@ test("creator detail does not auto-refresh and exposes First pull for a new cata
   await page.goto("/circles/RG09999");
   await circleLoaded;
   const circleSummary = page.getByRole("region", { name: "Circle summary" });
-  await expect(circleSummary.getByText("Never", { exact: true })).toBeVisible();
-  await expect(circleSummary.getByText(/First pull reads the full DLsite catalog/)).toBeVisible();
   await expect(circleSummary.getByRole("button", { name: "First pull" })).toBeVisible();
   expect(legacyAutoRefreshRequests).toEqual([]);
 
@@ -489,7 +498,8 @@ test("creator detail does not auto-refresh and exposes First pull for a new cata
     path: "/api/circles/RG09999/refresh",
     payload: { catalogRefresh: "full", metadataRefresh: "missing" },
   });
-  await expect(circleSummary.getByRole("button", { name: "Refreshing" })).toBeVisible();
+  // While the pull runs, the button follows it and opens the run.
+  await expect(circleSummary.getByRole("button", { name: "View this refresh's run" })).toBeVisible();
   await expect(circleSummary.getByRole("button", { name: "First pull" })).toHaveCount(0);
 
   const voiceCatalogLoaded = page.waitForResponse(
@@ -497,15 +507,15 @@ test("creator detail does not auto-refresh and exposes First pull for a new cata
   );
   await page.goto("/voices/00000001");
   await voiceCatalogLoaded;
-  await expect(page.getByText("Never", { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "First pull" })).toBeVisible();
+  const voiceSummary = page.getByRole("region", { name: "Voice actor summary" });
+  await expect(voiceSummary.getByRole("button", { name: "First pull" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(legacyAutoRefreshRequests).toEqual([]);
 
   const voicePullRequest = page.waitForRequest(
     (request) => new URL(request.url()).pathname === "/api/voices/7/catalog/refresh" && request.method() === "POST",
   );
-  await page.getByRole("button", { name: "First pull" }).click();
+  await voiceSummary.getByRole("button", { name: "First pull" }).click();
   await voicePullRequest;
   expect(refreshRequests).toContainEqual({
     path: "/api/voices/7/catalog/refresh",
@@ -514,8 +524,10 @@ test("creator detail does not auto-refresh and exposes First pull for a new cata
 });
 
 // Counts React commits through the devtools hook, so a render loop that
-// leaves the DOM unchanged is still observable.
+// leaves the DOM unchanged is still observable. It also installs the page
+// clock, which expectReactCommitsToSettle advances instead of sleeping.
 async function countReactCommits(page: Page) {
+  await page.clock.install();
   await page.addInitScript(() => {
     const renderers = new Map<number, unknown>();
     const counter = window as unknown as { __reactCommitCount: number };
@@ -547,7 +559,7 @@ async function expectReactCommitsToSettle(page: Page) {
   await expect
     .poll(async () => {
       const before = await commitCount();
-      await page.waitForTimeout(250);
+      await page.clock.runFor(250);
       return (await commitCount()) - before;
     })
     .toBe(0);
@@ -570,6 +582,14 @@ for (const role of ["admin", "member"] as const) {
         });
         return;
       }
+      if (url.pathname === "/api/workflow-presets") {
+        await route.fulfill({ json: [circleCatalogSyncPreset] });
+        return;
+      }
+      if (url.pathname === "/api/library-sources") {
+        await route.fulfill({ json: [] });
+        return;
+      }
       await route.fulfill({ status: 404, json: { error: `Not mocked: ${url.pathname}` } satisfies ApiErrorBody });
     });
 
@@ -584,8 +604,11 @@ for (const role of ["admin", "member"] as const) {
       return;
     }
     await expect(page.getByText(/Try fetching it from DLsite\?/)).toBeVisible();
+    // The catalog sync opens here with this maker id filled in.
     await fetchButton.click();
-    await expect(page).toHaveURL(/\/workflows\?workflow=circle_catalog_sync&circleId=RG09999$/);
+    const dialog = page.getByRole("dialog", { name: "Sync a circle catalog" });
+    await expect(dialog.getByLabel("Circle ID")).toHaveValue("RG09999");
+    await expect(page).toHaveURL(/\/circles\/RG09999$/);
   });
 }
 
@@ -690,46 +713,47 @@ test("voice detail renders one stable work-loading region for local and remote d
   await expect(loading).toHaveCount(0);
 });
 
-test("voice detail keeps compact statistics and secondary panels closed on mobile", async ({ page }) => {
+test("voice detail keeps quiet actions, statistics, and the View sheet on mobile", async ({ page }) => {
   await mockCreatorDetails(page);
   await page.goto("/voices/00000001");
 
   await expect(page.getByRole("heading", { name: "Example Voice", exact: true })).toBeVisible();
-  const statistics = page.locator('[aria-label="Voice actor statistics"]');
+  const summary = page.getByRole("region", { name: "Voice actor summary" });
+  await expect(summary.getByText("Soft", { exact: true })).toBeVisible();
+  const statistics = summary.getByRole("group", { name: "Voice actor statistics" });
   await expect(statistics).toBeVisible();
-  await expect(statistics).toContainText("Local 2");
-  await expect(statistics).toContainText("Remote 1");
-  await expect(statistics).toContainText("Soft");
-  await expect(statistics).not.toContainText("works: 5");
-  await expect(statistics).not.toContainText("playable: 4");
+  await expect(statistics.getByRole("term")).toHaveText(["Works", "Local", "Remote", "Missing"]);
+  await expect(statistics.getByRole("definition")).toHaveText(["5", "2", "1", "1"]);
+  // The counts keep to one line.
   const statisticItems = statistics.locator(":scope > *");
-  await expect(statisticItems).toHaveCount(3);
   const statisticTops = await statisticItems.evaluateAll((elements) =>
     elements.map((element) => Math.round(element.getBoundingClientRect().top)),
   );
   expect(Math.max(...statisticTops) - Math.min(...statisticTops)).toBeLessThanOrEqual(4);
 
-  const actions = page.getByRole("group", { name: "Voice actor actions" });
+  // Personal actions stay quiet and the catalog management waits in More.
+  const actions = summary.getByRole("group", { name: "Voice actor actions" });
   const moreActions = actions.getByRole("button", { name: "More voice actor actions" });
   await expect(moreActions).toHaveAttribute("aria-expanded", "false");
-  await expect(actions.getByRole("button", { name: "Add favorite" })).toBeVisible();
   await expect(actions.getByText("Favorite", { exact: true })).toBeHidden();
-  await expect(actions.getByText("Metadata", { exact: true })).toBeVisible();
-  await expect(actions.getByText("Refresh", { exact: true })).toBeVisible();
-  await expect(actions.getByText("Retry metadata", { exact: true })).toBeHidden();
   await expect(actions.getByText("More", { exact: true })).toBeHidden();
   const actionMetrics = await actions.locator(":scope button[aria-label]").evaluateAll((elements) =>
-    elements.map((element) => ({
-      label: element.getAttribute("aria-label"),
-      height: element.getBoundingClientRect().height,
-      width: element.getBoundingClientRect().width,
-      top: Math.round(element.getBoundingClientRect().top),
-    })),
+    elements.map((element) => {
+      // The visible control may be compact; the hit area extends to 44px on coarse pointers.
+      const box = element.getBoundingClientRect();
+      const hit = getComputedStyle(element, "::after");
+      const extend = (value: string) => Math.max(0, -(Number.parseFloat(value) || 0));
+      return {
+        label: element.getAttribute("aria-label"),
+        height: box.height + extend(hit.top) + extend(hit.bottom),
+        width: box.width + extend(hit.left) + extend(hit.right),
+        top: Math.round(box.top),
+      };
+    }),
   );
   expect(actionMetrics.map((metric) => metric.label)).toEqual([
     "Add favorite",
     "Subscribe",
-    "Retry metadata",
     "Refresh",
     "More voice actor actions",
   ]);
@@ -737,77 +761,87 @@ test("voice detail keeps compact statistics and secondary panels closed on mobil
   expect(
     Math.max(...actionMetrics.map((metric) => metric.top)) - Math.min(...actionMetrics.map((metric) => metric.top)),
   ).toBeLessThanOrEqual(1);
+  // The counts lead the name and the personal tags follow it.
+  const [statisticsBox, headingBox, tagBox] = await Promise.all([
+    statistics.boundingBox(),
+    summary.getByRole("heading", { name: "Example Voice", exact: true }).boundingBox(),
+    summary.getByText("Soft", { exact: true }).boundingBox(),
+  ]);
+  expect(statisticsBox!.y + statisticsBox!.height).toBeLessThanOrEqual(headingBox!.y);
+  expect(tagBox!.y).toBeGreaterThanOrEqual(headingBox!.y + headingBox!.height);
 
-  // Secondary actions are workflow shortcuts; refresh options live in the workflow's run form.
   await moreActions.click();
   const moreMenu = page.getByRole("menu", { name: "More voice actor actions" });
   await expect(moreMenu.getByRole("menuitem")).toHaveText([
     "Change cover…",
-    "Sync this voice actor's catalog…",
+    /^Retry metadata/,
+    "Sync catalog…",
     "Manage aliases",
   ]);
   await page.keyboard.press("Escape");
   await expect(moreMenu).toHaveCount(0);
-
   const refreshRequest = page.waitForRequest((request) => {
     if (new URL(request.url()).pathname !== "/api/voices/7/catalog/refresh" || request.method() !== "POST") {
       return false;
     }
     return (request.postDataJSON() as { catalogRefresh?: string }).catalogRefresh === "incremental";
   });
-  await actions.getByRole("button", { name: "Refresh", exact: true }).click();
+  await actions.getByRole("button", { name: "Refresh" }).click();
   expect((await refreshRequest).postDataJSON()).toEqual({ catalogRefresh: "incremental", metadataRefresh: "missing" });
 
-  const metadataRefreshRequest = page.waitForRequest((request) => {
-    if (new URL(request.url()).pathname !== "/api/voices/7/catalog/refresh" || request.method() !== "POST") {
-      return false;
-    }
-    return (request.postDataJSON() as { catalogRefresh?: string }).catalogRefresh === "stored";
-  });
-  await actions.getByRole("button", { name: "Retry metadata" }).click();
-  expect((await metadataRefreshRequest).postDataJSON()).toEqual({
-    catalogRefresh: "stored",
-    metadataRefresh: "missing",
-  });
+  // Search, the order, the filter, and View share one row; Search opens its field above it.
+  await expect(page.getByRole("textbox", { name: "Search voice works" })).toBeHidden();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Search voice works" })).toBeFocused();
+  await expect(page.getByRole("button", { name: "Sort: Release date" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Voice work availability:/ })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: /works$/ })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Pages" })).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Open voice work options" }).click();
-  const optionsDialog = page.getByRole("dialog", { name: "Voice work options" });
-  await expect(optionsDialog).toBeVisible();
-  await optionsDialog.getByRole("button", { name: "Remote", exact: true }).click();
-  await expect(optionsDialog.getByRole("button", { name: "Remote", exact: true })).toHaveAttribute(
-    "aria-pressed",
-    "true",
-  );
-  await optionsDialog.getByRole("button", { name: "2 columns" }).click();
-  await expect(optionsDialog.getByRole("button", { name: "2 columns" })).toHaveAttribute("aria-pressed", "true");
-  await expect(optionsDialog.getByRole("group", { name: "Cards" }).getByRole("button")).toHaveText([
+  await page.getByRole("button", { name: "View", exact: true }).click();
+  const viewSheet = page.getByRole("dialog", { name: "View" });
+  await expect(viewSheet).toBeVisible();
+  await viewSheet.getByRole("radio", { name: "2 columns" }).click();
+  await expect(viewSheet.getByRole("radio", { name: "2 columns" })).toHaveAttribute("aria-checked", "true");
+  await expect(viewSheet.getByRole("radiogroup", { name: "Cards" }).getByRole("radio")).toHaveText([
     "Full",
+    "Simple",
     "Compact",
     "Mini",
   ]);
-  await optionsDialog.getByRole("button", { name: "96 per page" }).click();
-  await expect(optionsDialog.getByRole("button", { name: "96 per page" })).toHaveAttribute("aria-pressed", "true");
-  await optionsDialog.getByRole("button", { name: "Select works" }).click();
-  await expect(optionsDialog).toHaveCount(0);
-  // The order sits above the works on a phone, outside the options sheet.
-  await expect(page.getByRole("button", { name: "Sort: Release date" })).toBeVisible();
+  await viewSheet.getByRole("radio", { name: "96 per page" }).click();
+  await expect(viewSheet.getByRole("radio", { name: "96 per page" })).toHaveAttribute("aria-checked", "true");
+  await viewSheet.getByRole("button", { name: "Select works" }).click();
+  await expect(viewSheet).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "View, selecting works" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test("@desktop voice detail keeps full action labels and inline work controls", async ({ page }) => {
+test("@desktop voice detail keeps labeled quiet actions and inline work controls", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await mockCreatorDetails(page);
   await page.goto("/voices/00000001");
 
   const actions = page.getByRole("group", { name: "Voice actor actions" });
   await expect(actions.getByText("Favorite", { exact: true })).toBeVisible();
-  await expect(actions.getByText("Retry metadata", { exact: true })).toBeVisible();
-  await expect(actions.getByText("Refresh", { exact: true })).toBeVisible();
-  await expect(actions.getByText("Metadata", { exact: true })).toBeHidden();
   await expect(actions.getByText("More", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Open voice work options" })).toBeHidden();
-  await expect(page.getByLabel("Voice work availability")).toBeVisible();
-  await expect(page.getByRole("button", { name: /^Display options \(Columns:/ })).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Retry metadata" })).toHaveCount(0);
+  // Opening More with a click keeps the button's size and highlights no item until the keyboard moves focus.
+  const moreActions = actions.getByRole("button", { name: "More voice actor actions" });
+  const closedBox = await moreActions.boundingBox();
+  await moreActions.click();
+  const firstItem = page.getByRole("menu", { name: "More voice actor actions" }).getByRole("menuitem").first();
+  await expect(firstItem).toBeFocused();
+  expect(await moreActions.boundingBox()).toEqual(closedBox);
+  await page.mouse.move(0, 0);
+  await expect(firstItem).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("textbox", { name: "Search voice works" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Voice work availability:/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "View", exact: true })).toBeVisible();
+  // The summary states the work count, and results that fit one page show no caption or page bar.
+  await expect(page.getByRole("status").filter({ hasText: /^\d+ works$/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Next page" })).toHaveCount(0);
 });
 
 test("@desktop voice detail orders its works and switches card modes like the Library", async ({ page }) => {
@@ -844,14 +878,13 @@ test("@desktop voice detail orders its works and switches card modes like the Li
   await expect(titles).toHaveText(["Beta work", "Gamma work", "Alpha work"]);
 
   await page.getByRole("button", { name: "Sort: Release date" }).click();
-  await page.getByRole("dialog", { name: "Sort" }).getByRole("button", { name: "Title" }).click();
+  await page.getByRole("menu", { name: "Sort" }).getByRole("menuitemradio", { name: "Title" }).click();
   await expect(titles).toHaveText(["Gamma work", "Beta work", "Alpha work"]);
-  await page.getByRole("button", { name: "Sort: Title" }).click();
-  await page.getByRole("dialog", { name: "Sort" }).getByRole("button", { name: "Ascending" }).click();
+  await page.getByRole("button", { name: "Descending", exact: true }).click();
   await expect(titles).toHaveText(["Alpha work", "Beta work", "Gamma work"]);
 
-  await page.getByRole("button", { name: /^Display options/ }).click();
-  const display = page.getByRole("dialog", { name: "Display options" });
+  await page.getByRole("button", { name: "View", exact: true }).click();
+  const display = page.getByRole("dialog", { name: "View" });
   await expect(display.getByRole("radiogroup", { name: "Items per page" }).getByRole("radio")).toHaveText([
     "24",
     "48",
@@ -908,24 +941,21 @@ test("@desktop voice detail reads its works one server page at a time", async ({
   await expect.poll(() => requests.at(-1)).toEqual({ page: "1", pageSize: "24", availability: "local", q: "filtered" });
 });
 
-test("circle detail keeps availability and primary actions compact on mobile", async ({ page }) => {
+test("circle detail keeps availability and quiet actions compact on mobile", async ({ page }) => {
   await mockCreatorDetails(page);
   await page.goto("/circles/RG09999");
 
   await expect(page.getByRole("heading", { name: "Example Circle", exact: true })).toBeVisible();
   const summary = page.getByRole("region", { name: "Circle summary" });
   const catalogCounts = summary.getByRole("group", { name: "Catalog availability" });
-  await expect(catalogCounts.getByRole("term")).toHaveText(["Available", "Local", "Remote", "Unavailable"]);
-  await expect(catalogCounts.getByRole("definition")).toHaveText(["1", "1", "0", "1"]);
+  // The Works tab states the catalog's size; the summary leaves out zero counts.
+  await expect(catalogCounts.getByRole("term")).toHaveText(["Local", "Unavailable"]);
+  await expect(catalogCounts.getByRole("definition")).toHaveText(["1", "1"]);
   await expect(catalogCounts.getByRole("button")).toHaveCount(0);
-  await expect(summary.getByText("Catalog synced", { exact: false })).toBeVisible();
+  // The sync time is a detail of the Refresh button.
+  await expect(summary.getByText("Catalog synced", { exact: false })).toHaveCount(0);
   const actions = summary.getByRole("group", { name: "Circle actions" });
-  await expect(actions.getByRole("button", { name: "Remove favorite" })).toBeVisible();
-  await expect(actions.getByRole("button", { name: "Retry metadata" })).toBeVisible();
-  await expect(actions.getByRole("button", { name: "Refresh circle" })).toBeVisible();
-  await expect(actions.getByText("Metadata", { exact: true })).toBeVisible();
-  await expect(actions.getByText("Retry metadata", { exact: true })).toBeHidden();
-  await expect(actions.getByRole("button", { name: "Refresh circle", exact: true })).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Remove favorite" })).toHaveAttribute("aria-pressed", "true");
   await expect(actions.getByText("Favorite", { exact: true })).toBeHidden();
   await expect(actions.getByText("More", { exact: true })).toBeHidden();
   const dlsiteLink = summary.getByRole("link", { name: "Open DLsite for RG09999" });
@@ -944,36 +974,62 @@ test("circle detail keeps availability and primary actions compact on mobile", a
   expect(codeAndTitle[0]).not.toBeNull();
   expect(codeAndTitle[1]).not.toBeNull();
   expect(codeAndTitle[0]!.y).toBeLessThan(codeAndTitle[1]!.y);
+  // The counts follow the code on its line.
+  const countsBox = await catalogCounts.boundingBox();
+  expect(countsBox!.x).toBeGreaterThan(codeAndTitle[0]!.x + codeAndTitle[0]!.width);
+  expect(
+    Math.abs(countsBox!.y + countsBox!.height / 2 - (codeAndTitle[0]!.y + codeAndTitle[0]!.height / 2)),
+  ).toBeLessThanOrEqual(4);
   await expect(actions.getByRole("button", { name: "More circle actions" })).toHaveAttribute("aria-expanded", "false");
-  const actionMetrics = await actions.locator(":scope button[aria-label], :scope > a").evaluateAll((elements) =>
-    elements
-      .map((element) => ({
+  const actionMetrics = await actions.locator(":scope button[aria-label]").evaluateAll((elements) =>
+    elements.map((element) => {
+      // The visible control may be compact; the hit area extends to 44px on coarse pointers.
+      const box = element.getBoundingClientRect();
+      const hit = getComputedStyle(element, "::after");
+      const extend = (value: string) => Math.max(0, -(Number.parseFloat(value) || 0));
+      return {
         label: element.getAttribute("aria-label"),
-        height: element.getBoundingClientRect().height,
-        width: element.getBoundingClientRect().width,
-        top: Math.round(element.getBoundingClientRect().top),
-      }))
-      .filter((metric) => metric.width > 0 && metric.height > 0),
+        height: box.height + extend(hit.top) + extend(hit.bottom),
+        width: box.width + extend(hit.left) + extend(hit.right),
+        top: Math.round(box.top),
+      };
+    }),
   );
   expect(actionMetrics.map((metric) => metric.label)).toEqual([
     "Remove favorite",
     "Subscribe",
-    "Retry metadata",
-    "Refresh circle",
+    "Refresh",
     "More circle actions",
   ]);
+  await expect(actions.getByRole("button", { name: "Refresh" })).toHaveAttribute("title", /^Catalog synced /);
   expect(actionMetrics.every((metric) => metric.height >= 44 && metric.width >= 44)).toBe(true);
   expect(
     Math.max(...actionMetrics.map((metric) => metric.top)) - Math.min(...actionMetrics.map((metric) => metric.top)),
   ).toBeLessThanOrEqual(1);
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
-  // The catalog sync shortcut opens the circle catalog sync workflow with this circle prefilled.
+  // The rest of catalog management waits in More; the sync opens its options here with this circle filled in.
+  const catalogSyncs: unknown[] = [];
+  await page.route("**/api/workflow-presets", (route) => route.fulfill({ json: [circleCatalogSyncPreset] }));
+  await page.route("**/api/workflow-presets/circle_catalog_sync/runs", async (route) => {
+    catalogSyncs.push((route.request().postDataJSON() as { inputs: unknown }).inputs);
+    await route.fulfill({
+      status: 202,
+      json: { runId: 82, status: "queued", workflowCode: "circle_catalog_sync", tagName: "", inputs: {} },
+    });
+  });
   await actions.getByRole("button", { name: "More circle actions" }).click();
   const moreMenu = page.getByRole("menu", { name: "More circle actions" });
-  await expect(moreMenu.getByRole("menuitem")).toHaveText(["Change cover…", "Sync this circle's catalog…"]);
-  await moreMenu.getByRole("menuitem", { name: "Sync this circle's catalog…" }).click();
-  await expect(page).toHaveURL(/\/workflows\?workflow=circle_catalog_sync&circleId=RG09999$/);
+  await expect(moreMenu.getByRole("menuitem")).toHaveText(["Change cover…", /^Retry metadata/, "Sync catalog…"]);
+  await moreMenu.getByRole("menuitem", { name: "Sync catalog…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Sync a circle catalog" });
+  await expect(dialog.getByLabel("Circle ID")).toHaveValue("RG09999");
+  await dialog.getByRole("button", { name: "Run", exact: true }).click();
+  await expect.poll(() => catalogSyncs).toHaveLength(1);
+  expect(catalogSyncs[0]).toMatchObject({ circleId: "RG09999" });
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByText("Catalog sync queued as run #82.", { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/\/circles\/RG09999$/);
 });
 
 test("circle detail shows a chosen work's cover until the latest work is restored", async ({ page }) => {
@@ -1039,7 +1095,7 @@ test("circle detail shows a chosen work's cover until the latest work is restore
   expect(coverRequests).toEqual(["RJ00000003", ""]);
 });
 
-test("mobile circle detail keeps the work surface visible and moves secondary controls into sheets", async ({
+test("mobile circle detail opens search from its icon, keeps the filter on show, and moves display options into the View sheet", async ({
   page,
 }) => {
   await mockCreatorDetails(page);
@@ -1048,25 +1104,29 @@ test("mobile circle detail keeps the work surface visible and moves secondary co
   await expect(page.getByRole("heading", { name: "Example Circle", exact: true })).toBeVisible();
   await expect(page.getByTestId("work-card").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "More circle actions" })).toBeVisible();
+  const search = page.getByRole("textbox", { name: "Search catalog works" });
+  await expect(search).toBeHidden();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(search).toBeFocused();
 
-  await page.getByRole("button", { name: "Catalog options" }).click();
-  const optionsDialog = page.getByRole("dialog", { name: "Catalog options" });
-  await expect(optionsDialog).toBeVisible();
-  await expect(optionsDialog.getByRole("button", { name: "1 column" })).toHaveText("1");
-  await expect(optionsDialog.getByRole("button", { name: "2 columns" })).toHaveText("2");
-  await expect(optionsDialog.getByRole("button", { name: "Automatic columns" })).toHaveText("Auto");
+  await page.getByRole("button", { name: "Catalog availability filter: All works" }).click();
+  await page.getByRole("menuitemradio", { name: "Unavailable", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Catalog availability filter: Unavailable" })).toBeVisible();
 
-  await optionsDialog.getByRole("button", { name: "Unavailable" }).click();
-  await expect(optionsDialog.getByRole("button", { name: "Unavailable" })).toHaveAttribute("aria-pressed", "true");
-  await optionsDialog.getByRole("button", { name: "2 columns" }).click();
-  await expect(optionsDialog.getByRole("button", { name: "2 columns" })).toHaveAttribute("aria-pressed", "true");
-  await optionsDialog.getByRole("button", { name: "Select works" }).click();
-  await expect(optionsDialog).toHaveCount(0);
-  await page.getByRole("button", { name: "Catalog options" }).click();
+  await page.getByRole("button", { name: "View", exact: true }).click();
+  const viewSheet = page.getByRole("dialog", { name: "View" });
+  await expect(viewSheet).toBeVisible();
+  await expect(viewSheet.getByRole("radio", { name: "1 column" })).toHaveText("1");
+  await expect(viewSheet.getByRole("radio", { name: "2 columns" })).toHaveText("2");
+  await viewSheet.getByRole("radio", { name: "2 columns" }).click();
+  await expect(viewSheet.getByRole("radio", { name: "2 columns" })).toHaveAttribute("aria-checked", "true");
+  await viewSheet.getByRole("button", { name: "Select works" }).click();
+  await expect(viewSheet).toHaveCount(0);
+  await page.getByRole("button", { name: "View, selecting works" }).click();
   await expect(
-    page.getByRole("dialog", { name: "Catalog options" }).getByRole("button", { name: "Exit selection mode" }),
+    page.getByRole("dialog", { name: "View" }).getByRole("button", { name: "Cancel selection" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Close catalog options" }).click();
+  await page.getByRole("dialog", { name: "View" }).getByRole("button", { name: "Close" }).click();
 
   const dialogMetrics = await page
     .getByTestId("work-card")
@@ -1115,6 +1175,7 @@ test("circle work card tags open a local Library search", async ({ page }) => {
     ],
   });
 
+  await showFullWorkCards(page);
   await page.goto("/circles/RG09999");
   await page.getByRole("button", { name: "Example tag", exact: true }).click();
   await expect(page).toHaveURL(/\/\?q=tag%3A%22Example\+tag%22$/);
@@ -1124,7 +1185,9 @@ test("circle work card tags open a local Library search", async ({ page }) => {
   await expect(page).toHaveURL(/\/\?q=mytag%3A%22Personal\+tag%22$/);
 });
 
-test("@desktop circle detail keeps a full-width compact summary and source-aware return", async ({ page }) => {
+test("@desktop circle detail keeps a frameless summary, one-line statistics, and source-aware return", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(() => {
     window.history.replaceState({ returnTo: "/", returnLabel: "Back to library" }, "", window.location.href);
@@ -1135,38 +1198,52 @@ test("@desktop circle detail keeps a full-width compact summary and source-aware
   await expect(page.getByRole("button", { name: "Back to library", exact: true })).toBeVisible();
   const summary = page.getByRole("region", { name: "Circle summary" });
   await expect(summary).toBeVisible();
-  const summaryWidths = await summary.evaluate((element) => ({
-    region: element.getBoundingClientRect().width,
-    card: element.firstElementChild?.getBoundingClientRect().width ?? 0,
-  }));
-  expect(Math.abs(summaryWidths.region - summaryWidths.card)).toBeLessThanOrEqual(1);
   const catalogCounts = summary.getByRole("group", { name: "Catalog availability" });
-  await expect(catalogCounts.getByRole("definition")).toHaveText(["1", "1", "0", "1"]);
+  await expect(catalogCounts.getByRole("definition")).toHaveText(["1", "1"]);
+  // The summary draws no frame, and its statistics share one line.
+  const layout = await summary.evaluate((element) => {
+    const counts = element.querySelector('[aria-label="Catalog availability"]');
+    const tops = Array.from(counts?.children ?? []).map((item) => Math.round(item.getBoundingClientRect().top));
+    return {
+      border: getComputedStyle(element).borderTopWidth,
+      rows: new Set(tops).size,
+    };
+  });
+  expect(layout.border).toBe("0px");
+  expect(layout.rows).toBe(1);
+
   const actions = summary.getByRole("group", { name: "Circle actions" });
   await expect(actions.getByText("Favorite", { exact: true })).toBeVisible();
-  await expect(actions.getByText("Retry metadata", { exact: true })).toBeVisible();
-  await expect(actions.getByRole("button", { name: "Refresh circle", exact: true })).toBeVisible();
   await expect(actions.getByText("More", { exact: true })).toBeVisible();
   await expect(actions.getByText("DLsite", { exact: true })).toHaveCount(0);
   const dlsiteLink = summary.getByRole("link", { name: "Open DLsite for RG09999" });
   await expect(dlsiteLink).toBeVisible();
   await expect(dlsiteLink).toContainText("RG09999");
   const actionOrder = await actions
-    .locator(":scope button[aria-label], :scope > a")
+    .locator(":scope button[aria-label]")
     .evaluateAll((elements) => elements.map((element) => element.getAttribute("aria-label")));
-  expect(actionOrder).toEqual([
-    "Remove favorite",
-    "Subscribe",
-    "Retry metadata",
-    "Refresh circle",
-    "More circle actions",
+  expect(actionOrder).toEqual(["Remove favorite", "Subscribe", "Refresh", "More circle actions"]);
+  await expect(actions.getByText("Refresh", { exact: true })).toBeVisible();
+  // Wide layouts set the actions at the top right, beside the name rather than below it.
+  const [headingBox, actionsBox] = await Promise.all([
+    summary.getByRole("heading", { name: "Example Circle", exact: true }).boundingBox(),
+    actions.boundingBox(),
   ]);
+  expect(actionsBox!.x).toBeGreaterThan(headingBox!.x + headingBox!.width);
+  expect(actionsBox!.y).toBeLessThan(headingBox!.y + headingBox!.height);
+
+  // The toolbar holds the view tabs, search, order, filter, and View; the Works tab states the count.
+  await expect(page.getByRole("textbox", { name: "Search catalog works" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sort: Release date" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "View", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toHaveCount(0);
+  await expect(page.getByRole("status").filter({ hasText: /^\d+ works$/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Next page" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Catalog availability filter" }).click();
   await page.getByRole("menuitemradio", { name: "Unavailable", exact: true }).click();
   // The summary counts describe the whole catalog, whatever the works below are filtered to.
-  await expect(catalogCounts.getByRole("definition")).toHaveText(["1", "1", "0", "1"]);
-  await expect(page.getByRole("button", { name: "Catalog options" })).toBeHidden();
+  await expect(catalogCounts.getByRole("definition")).toHaveText(["1", "1"]);
   await expect(page.getByRole("button", { name: "More circle actions" })).toBeVisible();
 });
 
@@ -1188,26 +1265,17 @@ test("@desktop circle detail orders its works and switches card modes like the L
   // Newest release first is the default, so the request names no order.
   const salesRequest = circleRequest({ sort: "sales", direction: null });
   await page.getByRole("button", { name: "Sort: Release date" }).click();
-  const sortDialog = page.getByRole("dialog", { name: "Sort" });
-  await expect(sortDialog.getByRole("button")).toHaveText([
-    "Descending",
-    "Ascending",
-    "Release date",
-    "Code",
-    "Title",
-    "Rating",
-    "Sales",
-  ]);
-  await sortDialog.getByRole("button", { name: "Sales" }).click();
+  const sortDialog = page.getByRole("menu", { name: "Sort" });
+  await expect(sortDialog.getByRole("menuitemradio")).toHaveText(["Release date", "Code", "Title", "Rating", "Sales"]);
+  await sortDialog.getByRole("menuitemradio", { name: "Sales" }).click();
   await salesRequest;
 
   const ascendingRequest = circleRequest({ sort: "sales", direction: "asc" });
-  await page.getByRole("button", { name: "Sort: Sales" }).click();
-  await page.getByRole("dialog", { name: "Sort" }).getByRole("button", { name: "Ascending" }).click();
+  await page.getByRole("button", { name: "Descending", exact: true }).click();
   await ascendingRequest;
 
-  await page.getByRole("button", { name: /^Display options/ }).click();
-  const display = page.getByRole("dialog", { name: "Display options" });
+  await page.getByRole("button", { name: "View", exact: true }).click();
+  const display = page.getByRole("dialog", { name: "View" });
   await expect(display.getByRole("radiogroup", { name: "Items per page" }).getByRole("radio")).toHaveText([
     "24",
     "48",
@@ -1238,9 +1306,7 @@ test("@desktop circle detail orders its works and switches card modes like the L
   await expect(page.getByRole("button", { name: /^Sort:/ })).toHaveCount(0);
 });
 
-test("mobile circle detail keeps the order beside the view tabs and card modes in the options sheet", async ({
-  page,
-}) => {
+test("mobile circle detail keeps the order on show and card modes in the View sheet", async ({ page }) => {
   await mockCreatorDetails(page);
   await page.goto("/circles/RG09999");
   await expect(page.getByTestId("work-card").first()).toBeVisible();
@@ -1250,21 +1316,22 @@ test("mobile circle detail keeps the order beside the view tabs and card modes i
     return url.pathname === "/api/circles/RG09999" && url.searchParams.get("sort") === "title";
   });
   await page.getByRole("button", { name: "Sort: Release date" }).click();
-  await page.getByRole("dialog", { name: "Sort" }).getByRole("button", { name: "Title" }).click();
+  await page.getByRole("menu", { name: "Sort" }).getByRole("menuitemradio", { name: "Title" }).click();
   await titleRequest;
   await expect(page.getByRole("button", { name: "Sort: Title" })).toBeVisible();
 
-  await page.getByRole("button", { name: "Catalog options" }).click();
-  const optionsDialog = page.getByRole("dialog", { name: "Catalog options" });
-  await expect(optionsDialog.getByRole("group", { name: "Cards" }).getByRole("button")).toHaveText([
+  await page.getByRole("button", { name: "View", exact: true }).click();
+  const viewSheet = page.getByRole("dialog", { name: "View" });
+  await expect(viewSheet.getByRole("radiogroup", { name: "Cards" }).getByRole("radio")).toHaveText([
     "Full",
+    "Simple",
     "Compact",
     "Mini",
   ]);
-  await optionsDialog.getByRole("button", { name: "Compact cards with fewer details" }).click();
+  await viewSheet.getByRole("radio", { name: "Compact cards with fewer details" }).click();
   await expect(page.getByTestId("work-card").first()).toHaveAttribute("data-card-layout", "row");
-  await optionsDialog.getByRole("button", { name: "96 per page" }).click();
-  await expect(optionsDialog.getByRole("button", { name: "96 per page" })).toHaveAttribute("aria-pressed", "true");
+  await viewSheet.getByRole("radio", { name: "96 per page" }).click();
+  await expect(viewSheet.getByRole("radio", { name: "96 per page" })).toHaveAttribute("aria-checked", "true");
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
@@ -1321,7 +1388,14 @@ test("mobile command palette uses a sheet, stays in the visual viewport, and clo
   await mockCreatorDetails(page);
   await page.goto("/circles/RG09999");
 
-  await page.getByRole("button", { name: "Quick actions" }).click();
+  await page
+    .locator("header")
+    .getByRole("button", { name: /^(Account menu|Sign in)$/ })
+    .click();
+  await page
+    .getByRole("dialog", { name: "Account" })
+    .getByRole("button", { name: "Quick actions", exact: true })
+    .click();
   const dialog = page.getByRole("dialog", { name: "Command palette" });
   const input = page.getByPlaceholder("Search or open a work code");
   await expect(dialog).toBeVisible();
@@ -1358,7 +1432,14 @@ test("a tall mobile sheet stays below the top safe area and leaves a strip that 
   await page.goto("/circles/RG09999");
   await page.addStyleTag({ content: `:root { --safe-area-top: ${safeAreaTop}px !important; }` });
 
-  await page.getByRole("button", { name: "Quick actions" }).click();
+  await page
+    .locator("header")
+    .getByRole("button", { name: /^(Account menu|Sign in)$/ })
+    .click();
+  await page
+    .getByRole("dialog", { name: "Account" })
+    .getByRole("button", { name: "Quick actions", exact: true })
+    .click();
   const dialog = page.getByRole("dialog", { name: "Command palette" });
   await expect(dialog).toHaveAttribute("data-state", "open");
   await page.getByPlaceholder("Search or open a work code").blur();

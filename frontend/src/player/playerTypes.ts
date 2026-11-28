@@ -25,6 +25,8 @@ export type PlayerTrack = {
   workTitle: string;
   coverUrl: string;
   circle: string;
+  /** The work's credited voice actors, which the player shows as the artist. */
+  voiceActors?: string[];
   progress: MediaProgress | null;
   progressRecordable: boolean;
   lyricsLocationId: number | null;
@@ -32,6 +34,8 @@ export type PlayerTrack = {
   lyricsChoices?: LyricsChoice[];
   autoLyricsLocationId?: number | null;
   preferredLyricsMediaItemId?: number | null;
+  /** Whether a lyrics choice is saved for the listener; only a library audio file keeps one. */
+  lyricsPreferencePersistable?: boolean;
   /** The listener's lyrics timing offset in milliseconds; positive shows each line later. */
   lyricsOffsetMs?: number;
   remoteSourceId?: number;
@@ -39,10 +43,20 @@ export type PlayerTrack = {
   remotePath?: string;
   playbackKey?: string;
   locations?: PlayerTrackLocation[];
+  /** The listener picked the current location in the player, so a restored queue keeps it over a local copy. */
+  locationChosen?: boolean;
   /** The app page the track was queued from; the player leads back to it. */
   originPage?: string;
   /** The work detail location the track was queued from, when it was queued from one. */
   originWorkLocation?: string;
+  /** A Record file rather than a work file; its progress is saved to the Record library. */
+  record?: PlayerTrackRecord;
+};
+
+/** The Record file a track plays and the folder that holds it. */
+export type PlayerTrackRecord = {
+  assetId: number;
+  folderId: number;
 };
 
 export type LyricsPreferenceTarget = {

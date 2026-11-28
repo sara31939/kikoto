@@ -1,5 +1,6 @@
 import type { LibrarySort, ListeningStatus, SortDirection } from "@/lib/api";
 import { isWorkCodePath } from "@/lib/workCode";
+import { WORKFLOWS_PATH } from "@/lib/workflowLinks";
 import {
   isWorkCollectionColumnCount,
   type WorkCollectionColumnSetting,
@@ -39,7 +40,17 @@ const storagePrefix = "kikoto:library-browse:";
 const lastLocationStoragePrefix = "kikoto:library-last-location:";
 const sortPreferenceStoragePrefix = "kikoto:library-sort:";
 const statuses = ["none", "want_to_listen", "listening", "finished", "relisten", "paused"] satisfies ListeningStatus[];
-const sorts = ["recent", "release", "code", "title", "rating", "sales", "random", "recommend"] satisfies LibrarySort[];
+const sorts = [
+  "recent",
+  "release",
+  "code",
+  "title",
+  "rating",
+  "user_rating",
+  "sales",
+  "random",
+  "recommend",
+] satisfies LibrarySort[];
 
 export function readLibraryBrowseState(key: string): LibraryBrowseState | null {
   try {
@@ -199,29 +210,41 @@ function parseColumnSearchValue(value: string | null) {
   return value === "auto" ? "auto" : Number(value);
 }
 
+/**
+ * The top-level paths that another page renders or redirects from. Every other
+ * single segment that is not a work code is a library source's own route.
+ */
+const otherPageTopLevelPaths = new Set([
+  "/about",
+  "/activity",
+  "/circles",
+  "/cleanup",
+  "/discover",
+  "/favorites",
+  "/for-you",
+  "/history",
+  "/insights",
+  "/maintenance",
+  "/metadata",
+  "/no-source",
+  "/records",
+  "/runs",
+  "/settings",
+  "/subscriptions",
+  "/system",
+  "/tags",
+  "/translation",
+  "/user-data",
+  "/users",
+  "/voices",
+  "/work-management",
+  WORKFLOWS_PATH,
+]);
+
+/** Whether a path is one of the Library's lists: a local scope or a library source. */
 function isLibraryBrowsePath(path: string) {
-  if (["/", "/tracked", "/library", "/library/tracked"].includes(path)) {
-    return true;
-  }
-  if (["/no-source", "/library/no-source", "/library/all", "/library/remote"].includes(path)) {
-    return false;
-  }
-  if (/^\/library\/source\/[^/]+\/?$/.test(path)) return true;
-  if (
-    [
-      "/favorites",
-      "/circles",
-      "/voices",
-      "/workflows",
-      "/activity",
-      "/runs",
-      "/settings",
-      "/maintenance",
-      "/users",
-      "/about",
-    ].includes(path.replace(/\/$/, ""))
-  ) {
-    return false;
-  }
-  return /^\/[^/]+\/?$/.test(path) && !isWorkCodePath(path);
+  const normalized = path.length > 1 ? path.replace(/\/+$/, "") : path;
+  if (["/", "/tracked", "/library", "/library/tracked"].includes(normalized)) return true;
+  if (/^\/library\/source\/[^/]+$/.test(normalized)) return true;
+  return /^\/[^/]+$/.test(normalized) && !isWorkCodePath(normalized) && !otherPageTopLevelPaths.has(normalized);
 }

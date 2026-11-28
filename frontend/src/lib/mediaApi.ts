@@ -1,13 +1,5 @@
-import {
-  assetURL,
-  deleteJSON,
-  getJSON,
-  getText,
-  postJSON,
-  postJSONBody,
-  putJSONBody,
-  sendJSONBody,
-} from "@/lib/apiTransport";
+import type { MediaPlaybackLocation } from "@/lib/playbackQueueApi";
+import { deleteJSON, getJSON, getText, postJSON, postJSONBody, putJSONBody, sendJSONBody } from "@/lib/apiTransport";
 
 export type MediaProgressUpdate = {
   workId: number;
@@ -20,6 +12,8 @@ export type MediaProgressUpdate = {
   durationSeconds: number | null;
   completed: boolean;
   lastPlayedAt: string | null;
+  /** From a progress write: false when a later checkpoint kept the cursor, so the write was not recorded. */
+  stored?: boolean;
 };
 
 export type MediaItem = {
@@ -45,6 +39,8 @@ export type MediaItem = {
    */
   lyricsAssignments?: MediaLyricsAssignment[];
   locations: MediaFileLocation[];
+  /** The locations the item can play from now, in the server's playback priority. */
+  playbackLocations?: MediaPlaybackLocation[];
   /** The models that wrote a lyrics file Kikoto published from speech recognition or translation. */
   aiLyrics?: LyricsAIModels;
 };
@@ -84,6 +80,10 @@ export type MediaFileLocation = {
    * file and folders, segment for segment; only on a local location with such a name.
    */
   displayPath?: string;
+  /** The work folder that holds a local location, as the server matches it; absent where none does. */
+  folderId?: number;
+  /** The location's path below its work folder, present with `folderId`. */
+  relativePath?: string;
   streamUrl: string;
   downloadUrl: string;
   remoteHash: string;
@@ -93,6 +93,22 @@ export type MediaFileLocation = {
   lastCheckedAt: string | null;
   /** The measured loudness of the file the location holds, once playback has measured it. */
   loudness?: MediaLoudness;
+  /** The lyrics an audio or video location can play, ranked by the server; the first is the automatic choice. */
+  lyricsChoices?: MediaLyricsChoice[];
+  /** The lyrics file name matching picks for an audio or video location, which applies where no assignment does. */
+  lyricsMatchMediaItemId?: number;
+};
+
+/** Why a lyrics file is a choice of a track: a library assignment, or the way name matching picked it. */
+export type LyricsChoiceReason = "assigned" | "exact_sidecar" | "same_stem" | "normalized_name" | "shared_folder";
+
+/** One lyrics file a track location can play, read from its local location. */
+export type MediaLyricsChoice = {
+  lyricsMediaItemId: number;
+  locationId: number;
+  reason: LyricsChoiceReason;
+  /** The declared language of an assigned file; absent for a name match or a file assigned to every language. */
+  language?: string;
 };
 
 /** EBU R 128 integrated loudness and the peak level of one file. */
@@ -132,6 +148,29 @@ export type MediaTextPreview = {
   path: string;
   content: string;
 };
+
+/**
+ * A lyrics or subtitle file as the server reads it: LRC, WebVTT, SRT, and ASS
+ * become timed lines, in start order. `text` is the file's own text and is
+ * present only when it holds no timed line.
+ */
+export type TimedLyricsResult = {
+  timed: boolean;
+  lines: { time: number; text: string; attribution?: boolean }[];
+  /** The song tags of an LRC header: title, artist, album, author, and creator. */
+  tags: { key: string; value: string }[];
+  /** Only a few lines carry LRC timestamps, so a viewer shows the file as plain text. */
+  sparse: boolean;
+  text?: string;
+};
+
+/** The longest text a viewer previews, the same bound the server reads a preview within. */
+const TEXT_PREVIEW_MAX_LENGTH = 512 * 1024;
+
+/** A text route answers in these formats when asked with `format`. */
+function withTextFormat(url: string, format: "lyrics" | "webvtt") {
+  return `${url}${url.includes("?") ? "&" : "?"}format=${format}`;
+}
 
 export type MediaCacheResult = {
   runId: number;
@@ -215,6 +254,19 @@ export type VideoPlaybackInfo = {
   subtitles?: VideoEmbeddedSubtitle[];
 };
 
+/**
+ * How the audio player plays one location: "direct" is the file itself, "hls" a
+ * playlist the server converts as it is played, and "prepared" one complete
+ * conversion for a browser without HLS playback.
+ */
+export type AudioPlaybackInfo = {
+  delivery: "direct" | "hls" | "prepared";
+  conversion?: "none" | "transcode";
+  url: string;
+  durationSeconds: number;
+  seekable: boolean;
+};
+
 /** An embedded text subtitle stream, served as WebVTT from `url`. */
 export type VideoEmbeddedSubtitle = {
   stream: number;
@@ -273,12 +325,28 @@ export type MediaCleanupResult = {
   queued: number;
 };
 
-export function mediaDownloadURL(locationId: number) {
-  return assetURL(`/api/media/${locationId}/download`);
-}
-
 export const mediaApi = {
-  getMediaText: (locationId: number) => getJSON<MediaTextPreview>(`/api/media/${locationId}/text`),
+  getMediaText: (locationId: number, signal?: AbortSignal) =>
+    getJSON<MediaTextPreview>(`/api/media/${locationId}/text`, signal),
+  /**
+   * Reads a text file named by the server's text URL, such as a remote source's,
+   * as plain text within the preview bound.
+   */
+  getTextPreview: (url: string, signal?: AbortSignal) => getText(url, signal, { maxLength: TEXT_PREVIEW_MAX_LENGTH }),
+  /** Reads a lyrics file of a work as timed lines; every kind of location is read where its bytes are. */
+  getMediaLyrics: (locationId: number, signal?: AbortSignal) =>
+    getJSON<TimedLyricsResult>(`/api/media/${locationId}/text?format=lyrics`, signal),
+  /** Reads a subtitle file of a work as WebVTT for a `<track>` element. */
+  getMediaSubtitle: (locationId: number, signal?: AbortSignal) =>
+    getText(`/api/media/${locationId}/text?format=webvtt`, signal),
+  /** Reads a remote source's text file, named by the server's text URL, as timed lines. */
+  getTextUrlLyrics: (url: string, signal?: AbortSignal) =>
+    getJSON<TimedLyricsResult>(withTextFormat(url, "lyrics"), signal),
+  /** Reads a remote source's subtitle file, named by the server's text URL, as WebVTT. */
+  getTextUrlSubtitle: (url: string, signal?: AbortSignal) => getText(withTextFormat(url, "webvtt"), signal),
+  /** Reads text the client already holds, such as a translation or a transcription, as timed lines. */
+  parseLyrics: (text: string, signal?: AbortSignal) =>
+    postJSONBody<TimedLyricsResult>("/api/lyrics/parse", { text }, signal),
   /** Reads an embedded subtitle stream as WebVTT from the URL playback info lists. */
   getVideoSubtitle: (url: string, signal?: AbortSignal) => getText(url, signal),
   /** Compares the local files of a work's family by content; one request does a bounded share of the work. */
@@ -298,6 +366,22 @@ export const mediaApi = {
     if (audioStream !== null) query.set("audioStream", String(audioStream));
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
     return getJSON<VideoPlaybackInfo>(`/api/media/${locationId}/playback${suffix}`, signal);
+  },
+  /**
+   * How the audio player plays a library location, decided on the server from
+   * the probed file and the declared capabilities. A location of a video plays
+   * only its audio. `forceTranscode` is compatibility playback.
+   */
+  getAudioPlaybackInfo: (
+    locationId: number,
+    options: { capabilities: string[]; forceTranscode?: boolean; boost?: boolean },
+    signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams({ profile: "audio" });
+    if (options.capabilities.length > 0) query.set("capabilities", options.capabilities.join(","));
+    if (options.forceTranscode) query.set("forceTranscode", "1");
+    if (options.boost) query.set("boost", "auto");
+    return getJSON<AudioPlaybackInfo>(`/api/media/${locationId}/playback?${query.toString()}`, signal);
   },
   setMediaLyricsPreference: (audioMediaItemId: number, lyricsMediaItemId: number) =>
     putJSONBody<{ audioMediaItemId: number; lyricsMediaItemId: number }>(

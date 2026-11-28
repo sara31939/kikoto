@@ -1,10 +1,14 @@
-import { ArrowUpRight, CodeXml, RefreshCw, Scale, ScrollText, type LucideIcon } from "lucide-react";
+import { ArrowUpRight, Bug, Check, CodeXml, Copy, RefreshCw, Scale, ScrollText, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Trans, useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
-import { APP_CLIENT_VERSION, githubReleaseURL } from "@/lib/appInfo";
+import { contentPageClassName } from "@/components/ui/page-width";
+import { useToast } from "@/components/ui/toast";
+import { APP_CLIENT_VERSION, appClientPlatformName, githubReleaseURL } from "@/lib/appInfo";
 import { api, type AppUpdate } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
+import { startLoad } from "@/lib/effectScope";
 import { KIKOTO_GITHUB_ENDPOINTS } from "@/lib/official-links";
 import { cn } from "@/lib/tailwindClassNames";
 import { NowPlayingBars } from "@/player/dock/playerControls";
@@ -60,44 +64,20 @@ const aiModelHistory = [
   { from: "v0.5.5", to: "v0.6.0", models: ["GPT-6-Astra"] },
   { from: "v0.6.1", to: "v0.6.1", models: ["GPT-6-Astra", "Claude Opus 5", "Claude Fable 5.1"] },
   { from: "v0.7.0", to: "v0.7.1", models: ["Claude Opus 5.5", "GPT-6-Astra", "GPT-6-Sol"] },
-  { from: "v0.8.0", to: null, models: ["Claude Opus 5.5", "GPT-6.1-Sol"] },
+  { from: "v0.8.0", to: "v0.10.2", models: ["Claude Opus 5.5", "GPT-6.1-Sol"] },
+  {
+    from: "v0.11.0",
+    to: null,
+    models: ["Claude Opus 5.5", "Gemini 4 Neon", "GPT-6.2-Sol", "Gemini 4 Hydrogen", "Gemini 4 Carbon"],
+  },
 ] as const;
 
+// The projects a user would recognize; build tools and transitive libraries are left out.
 const technologyGroups = [
-  {
-    title: "Frontend",
-    items: ["React", "TypeScript", "Vite", "Tailwind CSS", "i18next", "hls.js", "lucide-react", "Radix UI Slot"],
-  },
-  {
-    title: "Backend",
-    items: [
-      "Go",
-      "SQLite (modernc.org/sqlite)",
-      "fsnotify",
-      "chardet",
-      "golang.org/x/text",
-      "golang.org/x/crypto",
-      "golang.org/x/net",
-      "golang.org/x/sys",
-    ],
-  },
-  {
-    title: "Mobile",
-    items: [
-      "Capacitor",
-      "Android WebView",
-      "AndroidX",
-      "Gradle",
-      "WKWebView",
-      "AVKit",
-      "Swift Package Manager",
-      "Xcode",
-    ],
-  },
-  {
-    title: "Runtime & Delivery",
-    items: ["FFmpeg", "Intel Media Driver (VA-API)", "Debian", "Docker", "Docker Compose", "GitHub Actions"],
-  },
+  { title: "Frontend", items: ["React", "TypeScript", "Vite", "Tailwind CSS", "hls.js"] },
+  { title: "Backend", items: ["Go", "SQLite"] },
+  { title: "Mobile", items: ["Capacitor", "Android WebView", "WKWebView"] },
+  { title: "Runtime & Delivery", items: ["FFmpeg", "Docker"] },
 ] as const;
 
 const LICENSE_SPDX_ID = "AGPL-3.0";
@@ -107,30 +87,21 @@ const focusRing = "focus-visible:outline-none focus-visible:ring-2 focus-visible
 
 export function AboutPage() {
   const { t } = useTranslation();
-  const update = useAvailableUpdate();
+  const appUpdate = useAppUpdate();
   return (
-    <div className="w-full max-w-5xl">
+    <div className={contentPageClassName}>
       <div className="grid gap-x-12 gap-y-8 lg:grid-cols-[19rem_minmax(0,1fr)]">
-        <Sleeve update={update} />
+        <Sleeve appUpdate={appUpdate} />
         <div className="min-w-0">
           <p className="max-w-2xl text-lg leading-8 text-foreground [font-family:var(--font-heading)] sm:text-xl sm:leading-9">
             {t("about.intro")}
           </p>
           <div className="mt-8 space-y-9">
-            <Track number={1} title={t("about.softwareOverview")}>
-              <div className="max-w-2xl space-y-3 text-sm leading-6 text-muted-foreground">
-                <p>{t("about.overviewOne")}</p>
-                <p>{t("about.overviewTwo")}</p>
-              </div>
-            </Track>
-            <Track number={2} title={t("about.builtWithAi")}>
-              <p className="max-w-2xl text-sm leading-6 text-muted-foreground">{t("about.aiCredit")}</p>
-              <ModelTimeline />
-            </Track>
-            <Track number={3} title={t("about.technologies")}>
+            <AiTrack number={1} />
+            <Track number={2} title={t("about.technologies")}>
               <TechnologyCredits />
             </Track>
-            <ReferenceTrack number={4} />
+            <ReferenceTrack number={3} />
           </div>
           <FinePrint />
         </div>
@@ -139,26 +110,55 @@ export function AboutPage() {
   );
 }
 
-function useAvailableUpdate() {
-  const [update, setUpdate] = useState<AppUpdate | null>(null);
-  useEffect(() => {
-    let active = true;
-    void api
-      .appUpdate()
-      .then((result) => {
-        if (active && result.updateAvailable) setUpdate(result);
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
-  }, []);
-  return update;
+/** The server's update check, which also reports the server's own version. */
+function useAppUpdate() {
+  const [appUpdate, setAppUpdate] = useState<AppUpdate | null>(null);
+  useEffect(() => startLoad(() => api.appUpdate(), { onSuccess: setAppUpdate }), []);
+  return appUpdate;
+}
+
+function versionReport(serverVersion: string | undefined) {
+  return [
+    `Kikoto ${APP_CLIENT_VERSION} (${appClientPlatformName()})`,
+    `Server ${serverVersion || "unknown"}`,
+    navigator.userAgent,
+  ].join("\n");
+}
+
+/** Copies the client, server, and browser versions for a bug report. */
+function CopyVersionButton({ serverVersion }: { serverVersion: string | undefined }) {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await copyText(versionReport(serverVersion));
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      toast.error(t("about.copyVersionFailed"));
+    }
+  };
+  const label = copied ? t("about.versionCopied") : t("about.copyVersion");
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      className="-my-1.5 h-7 w-7 text-muted-foreground"
+      aria-label={label}
+      title={label}
+      onClick={() => void copy()}
+    >
+      {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+    </Button>
+  );
 }
 
 /** The record sleeve: artwork, title, edition, and the outbound project links. */
-function Sleeve({ update }: { update: AppUpdate | null }) {
+function Sleeve({ appUpdate }: { appUpdate: AppUpdate | null }) {
   const { t } = useTranslation();
+  const update = appUpdate?.updateAvailable ? appUpdate : null;
   return (
     <section
       aria-label={t("about.label")}
@@ -169,8 +169,11 @@ function Sleeve({ update }: { update: AppUpdate | null }) {
         <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">{AUTHOR}</p>
         <h2 className="mt-1 text-3xl font-semibold leading-tight tracking-tight sm:text-4xl">{t("app.name")}</h2>
         <div className="mt-2.5 flex flex-wrap items-center gap-2">
-          <span className="rounded-[var(--badge-radius)] border bg-card px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground">
-            {APP_CLIENT_VERSION}
+          <span className="flex items-center gap-0.5">
+            <span className="rounded-[var(--badge-radius)] border bg-card px-2 py-0.5 text-xs font-medium tabular-nums text-muted-foreground">
+              {APP_CLIENT_VERSION}
+            </span>
+            <CopyVersionButton serverVersion={appUpdate?.currentVersion} />
           </span>
           <span className="rounded-[var(--badge-radius)] border border-info-border bg-info-surface px-2 py-0.5 text-xs font-semibold text-info-foreground">
             Sara fork
@@ -191,7 +194,7 @@ function Sleeve({ update }: { update: AppUpdate | null }) {
           )}
         </div>
       </div>
-      <ul className="col-span-2 grid grid-cols-3 gap-2 lg:col-span-1 lg:grid-cols-1 lg:gap-0 lg:divide-y lg:border-y">
+      <ul className="col-span-2 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:col-span-1 lg:grid-cols-1 lg:gap-0 lg:divide-y lg:border-y">
         <SleeveLink href={KIKOTO_GITHUB_ENDPOINTS.repositoryURL} icon={CodeXml} label={t("about.sourceCode")} />
         <SleeveLink href={githubReleaseURL(APP_CLIENT_VERSION)} icon={ScrollText} label={t("about.releaseNotes")} />
         <SleeveLink
@@ -200,6 +203,7 @@ function Sleeve({ update }: { update: AppUpdate | null }) {
           label={t("about.license")}
           meta={LICENSE_SPDX_ID}
         />
+        <SleeveLink href={KIKOTO_GITHUB_ENDPOINTS.issuesURL} icon={Bug} label={t("about.reportIssue")} />
       </ul>
     </section>
   );
@@ -294,13 +298,40 @@ function versionRange(entry: (typeof aiModelHistory)[number], t: (key: string) =
   return `${entry.from ?? t("about.firstRelease")} – ${entry.to ?? t("about.present")}`;
 }
 
-function ModelTimeline() {
+/** The AI credit, showing the current models with the earlier release ranges behind a switch. */
+function AiTrack({ number }: { number: number }) {
   const { t } = useTranslation();
-  const entries = [...aiModelHistory].reverse();
+  const [expanded, setExpanded] = useState(false);
   return (
-    <div className="mt-5">
-      <h4 className="text-xs font-medium text-muted-foreground">{t("about.modelHistoryTitle")}</h4>
-      <ol className="mt-2 divide-y divide-dashed" aria-label={t("about.modelHistoryDescription")}>
+    <Track
+      number={number}
+      title={t("about.builtWithAi")}
+      action={
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="-my-2 -mr-2 shrink-0 text-muted-foreground"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? t("about.hideModelHistory") : t("about.showModelHistory")}
+        </Button>
+      }
+    >
+      <p className="max-w-2xl text-sm leading-6 text-muted-foreground">{t("about.aiCredit")}</p>
+      <ModelTimeline expanded={expanded} />
+    </Track>
+  );
+}
+
+function ModelTimeline({ expanded }: { expanded: boolean }) {
+  const { t } = useTranslation();
+  const newestFirst = [...aiModelHistory].reverse();
+  const entries = expanded ? newestFirst : newestFirst.slice(0, 1);
+  return (
+    <div className="mt-3">
+      <ol className="divide-y divide-dashed" aria-label={t("about.modelHistoryDescription")}>
         {entries.map((entry, index) => {
           const current = index === 0;
           return (
@@ -477,7 +508,10 @@ function FinePrint() {
     <footer className="mt-12 space-y-2 border-t pt-4 text-xs leading-5 text-muted-foreground sm:pl-9">
       <p className="max-w-2xl font-medium text-foreground">{t("about.usageNotice")}</p>
       <p className="max-w-2xl">
-        <span className="font-medium text-foreground">{t("about.copyright")}</span>{" "}
+        <span className="font-medium text-foreground">{t("about.copyright")}</span>
+        <span aria-hidden="true" className="mx-1.5">
+          ·
+        </span>
         <Trans
           i18nKey="about.licenseText"
           components={{

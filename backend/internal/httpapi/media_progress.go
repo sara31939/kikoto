@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/yexca/kikoto/backend/internal/personal"
 	"github.com/yexca/kikoto/backend/internal/sqlutil"
 )
 
@@ -30,6 +31,9 @@ type mediaProgressResponse struct {
 	DurationSeconds *float64 `json:"durationSeconds"`
 	Completed       bool     `json:"completed"`
 	LastPlayedAt    *string  `json:"lastPlayedAt"`
+	// Stored is false when a later checkpoint kept the cursor, so this write
+	// was not recorded.
+	Stored bool `json:"stored"`
 }
 
 type workProgressSummary struct {
@@ -62,7 +66,7 @@ func (s *Server) updateMediaProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	mediaItemID, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid media item id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid media item id", false)
 		return
 	}
 	if eligible, err := s.demoMediaItemEligible(r.Context(), mediaItemID); err != nil || !eligible {
@@ -75,7 +79,7 @@ func (s *Server) updateMediaProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	payload, err := decodeMediaProgressUpdate(r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	if payload.DurationSeconds != nil && *payload.DurationSeconds > 0 && payload.PositionSeconds > *payload.DurationSeconds {
@@ -88,7 +92,7 @@ func (s *Server) updateMediaProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if errors.Is(err, errMediaProgressLocationMismatch) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	if err != nil {
@@ -111,14 +115,15 @@ func (s *Server) prepareAndPersistMediaProgress(ctx context.Context, userID, med
 		return mediaProgressResponse{}, err
 	}
 	lastPlayedAt := time.Now().UTC().Truncate(time.Second).Format("2006-01-02 15:04:05")
-	if err := s.persistMediaProgress(ctx, userID, canonicalWorkID, mediaItemID, fileSourceID, locationID, locationType, payload, lastPlayedAt); err != nil {
+	stored, err := s.persistMediaProgress(ctx, userID, canonicalWorkID, mediaItemID, fileSourceID, locationID, locationType, payload, lastPlayedAt)
+	if err != nil {
 		return mediaProgressResponse{}, err
 	}
 	return mediaProgressResponse{
 		WorkID: canonicalWorkID, MediaWorkID: workID, MediaItemID: mediaItemID,
 		FileSourceID: fileSourceID, LocationID: locationID, LocationType: locationType,
 		PositionSeconds: payload.PositionSeconds, DurationSeconds: payload.DurationSeconds,
-		Completed: payload.Completed, LastPlayedAt: &lastPlayedAt,
+		Completed: payload.Completed, LastPlayedAt: &lastPlayedAt, Stored: stored,
 	}, nil
 }
 
@@ -139,6 +144,10 @@ func decodeMediaProgressUpdate(r *http.Request) (mediaProgressUpdateRequest, err
 	return payload, nil
 }
 
+// persistMediaProgress records a legacy progress write as a checkpoint that
+// occurred when the server received it. Like a checkpoint report, it replaces
+// only an earlier cursor, so it never undoes a later report, and reports
+// whether it was recorded.
 func (s *Server) persistMediaProgress(
 	ctx context.Context,
 	userID, workID, mediaItemID int64,
@@ -146,8 +155,8 @@ func (s *Server) persistMediaProgress(
 	locationType string,
 	payload mediaProgressUpdateRequest,
 	lastPlayedAt string,
-) error {
-	_, err := s.db.ExecContext(ctx, `
+) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO user_work_playback_cursor (
 			user_id,
 			work_id,
@@ -171,13 +180,16 @@ func (s *Server) persistMediaProgress(
 			completed = excluded.completed,
 			last_played_at = excluded.last_played_at,
 			updated_at = excluded.last_played_at,
-			report_order = MAX(report_order + 1, excluded.report_order), report_id = ''
+			report_order = excluded.report_order, report_id = ''
+		WHERE excluded.report_order > user_work_playback_cursor.report_order
+			OR (excluded.report_order = user_work_playback_cursor.report_order AND user_work_playback_cursor.report_id = '')
 	`, userID, workID, mediaItemID, fileSourceID, locationID, locationType,
 		payload.PositionSeconds, payload.DurationSeconds, payload.Completed, lastPlayedAt, time.Now().UnixMilli())
 	if err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	changed, err := result.RowsAffected()
+	return changed > 0, err
 }
 
 func (s *Server) getWorkPlaybackCursor(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +199,7 @@ func (s *Server) getWorkPlaybackCursor(w http.ResponseWriter, r *http.Request) {
 	}
 	workID, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work id", false)
 		return
 	}
 	if !s.requireDemoWork(w, r, workID) {
@@ -196,7 +208,7 @@ func (s *Server) getWorkPlaybackCursor(w http.ResponseWriter, r *http.Request) {
 	cursor, err := s.loadWorkPlaybackCursor(r.Context(), user.ID, workID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
 		writeError(w, err)
@@ -221,23 +233,10 @@ func (s *Server) progressTarget(ctx context.Context, mediaItemID int64, requeste
 	return workID, sqlutil.Int64(fileSourceID), sqlutil.Int64(locationID), locationType.String, nil
 }
 
+// canonicalWorkID is the work that holds the personal state of a work's
+// family; see personal.CanonicalWorkIDSQL.
 func (s *Server) canonicalWorkID(ctx context.Context, workID int64) (int64, error) {
-	var canonicalWorkID int64
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(logical.canonical_work_id, canonical_edition.work_id, work.id)
-		FROM work
-		LEFT JOIN work_edition AS edition ON edition.work_id = work.id
-		LEFT JOIN logical_work AS logical ON logical.id = edition.logical_work_id
-		LEFT JOIN work_edition AS canonical_edition
-			ON canonical_edition.logical_work_id = edition.logical_work_id
-			AND canonical_edition.is_canonical = 1
-		WHERE work.id = ?
-		ORDER BY canonical_edition.work_id ASC
-		LIMIT 1
-	`, workID).Scan(&canonicalWorkID); err != nil {
-		return 0, err
-	}
-	return canonicalWorkID, nil
+	return personal.CanonicalWorkID(ctx, s.db, workID)
 }
 
 func validSeconds(value float64) bool {

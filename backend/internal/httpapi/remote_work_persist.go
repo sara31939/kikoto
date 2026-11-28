@@ -221,42 +221,74 @@ func syncRemoteTrackNode(ctx context.Context, tx *sql.Tx, fileSourceID, workID i
 	if known := node.KnownSize(); known != nil && len(node.Children) == 0 && kind != "folder" {
 		size = *known
 	}
-	itemID, err := upsertRemoteMediaItem(ctx, tx, workID, parent, kind, title, index, duration, hasAudio, size, fingerprint)
-	if err != nil {
-		return err
+	folder := len(node.Children) > 0 || kind == "folder"
+	itemID, remoteOwned := int64(0), true
+	if !folder {
+		var err error
+		if itemID, remoteOwned, err = remotePathMediaItemID(ctx, tx, workID, fileSourceID, path, fingerprint); err != nil {
+			return err
+		}
+	}
+	// A scan takes the item of a fetched file over as a local item; the sync
+	// refreshes only its remote location and leaves the item as the scan
+	// recorded it.
+	if remoteOwned {
+		if err := upsertRemoteMediaItem(ctx, tx, workID, parent, kind, title, index, duration, hasAudio, size, fingerprint); err != nil {
+			return err
+		}
+		var err error
+		if itemID, err = sqlutil.SelectID(ctx, tx, "SELECT id FROM media_item WHERE fingerprint = ?", fingerprint); err != nil {
+			return err
+		}
 	}
 	state.mediaItems++
-	if len(node.Children) > 0 || kind == "folder" {
+	if folder {
 		childID := itemID
 		return syncRemoteTrackChildren(ctx, tx, fileSourceID, workID, workCode, &childID, path, node.Children, state)
 	}
 	return upsertRemoteTrackLocation(ctx, tx, fileSourceID, itemID, path, node, duration, size, state)
 }
 
-func upsertRemoteMediaItem(ctx context.Context, tx *sql.Tx, workID int64, parent any, kind, title string, index int, duration, hasAudio, size any, fingerprint string) (int64, error) {
-	existingID, err := selectMediaItemIDByFingerprint(ctx, tx, workID, fingerprint)
+// remotePathMediaItemID returns the media item of the work that holds the
+// source's remote location at the path, preferring the item with the path's
+// remote fingerprint, and whether that item still carries the fingerprint. It
+// returns 0 and true when no item holds the location.
+func remotePathMediaItemID(ctx context.Context, tx *sql.Tx, workID, fileSourceID int64, path, fingerprint string) (int64, bool, error) {
+	var itemID int64
+	var itemFingerprint string
+	err := tx.QueryRowContext(ctx, `
+		SELECT item.id, item.fingerprint
+		FROM media_file_location AS location
+		INNER JOIN media_item AS item ON item.id = location.media_item_id
+		WHERE location.file_source_id = ? AND location.location_type = 'remote_stream' AND location.path = ?
+			AND item.work_id = ?
+		ORDER BY CASE WHEN item.fingerprint = ? THEN 0 ELSE 1 END, item.id ASC
+		LIMIT 1
+	`, fileSourceID, path, workID, fingerprint).Scan(&itemID, &itemFingerprint)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, true, nil
+	}
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if existingID == 0 {
-		result, err := tx.ExecContext(ctx, `
-			INSERT INTO media_item (work_id, parent_id, kind, title, track_no, duration_seconds, has_audio, size_bytes, fingerprint)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, workID, parent, kind, title, index+1, duration, hasAudio, size, fingerprint)
-		if err != nil {
-			return 0, err
-		}
-		return result.LastInsertId()
-	}
+	return itemID, itemFingerprint == fingerprint, nil
+}
+
+func upsertRemoteMediaItem(ctx context.Context, tx *sql.Tx, workID int64, parent any, kind, title string, index int, duration, hasAudio, size any, fingerprint string) error {
 	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO media_item (work_id, parent_id, kind, title, track_no, duration_seconds, has_audio, size_bytes, fingerprint)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE NOT EXISTS (SELECT 1 FROM media_item WHERE fingerprint = ?)
+	`, workID, parent, kind, title, index+1, duration, hasAudio, size, fingerprint, fingerprint); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
 		UPDATE media_item
 		SET parent_id = ?, kind = ?, title = ?, track_no = ?, duration_seconds = ?,
 			has_audio = COALESCE(?, has_audio), size_bytes = ?
-		WHERE id = ?
-	`, parent, kind, title, index+1, duration, hasAudio, size, existingID); err != nil {
-		return 0, err
-	}
-	return existingID, nil
+		WHERE fingerprint = ?
+	`, parent, kind, title, index+1, duration, hasAudio, size, fingerprint)
+	return err
 }
 
 func syncRemoteTrackChildren(ctx context.Context, tx *sql.Tx, fileSourceID, workID int64, workCode string, parentID *int64, path string, children []kikoeru.Track, state *remoteTrackSyncState) error {

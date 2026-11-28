@@ -61,14 +61,11 @@ func TestFilesystemTriggerQueuesDebouncedDirectoryEvent(t *testing.T) {
 	if triggerType != "filesystem_event" || triggerReason != "data_directories_changed" || !strings.Contains(inputJSON, `"directory_event_at"`) || !strings.Contains(inputJSON, `"observed_directories":7`) || !strings.Contains(inputJSON, `"scan_mode":"incremental"`) || !strings.Contains(inputJSON, `"changed_paths":["RJ00000000/cover.jpg","RJ00000000/track.flac"]`) {
 		t.Fatalf("filesystem run = type %q reason %q input %s", triggerType, triggerReason, inputJSON)
 	}
-	if strings.Contains(inputJSON, `"follow_up_run":true`) {
-		t.Fatalf("filesystem run unexpectedly enabled metadata follow-up: %s", inputJSON)
-	}
 }
 
 func TestFilesystemTriggerConfiguredFullOmitsChangedPathBatch(t *testing.T) {
 	db := openMigratedTestDB(t)
-	if _, err := db.Exec(`UPDATE workflow_trigger SET config_json = '{"followUpRun":false,"scanMode":"full"}' WHERE trigger_type = 'filesystem_event'`); err != nil {
+	if _, err := db.Exec(`UPDATE workflow_trigger SET config_json = '{"scanMode":"full"}' WHERE trigger_type = 'filesystem_event'`); err != nil {
 		t.Fatal(err)
 	}
 	server := NewServer(db, config.Config{DataRoot: t.TempDir(), LocalScanDepth: 3})
@@ -392,7 +389,7 @@ func TestFixedFilesystemTriggerCanBeToggledAndChangeScanMode(t *testing.T) {
 	}
 	modePayload := mustJSON(map[string]any{
 		"workflowDefinitionId": definitionID, "displayName": displayName, "triggerType": "filesystem_event", "enabled": true,
-		"scheduleJson": scheduleJSON, "configJson": `{"followUpRun":false,"scanMode":"full"}`,
+		"scheduleJson": scheduleJSON, "configJson": `{"scanMode":"full"}`,
 	})
 	modeResponse := requestWorkflowTriggerUpdate(t, server, actor, triggerID, modePayload)
 	if modeResponse.Code != http.StatusOK {
@@ -514,4 +511,46 @@ func waitForFilesystemCondition(t *testing.T, condition func() bool, message str
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal(message)
+}
+
+// A new watch configuration replaces the watcher and ends its session. Changes
+// still waiting for the settle delay are covered by a full scan once the
+// replacement watcher settles.
+func TestFilesystemWatcherReconfigureRetainsPendingChangesAsFullScan(t *testing.T) {
+	db := openMigratedTestDB(t)
+	server := NewServer(db, config.Config{DataRoot: t.TempDir(), LocalScanDepth: 2})
+	watchConfig, err := server.loadFilesystemWatcherConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryFullScan := false
+	watcher := newFakeFilesystemWatcher(2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errC := make(chan error, 1)
+	go func() {
+		errC <- server.runFilesystemWatcherSession(ctx, watcher, watchConfig, time.Hour, 20*time.Millisecond, &recoveryFullScan)
+	}()
+	waitForFilesystemCondition(t, func() bool {
+		var count int
+		return db.QueryRow("SELECT watched_directory_count FROM filesystem_trigger_state LIMIT 1").Scan(&count) == nil && count == watcher.count
+	}, "watcher session did not become ready")
+	watcher.changes <- localfs.DirectoryChange{Path: filepath.Join(server.cfg.DataRoot, "RJ00000000", "track.flac")}
+	waitForFilesystemCondition(t, func() bool { return len(watcher.changes) == 0 }, "watcher session did not take the change")
+	if _, err := db.Exec("INSERT INTO app_setting (key, value_json) VALUES ('local_scan_depth', '3') ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json"); err != nil {
+		t.Fatal(err)
+	}
+	server.notifyFilesystemTriggerConfigChanged()
+	select {
+	case err := <-errC:
+		if !errors.Is(err, errFilesystemWatcherReconfigure) {
+			t.Fatalf("watcher session error = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher session did not request reconfiguration")
+	}
+	assertFilesystemRunCount(t, db, 0)
+	if !recoveryFullScan {
+		t.Fatal("reconfiguration dropped the pending change without a full-scan recovery")
+	}
 }

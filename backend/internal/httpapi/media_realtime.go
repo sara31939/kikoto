@@ -50,6 +50,10 @@ const (
 	playbackProfileVideo = "video"
 )
 
+// capAudioHLS is declared by a client that plays an audio HLS playlist. It is
+// not a format, and no stream request needs it.
+const capAudioHLS = "audio-hls"
+
 const (
 	capAudioMP3            = "audio-mp3"
 	capAudioMP4AAC         = "audio-mp4-aac"
@@ -181,7 +185,7 @@ func playbackCapabilities(r *http.Request) map[string]bool {
 	values := strings.Split(strings.TrimSpace(r.URL.Query().Get("capabilities")), ",")
 	allowed := slices.Concat([]string{
 		capAudioMP3, capAudioMP4AAC, capAudioFLAC, capAudioOggOpus,
-		capAudioOggVorbis, capAudioWebMOpus, capAudioWebMVorbis, capAudioWAV,
+		capAudioOggVorbis, capAudioWebMOpus, capAudioWebMVorbis, capAudioWAV, capAudioHLS,
 	}, videoPlaybackCapabilityKeys)
 	// Only known keys are kept, so the result is bounded by the allow list.
 	result := make(map[string]bool)
@@ -328,7 +332,7 @@ func (s *Server) probePlaybackFile(ctx context.Context, path string) (playbackPr
 		return probe, nil
 	}
 	output, err := s.runBoundedFFprobe(ctx, path, "format=format_name,duration:stream=codec_type,codec_name,codec_tag_string,profile,level,pix_fmt,width,height"+
-		",index,channels:stream_tags=language,title:stream_disposition=default,forced")
+		",index,channels:stream_tags=language,title:stream_disposition=default,forced,attached_pic")
 	if err != nil {
 		return playbackProbe{}, err
 	}
@@ -434,7 +438,9 @@ func directPlaybackContentType(probe playbackProbe, profile string, capabilities
 			if playbackFormatIncludes(probe, "ogg") && capabilities[capAudioOggVorbis] {
 				return `audio/ogg; codecs="vorbis"`, true
 			}
-		case "pcm_s16le", "pcm_s24le", "pcm_s32le":
+		// Browsers decode WAV's linear PCM at every depth it stores: unsigned
+		// 8-bit, signed 16-, 24-, and 32-bit, and 32-bit float.
+		case "pcm_u8", "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le":
 			if playbackFormatIncludes(probe, "wav") && capabilities[capAudioWAV] {
 				return "audio/wav", true
 			}
@@ -499,7 +505,7 @@ func (s *Server) serveAutomaticLocalPlayback(w http.ResponseWriter, r *http.Requ
 	}
 	profile, err := s.playbackProfile(r, target.Kind)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	capabilities := playbackCapabilities(r)
@@ -777,7 +783,7 @@ func (s *Server) loadRemotePlaybackSource(ctx context.Context, sourceID int64) (
 
 func writeRemotePlaybackSourceError(w http.ResponseWriter, err error) bool {
 	if errors.Is(err, errRemotePlaybackSourceUnavailable) || errors.Is(err, sql.ErrNoRows) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "remote media source is not available"})
+		writeAPIError(w, http.StatusNotFound, "not_found", "remote media source is not available", false)
 		return true
 	}
 	return false
@@ -927,11 +933,11 @@ func (s *Server) serveRemotePlaybackResponse(w http.ResponseWriter, r *http.Requ
 func (s *Server) streamRemoteURL(w http.ResponseWriter, r *http.Request, source remoteSourceForUse, remoteURL string, path string, kind string) {
 	_, err := s.playbackProfile(r, kind)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	if !remotePlaybackSourceUsable(source) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "remote media source is not available"})
+		writeAPIError(w, http.StatusNotFound, "not_found", "remote media source is not available", false)
 		return
 	}
 	parsed, err := remotePlaybackURLAllowed(remoteURL, source)
@@ -965,7 +971,7 @@ func (s *Server) streamRemoteURL(w http.ResponseWriter, r *http.Request, source 
 func (s *Server) streamRemoteSourceMedia(w http.ResponseWriter, r *http.Request) {
 	id, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid source id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid source id", false)
 		return
 	}
 	code := remoteWorkCodeFromPath(r)
@@ -974,7 +980,7 @@ func (s *Server) streamRemoteSourceMedia(w http.ResponseWriter, r *http.Request)
 	}
 	path := cleanRemoteRelativePath(r.URL.Query().Get("path"))
 	if code == "" || path == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "work code and media path are required"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "work code and media path are required", false)
 		return
 	}
 	source, err := s.loadRemotePlaybackSource(r.Context(), id)
@@ -988,7 +994,7 @@ func (s *Server) streamRemoteSourceMedia(w http.ResponseWriter, r *http.Request)
 	_, _, tracks, err := s.loadRemoteWorkTracksCached(r.Context(), id, code)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
 		writeUpstreamError(w, err)
@@ -996,7 +1002,7 @@ func (s *Server) streamRemoteSourceMedia(w http.ResponseWriter, r *http.Request)
 	}
 	remoteURL, kind, ok := remoteMediaTrackURL(tracks, path, "")
 	if !ok || (kind != "audio" && kind != "video") {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "remote media file was not found"})
+		writeAPIError(w, http.StatusNotFound, "not_found", "remote media file was not found", false)
 		return
 	}
 	s.streamRemoteURL(w, r, source, remoteURL, path, kind)

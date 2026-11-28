@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+
+	"github.com/yexca/kikoto/backend/internal/personal"
 )
 
 type workUserStateResponse struct {
@@ -23,13 +25,13 @@ func (s *Server) updateWorkUserState(w http.ResponseWriter, r *http.Request) {
 	}
 	workID, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work id", false)
 		return
 	}
 	var exists int
 	if err := s.db.QueryRowContext(r.Context(), "SELECT 1 FROM work WHERE id = ?", workID).Scan(&exists); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
 		writeError(w, err)
@@ -43,11 +45,18 @@ func (s *Server) updateWorkUserState(w http.ResponseWriter, r *http.Request) {
 		UserRating json.RawMessage `json:"userRating"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body", false)
 		return
 	}
 	if payload.Favorite != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "use favorite lists to change list membership"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "use favorite lists to change list membership", false)
+		return
+	}
+	// The family's canonical work holds the state, also when the request
+	// names an edition.
+	stateWorkID, err := s.canonicalWorkID(r.Context(), workID)
+	if err != nil {
+		writeError(w, err)
 		return
 	}
 	var currentStatus string
@@ -57,7 +66,7 @@ func (s *Server) updateWorkUserState(w http.ResponseWriter, r *http.Request) {
 		SELECT COALESCE(listening_status, 'none'), COALESCE(favorite, 0), rating
 		FROM user_work_state
 		WHERE user_id = ? AND work_id = ?
-	`, user.ID, workID).Scan(&currentStatus, &currentFavorite, &currentRating); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	`, user.ID, stateWorkID).Scan(&currentStatus, &currentFavorite, &currentRating); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		writeError(w, err)
 		return
 	}
@@ -65,7 +74,7 @@ func (s *Server) updateWorkUserState(w http.ResponseWriter, r *http.Request) {
 	if len(payload.UserRating) > 0 {
 		next, ok := parseUserRating(payload.UserRating)
 		if !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userRating must be a whole number from 1 to 5 or null"})
+			writeAPIError(w, http.StatusBadRequest, "invalid_request", "userRating must be a whole number from 1 to 5 or null", false)
 			return
 		}
 		rating = next
@@ -78,7 +87,7 @@ func (s *Server) updateWorkUserState(w http.ResponseWriter, r *http.Request) {
 		status = "none"
 	}
 	if !validListeningStatus(status) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid listening status"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid listening status", false)
 		return
 	}
 	if _, err := s.db.ExecContext(r.Context(), `
@@ -88,11 +97,28 @@ func (s *Server) updateWorkUserState(w http.ResponseWriter, r *http.Request) {
 			listening_status = excluded.listening_status,
 			rating = excluded.rating,
 			updated_at = CURRENT_TIMESTAMP
-	`, user.ID, workID, status, currentFavorite, rating); err != nil {
+	`, user.ID, stateWorkID, status, currentFavorite, rating); err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, workUserStateResponse{WorkID: workID, ListeningStatus: status, Favorite: currentFavorite != 0, UserRating: rating})
+}
+
+// setWorkListeningStatus sets the account's listening mark on the family's
+// canonical work inside tx, keeping its favorite and rating.
+func setWorkListeningStatus(ctx context.Context, tx *sql.Tx, userID, workID int64, status string) error {
+	stateWorkID, err := personal.CanonicalWorkID(ctx, tx, workID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO user_work_state (user_id, work_id, listening_status)
+		VALUES (?, ?, ?)
+		ON CONFLICT(user_id, work_id) DO UPDATE SET
+			listening_status = excluded.listening_status,
+			updated_at = CURRENT_TIMESTAMP
+	`, userID, stateWorkID, status)
+	return err
 }
 
 // validUserRating reads a stored rating, treating anything outside one to five
@@ -108,6 +134,24 @@ func validUserRating(value sql.NullInt64) *int {
 // loadWorkUserRatingsBatch reads the viewer's ratings of a page of works; an
 // unrated work has no entry.
 func (s *Server) loadWorkUserRatingsBatch(ctx context.Context, userID int64, workIDs []int64) (map[int64]*int, error) {
+	canonical, unique, err := s.canonicalWorkIDs(ctx, workIDs)
+	if err != nil {
+		return nil, err
+	}
+	ratings, err := s.loadStoredWorkUserRatings(ctx, userID, unique)
+	if err != nil {
+		return nil, err
+	}
+	result := map[int64]*int{}
+	for _, id := range workIDs {
+		if rating, ok := ratings[canonical[id]]; ok {
+			result[id] = rating
+		}
+	}
+	return result, nil
+}
+
+func (s *Server) loadStoredWorkUserRatings(ctx context.Context, userID int64, workIDs []int64) (map[int64]*int, error) {
 	result := make(map[int64]*int, len(workIDs))
 	if userID <= 0 || len(workIDs) == 0 {
 		return result, nil

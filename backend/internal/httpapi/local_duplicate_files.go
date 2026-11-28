@@ -63,13 +63,13 @@ func (s *Server) findWorkDuplicateFiles(w http.ResponseWriter, r *http.Request) 
 	}
 	workID, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work id", false)
 		return
 	}
 	response, err := s.duplicateFilesForWork(r.Context(), workID, duplicateFileHashBudget)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
 		writeError(w, err)
@@ -217,14 +217,18 @@ func (s *Server) loadDuplicateFileCandidates(ctx context.Context, family map[int
 		return nil, err
 	}
 	candidates := make([]duplicateFileCandidate, 0, len(stored))
+	// One file on disk is one candidate however many records name its path, so
+	// a file is never reported as a copy of itself.
+	seen := make(map[string]bool, len(stored))
 	for _, entry := range stored {
 		if !availability.readable(entry.file.Path) {
 			continue
 		}
 		absolute, err := safeDataPath(s.cfg.DataRoot, entry.file.Path)
-		if err != nil {
+		if err != nil || seen[absolute] {
 			continue
 		}
+		seen[absolute] = true
 		info, err := os.Lstat(absolute)
 		// A link is not this folder's own copy of the bytes, and a file on an
 		// offline pool is not compared.

@@ -28,10 +28,10 @@ func (s *Server) createLocalScanRun(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid local scan request"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid local scan request", false)
 		return
 	}
-	result, err := s.enqueueLocalScanWithOptions(r.Context(), "manual", "manual", 0, request.FollowUpRun)
+	result, err := s.enqueueLocalScanWithOptions(r.Context(), "manual", "manual", 0)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -40,8 +40,12 @@ func (s *Server) createLocalScanRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, result)
 }
 
+// localScanRunRequest takes no options: a manual scan always walks the whole
+// library, and what follows it is up to the other operations' After triggers.
+// FollowUpRun is accepted and ignored, because clients from before the After
+// triggers, such as an installed app's bundled pages, still send it.
 type localScanRunRequest struct {
-	FollowUpRun bool `json:"followUpRun"`
+	FollowUpRun *bool `json:"followUpRun"`
 }
 
 type localScanResult struct {
@@ -53,7 +57,6 @@ type localScanResult struct {
 	ScannedFiles     int      `json:"scannedFiles"`
 	UpdatedLocations int      `json:"updatedLocations"`
 	SkippedLocations int      `json:"skippedLocations"`
-	FollowUpRun      bool     `json:"followUpRun"`
 	NewWorkCodes     []string `json:"newWorkCodes"`
 	Failures         []string `json:"failures"`
 }

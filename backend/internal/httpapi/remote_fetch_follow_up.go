@@ -20,13 +20,12 @@ const remoteFetchFollowUpRetryPeriod = time.Minute
 
 // remoteFetchFollowUp is what a Fetch into a new folder adds to that folder
 // once it is published: files of the work's other local folders and remote
-// editions, and lyrics of a declared language. It runs as an Edit files run
+// editions. It runs as an Edit files run
 // of the published folder, so each file is collected, checked, and published
 // the way an edit of an existing folder does it.
 type remoteFetchFollowUp struct {
-	Additions   []workFolderEditAdditionRequest `json:"additions"`
-	Decisions   []remoteFetchFileDecision       `json:"decisions"`
-	Assignments []workFolderEditAssignment      `json:"assignments,omitempty"`
+	Additions []workFolderEditAdditionRequest `json:"additions"`
+	Decisions []remoteFetchFileDecision       `json:"decisions"`
 }
 
 func (followUp *remoteFetchFollowUp) empty() bool {
@@ -41,17 +40,12 @@ type remoteWorkSavePlanResponse struct {
 }
 
 // remoteFetchFollowUpPermissions is what a Fetch with a follow-up needs on
-// top of the Fetch itself: changing local files, and writing library lyrics
-// when it assigns lyrics to tracks.
+// top of the Fetch itself: changing local files.
 func remoteFetchFollowUpPermissions(followUp *remoteFetchFollowUp) []string {
 	if followUp.empty() {
 		return nil
 	}
-	permissions := []string{"downloads:manage"}
-	if len(followUp.Assignments) > 0 {
-		permissions = append(permissions, "library:write")
-	}
-	return permissions
+	return []string{"downloads:manage"}
 }
 
 // planRemoteFetchFollowUp previews the follow-up against the folder the Fetch
@@ -84,15 +78,6 @@ func (s *Server) planRemoteFetchFollowUp(ctx context.Context, plan remoteWorkSav
 	if err != nil {
 		return workFolderEditPlan{}, err
 	}
-	if workFolderEditAddsLyrics(candidates) {
-		if _, err := os.Lstat(rootAbsolute); err == nil {
-			if err := checkLyricsRootWritable(rootAbsolute); err != nil {
-				return workFolderEditPlan{}, err
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return workFolderEditPlan{}, err
-		}
-	}
 	seenTargets := map[string]string{}
 	for _, item := range plan.Items {
 		if item.Action != "exclude" {
@@ -102,14 +87,19 @@ func (s *Server) planRemoteFetchFollowUp(ctx context.Context, plan remoteWorkSav
 	decisions := normalizeRemoteFetchDecisions(followUp.Decisions)
 	items := make([]workFolderEditItem, 0, len(candidates))
 	for _, candidate := range candidates {
-		decision, err := workFolderEditItemDecision(candidate, decisions[candidate.ItemKey], rootPath)
-		if err != nil {
-			return workFolderEditPlan{}, err
-		}
-		if err := s.resolveWorkFolderEditItem(&candidate.remoteWorkSavePlanItem, decision, rootPath, workFolderEditFiles{}, workFolderEditFiles{}, seenTargets); err != nil {
+		if err := s.resolveWorkFolderEditItem(&candidate.remoteWorkSavePlanItem, decisions[candidate.ItemKey], rootPath, workFolderEditFiles{}, workFolderEditFiles{}, seenTargets); err != nil {
 			return workFolderEditPlan{}, err
 		}
 		items = append(items, candidate)
+	}
+	if workFolderEditAddsToLyricsRoot(items, rootPath) {
+		if _, err := os.Lstat(rootAbsolute); err == nil {
+			if err := checkLyricsRootWritable(rootAbsolute); err != nil {
+				return workFolderEditPlan{}, err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return workFolderEditPlan{}, err
+		}
 	}
 	base := make([]remoteWorkSavePlanItem, len(items))
 	for index := range items {
@@ -132,8 +122,7 @@ func (s *Server) planRemoteFetchFollowUp(ctx context.Context, plan remoteWorkSav
 	}, nil
 }
 
-// prepareRemoteFetchFollowUp checks a follow-up before its Fetch is queued and
-// returns it with its assignments validated.
+// prepareRemoteFetchFollowUp checks a follow-up before its Fetch is queued.
 func (s *Server) prepareRemoteFetchFollowUp(ctx context.Context, plan remoteWorkSavePlan, followUp *remoteFetchFollowUp) (*remoteFetchFollowUp, error) {
 	if followUp.empty() {
 		return nil, nil
@@ -145,11 +134,7 @@ func (s *Server) prepareRemoteFetchFollowUp(ctx context.Context, plan remoteWork
 	if preview.Summary.Conflict > 0 {
 		return nil, workFolderEditConflictError{Summary: preview.Summary}
 	}
-	assignments, err := s.workFolderEditAssignments(ctx, preview, followUp.Assignments)
-	if err != nil {
-		return nil, err
-	}
-	return &remoteFetchFollowUp{Additions: followUp.Additions, Decisions: followUp.Decisions, Assignments: assignments}, nil
+	return &remoteFetchFollowUp{Additions: followUp.Additions, Decisions: followUp.Decisions}, nil
 }
 
 func remoteFetchFollowUpRequestID(runID int64) string {
@@ -184,28 +169,32 @@ func (s *Server) startRemoteFetchFollowUp(ctx context.Context, manifest remoteFe
 	var storageErr libraryStorageError
 	switch {
 	case err == nil:
-		recordErr = s.recordRemoteFetchFollowUp(ctx, runID, "$.follow_up_run_id", result.RunID, func(waited bool) *workflow.EventSpec {
-			if !waited {
-				return nil
+		recordErr = s.recordRemoteFetchFollowUp(ctx, runID, "$.follow_up_run_id", result.RunID, func(earlier remoteFetchFollowUpRecord) []workflow.EventSpec {
+			events := []workflow.EventSpec{}
+			if earlier.waiting {
+				events = append(events, workflow.EventSpec{Level: "info", Type: "fetch.follow_up_queued",
+					Message: fmt.Sprintf("The storage is back; workflow run #%d adds the files chosen from other places", result.RunID)})
 			}
-			return &workflow.EventSpec{Level: "info", Type: "fetch.follow_up_queued",
-				Message: fmt.Sprintf("The storage is back; workflow run #%d adds the files chosen from other places", result.RunID)}
+			if notice := legacyFollowUpLyricsNotice(inputJSON); notice != "" && !earlier.queued {
+				events = append(events, workflow.EventSpec{Level: "warn", Type: "fetch.follow_up_lyrics_not_kept", Message: notice})
+			}
+			return events
 		})
 	case errors.As(err, &storageErr) && remoteFetchFollowUpWaitsFor(storageErr):
 		slog.Info("Fetch follow-up waits for storage", "run_id", runID, "error", err)
-		recordErr = s.recordRemoteFetchFollowUp(ctx, runID, "$.follow_up_waiting", storageErr.Message, func(waited bool) *workflow.EventSpec {
-			if waited {
+		recordErr = s.recordRemoteFetchFollowUp(ctx, runID, "$.follow_up_waiting", storageErr.Message, func(earlier remoteFetchFollowUpRecord) []workflow.EventSpec {
+			if earlier.waiting {
 				return nil
 			}
-			return &workflow.EventSpec{Level: "warn", Type: "fetch.follow_up_waiting",
-				Message: "The files chosen from other places are added once the storage is back: " + storageErr.Message}
+			return []workflow.EventSpec{{Level: "warn", Type: "fetch.follow_up_waiting",
+				Message: "The files chosen from other places are added once the storage is back: " + storageErr.Message}}
 		})
 	default:
 		slog.Warn("queue Fetch follow-up", "run_id", runID, "error", err)
 		reason := publicRemoteFetchFollowUpError(err)
-		recordErr = s.recordRemoteFetchFollowUp(ctx, runID, "$.follow_up_error", reason, func(bool) *workflow.EventSpec {
-			return &workflow.EventSpec{Level: "error", Type: "fetch.follow_up_failed",
-				Message: "The files chosen from other places were not added to the fetched folder: " + reason}
+		recordErr = s.recordRemoteFetchFollowUp(ctx, runID, "$.follow_up_error", reason, func(remoteFetchFollowUpRecord) []workflow.EventSpec {
+			return []workflow.EventSpec{{Level: "error", Type: "fetch.follow_up_failed",
+				Message: "The files chosen from other places were not added to the fetched folder: " + reason}}
 		})
 	}
 	if recordErr != nil {
@@ -220,21 +209,64 @@ func remoteFetchFollowUpWaitsFor(err libraryStorageError) bool {
 	return err.Code == errStoragePoolOffline.Code || err.Code == errLibraryOffline.Code
 }
 
+// legacyFollowUpLyricsNotice describes what a follow-up recorded while
+// follow-ups still took lyrics languages and track bindings asked for that
+// its edit no longer does: an addition with a language is added at its own
+// path, and a binding is not stored, since lyrics of a language come in only
+// through Lyrics files. It is "" for any other follow-up.
+func legacyFollowUpLyricsNotice(inputJSON string) string {
+	var input struct {
+		FollowUp *struct {
+			Additions []struct {
+				Language *string `json:"language"`
+			} `json:"additions"`
+			Assignments []json.RawMessage `json:"assignments"`
+		} `json:"follow_up"`
+	}
+	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil || input.FollowUp == nil {
+		return ""
+	}
+	languages := 0
+	for _, addition := range input.FollowUp.Additions {
+		if addition.Language != nil {
+			languages++
+		}
+	}
+	bindings := len(input.FollowUp.Assignments)
+	switch {
+	case languages > 0 && bindings > 0:
+		return fmt.Sprintf("%d lyrics files chosen before the update are added at their own paths, and their %d track bindings were not stored; add lyrics of a language in Lyrics files", languages, bindings)
+	case languages > 0:
+		return fmt.Sprintf("%d lyrics files chosen before the update are added at their own paths; add lyrics of a language in Lyrics files", languages)
+	case bindings > 0:
+		return fmt.Sprintf("%d track bindings of lyrics chosen before the update were not stored; bind lyrics to tracks in Lyrics files", bindings)
+	}
+	return ""
+}
+
+// remoteFetchFollowUpRecord is what a Fetch run had recorded of its follow-up:
+// waiting while it waits for storage, and queued once its edit run is
+// recorded.
+type remoteFetchFollowUpRecord struct {
+	waiting, queued bool
+}
+
 // recordRemoteFetchFollowUp stores the follow-up's state at field of the Fetch
-// run's summary, which replaces a wait for storage. event receives whether the
-// follow-up was waiting and returns the event Activity shows for the change,
-// if any.
-func (s *Server) recordRemoteFetchFollowUp(ctx context.Context, runID int64, field string, value any, event func(waited bool) *workflow.EventSpec) error {
+// run's summary, which replaces a wait for storage. events receives what the
+// run had recorded before and returns the events Activity shows for the
+// change.
+func (s *Server) recordRemoteFetchFollowUp(ctx context.Context, runID int64, field string, value any, events func(earlier remoteFetchFollowUpRecord) []workflow.EventSpec) error {
 	tx, err := beginTxWithDatabaseBusyRetry(ctx, s.db)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var waited bool
+	var earlier remoteFetchFollowUpRecord
 	if err := tx.QueryRowContext(ctx, `
-		SELECT json_type(COALESCE(NULLIF(summary_json, ''), '{}'), '$.follow_up_waiting') IS NOT NULL
+		SELECT json_type(COALESCE(NULLIF(summary_json, ''), '{}'), '$.follow_up_waiting') IS NOT NULL,
+			json_type(COALESCE(NULLIF(summary_json, ''), '{}'), '$.follow_up_run_id') IS NOT NULL
 		FROM workflow_run WHERE id = ?
-	`, runID).Scan(&waited); err != nil {
+	`, runID).Scan(&earlier.waiting, &earlier.queued); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -244,8 +276,8 @@ func (s *Server) recordRemoteFetchFollowUp(ctx context.Context, runID int64, fie
 	`, field, value, runID); err != nil {
 		return err
 	}
-	if spec := event(waited); spec != nil {
-		if err := workflow.InsertEvent(ctx, tx, runID, *spec); err != nil {
+	for _, spec := range events(earlier) {
+		if err := workflow.InsertEvent(ctx, tx, runID, spec); err != nil {
 			return err
 		}
 	}
@@ -350,6 +382,6 @@ func (s *Server) enqueueRemoteFetchFollowUp(ctx context.Context, manifest remote
 	}
 	return s.enqueueWorkFolderEdit(ctx, manifest.WorkID, workFolderEditRequest{
 		FolderID: folderID, Additions: payload.FollowUp.Additions, Decisions: payload.FollowUp.Decisions,
-		Assignments: payload.FollowUp.Assignments, RequestID: remoteFetchFollowUpRequestID(manifest.WorkflowRunID),
+		RequestID: remoteFetchFollowUpRequestID(manifest.WorkflowRunID),
 	}, payload.RequestedByUserID)
 }

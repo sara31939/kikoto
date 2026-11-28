@@ -24,6 +24,15 @@ type remoteWorkSyncResult struct {
 	SyncedMediaItems int    `json:"syncedMediaItems"`
 	SyncedLocations  int    `json:"syncedLocations"`
 	TriggerReason    string `json:"triggerReason"`
+	// ListeningStatus is the mark the sync set, when the request asked for one.
+	ListeningStatus string `json:"listeningStatus,omitempty"`
+}
+
+// remoteWorkSyncMark is a listening mark a sync sets on the work it adds, in
+// the transaction that adds it.
+type remoteWorkSyncMark struct {
+	UserID int64
+	Status string
 }
 
 type remoteWorkTrackResult struct {
@@ -50,7 +59,7 @@ func (s *Server) trackRemoteSourceWork(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid source id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid source id", false)
 		return
 	}
 	code := remoteWorkCodeFromPath(r)
@@ -58,13 +67,15 @@ func (s *Server) trackRemoteSourceWork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if code == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "work code is required"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "work code is required", false)
 		return
 	}
 	var payload struct {
 		TriggerReason string `json:"triggerReason"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&payload)
+	if !decodeOptionalJSONBody(w, r, &payload) {
+		return
+	}
 	payload.TriggerReason = strings.TrimSpace(payload.TriggerReason)
 	if payload.TriggerReason == "" {
 		payload.TriggerReason = "manual_track"
@@ -81,14 +92,17 @@ func (s *Server) trackRemoteSourceWork(w http.ResponseWriter, r *http.Request) {
 
 // syncRemoteSourceWork adds a remote work to the shared Library without a
 // tracked presence, so a mark or list can reference it. It creates a work
-// every account sees, which is tracking in effect.
+// every account sees, which is tracking in effect. A listeningStatus in the
+// body also marks the work for the caller in the same transaction, so a
+// failed mark adds no work.
 func (s *Server) syncRemoteSourceWork(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requirePermission(w, r, "remote:track"); !ok {
+	user, ok := s.requirePermission(w, r, "remote:track")
+	if !ok {
 		return
 	}
 	id, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid source id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid source id", false)
 		return
 	}
 	code := remoteWorkCodeFromPath(r)
@@ -96,18 +110,33 @@ func (s *Server) syncRemoteSourceWork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if code == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "work code is required"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "work code is required", false)
 		return
 	}
 	var payload struct {
-		TriggerReason string `json:"triggerReason"`
+		TriggerReason   string  `json:"triggerReason"`
+		ListeningStatus *string `json:"listeningStatus"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&payload)
+	if !decodeOptionalJSONBody(w, r, &payload) {
+		return
+	}
 	payload.TriggerReason = strings.TrimSpace(payload.TriggerReason)
 	if payload.TriggerReason == "" {
 		payload.TriggerReason = "manual"
 	}
-	result, err := s.runRemoteWorkMaterialize(r.Context(), id, code, payload.TriggerReason)
+	var mark *remoteWorkSyncMark
+	if payload.ListeningStatus != nil {
+		status := strings.TrimSpace(*payload.ListeningStatus)
+		if !validListeningStatus(status) {
+			writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid listening status", false)
+			return
+		}
+		if _, ok := s.requirePermission(w, r, "favorites:write"); !ok {
+			return
+		}
+		mark = &remoteWorkSyncMark{UserID: user.ID, Status: status}
+	}
+	result, err := s.runRemoteWorkMaterialize(r.Context(), id, code, payload.TriggerReason, mark)
 	if err != nil {
 		writeUpstreamError(w, err)
 		return
@@ -321,7 +350,7 @@ func (s *Server) prepareRemoteWorkTrack(ctx context.Context, sourceID int64, cod
 	remoteWork, rawWork, err := s.resolveRemoteEdition(ctx, source, client, requestedCode)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
-			_ = s.updateSourceHealth(ctx, sourceID, "unavailable")
+			s.setSourceHealthOrLog(ctx, sourceID, "unavailable")
 		}
 		return preparedRemoteWorkTrack{}, err
 	}
@@ -335,11 +364,11 @@ func (s *Server) prepareRemoteWorkTrack(ctx context.Context, sourceID int64, cod
 	if err != nil {
 		err = remoteWorkLookupError(err)
 		if !errors.Is(err, errRemoteWorkNotFound) {
-			_ = s.updateSourceHealth(ctx, sourceID, "unavailable")
+			s.setSourceHealthOrLog(ctx, sourceID, "unavailable")
 		}
 		return preparedRemoteWorkTrack{}, err
 	}
-	_ = s.updateSourceHealth(ctx, sourceID, "healthy")
+	s.setSourceHealthOrLog(ctx, sourceID, "healthy")
 	workCode := s.localCodeForRemoteWork(ctx, requestedCode, remoteWork)
 	if workCode == "" {
 		workCode = requestedCode
@@ -393,15 +422,15 @@ func persistRemoteWorkTrack(ctx context.Context, tx *sql.Tx, prepared preparedRe
 	return persistRemoteWorkSync(ctx, tx, prepared, true)
 }
 
-func (s *Server) runRemoteWorkMaterialize(ctx context.Context, sourceID int64, code string, triggerReason string) (remoteWorkSyncResult, error) {
-	return s.runRemoteWorkSyncWithIntent(ctx, sourceID, code, triggerReason, false)
+func (s *Server) runRemoteWorkMaterialize(ctx context.Context, sourceID int64, code string, triggerReason string, mark *remoteWorkSyncMark) (remoteWorkSyncResult, error) {
+	return s.runRemoteWorkSyncWithIntent(ctx, sourceID, code, triggerReason, false, mark)
 }
 
 func (s *Server) runRemoteWorkSync(ctx context.Context, sourceID int64, code string, triggerReason string) (remoteWorkSyncResult, error) {
-	return s.runRemoteWorkSyncWithIntent(ctx, sourceID, code, triggerReason, true)
+	return s.runRemoteWorkSyncWithIntent(ctx, sourceID, code, triggerReason, true, nil)
 }
 
-func (s *Server) runRemoteWorkSyncWithIntent(ctx context.Context, sourceID int64, code string, triggerReason string, tracked bool) (remoteWorkSyncResult, error) {
+func (s *Server) runRemoteWorkSyncWithIntent(ctx context.Context, sourceID int64, code string, triggerReason string, tracked bool, mark *remoteWorkSyncMark) (remoteWorkSyncResult, error) {
 	prepared, err := s.prepareRemoteWorkTrack(ctx, sourceID, code)
 	if err != nil {
 		return remoteWorkSyncResult{}, err
@@ -425,11 +454,19 @@ func (s *Server) runRemoteWorkSyncWithIntent(ctx context.Context, sourceID int64
 	if err := recordRemoteWorkSyncWorkflow(ctx, tx, runID, prepared, tracked, workID, syncedMediaItems, syncedLocations); err != nil {
 		return remoteWorkSyncResult{}, err
 	}
+	listeningStatus := ""
+	if mark != nil {
+		if err := setWorkListeningStatus(ctx, tx, mark.UserID, workID, mark.Status); err != nil {
+			return remoteWorkSyncResult{}, err
+		}
+		listeningStatus = mark.Status
+	}
 	if err := tx.Commit(); err != nil {
 		return remoteWorkSyncResult{}, err
 	}
 	s.refreshQueryPlannerStatistics(ctx)
 	return remoteWorkSyncResult{
+		ListeningStatus:  listeningStatus,
 		RunID:            runID,
 		JobID:            jobID,
 		WorkID:           workID,
@@ -526,34 +563,34 @@ func recordRemoteWorkSyncWorkflow(ctx context.Context, tx *sql.Tx, runID int64, 
 func (s *Server) executeRemoteWorkTrackJob(ctx context.Context, job workflowJobRecord) error {
 	var payload remoteWorkTrackJobPayload
 	if err := decodeWorkflowJobPayload(job.PayloadJSON, &payload); err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	if err := s.updateWorkflowJobCheckpoint(ctx, job.ID, "resolving", map[string]any{
 		"sourceId": payload.SourceID, "workCode": payload.WorkCode,
 	}, 0, 5); err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	prepared, err := s.prepareRemoteWorkTrack(ctx, payload.SourceID, payload.WorkCode)
 	if err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	result, err := s.finishRemoteWorkTrackJob(ctx, job, payload, prepared)
 	if err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 
 	metadataResult, metadataErr := s.enqueueWorkMetadataSync(context.WithoutCancel(ctx), result.WorkID)
 	if metadataErr != nil {
-		_ = s.recordWorkflowRunEvent(context.WithoutCancel(ctx), job.RunID, "warn", "track.metadata_followup_failed", "Track succeeded, but metadata refresh could not be queued", map[string]any{
+		s.recordRunEventOrLog(context.WithoutCancel(ctx), job.RunID, "warn", "track.metadata_followup_failed", "Track succeeded, but metadata refresh could not be queued", map[string]any{
 			"work_id": result.WorkID,
 		})
 		return nil
 	}
-	_ = s.recordWorkflowRunEvent(context.WithoutCancel(ctx), job.RunID, "info", "track.metadata_followup", "Metadata refresh follow-up recorded", map[string]any{
+	s.recordRunEventOrLog(context.WithoutCancel(ctx), job.RunID, "info", "track.metadata_followup", "Metadata refresh follow-up recorded", map[string]any{
 		"work_id": result.WorkID, "metadata_run_id": metadataResult.RunID, "status": metadataResult.Status,
 	})
 	return nil

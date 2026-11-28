@@ -504,7 +504,6 @@ func TestMediaCleanupFilesOnlyPreservesWorkState(t *testing.T) {
 		INSERT INTO user_work_state (user_id, work_id, listening_status, favorite) VALUES (1, 301, 'finished', 1);
 		INSERT INTO favorite_list (id, user_id, name, kind) VALUES (301, 1, 'Keep list', 'user');
 		INSERT INTO favorite_list_item (list_id, work_id) VALUES (301, 301);
-		INSERT INTO user_media_progress (user_id, media_item_id, position_seconds, completed) VALUES (1, 311, 12.5, 0);
 		INSERT INTO user_work_playback_cursor (user_id, work_id, media_item_id, file_source_id, location_id, location_type, position_seconds, completed)
 		VALUES (1, 301, 311, 31, 311, 'local', 12.5, 0);
 	`); err != nil {
@@ -525,7 +524,6 @@ func TestMediaCleanupFilesOnlyPreservesWorkState(t *testing.T) {
 	assertMediaCleanupCount(t, db, "SELECT COUNT(*) FROM metadata_snapshot WHERE work_id = 301", 1)
 	assertMediaCleanupCount(t, db, "SELECT COUNT(*) FROM user_work_state WHERE work_id = 301", 1)
 	assertMediaCleanupCount(t, db, "SELECT COUNT(*) FROM favorite_list_item WHERE list_id = 301 AND work_id = 301", 1)
-	assertMediaCleanupCount(t, db, "SELECT COUNT(*) FROM user_media_progress WHERE media_item_id = 311", 1)
 	assertMediaCleanupCount(t, db, "SELECT COUNT(*) FROM user_work_playback_cursor WHERE work_id = 301", 1)
 	var availability string
 	if err := db.QueryRow("SELECT availability FROM media_file_location WHERE id = 311").Scan(&availability); err != nil {
@@ -580,7 +578,6 @@ func TestMediaCleanupForgetWorkDeletesLogicalFamilyAndUserState(t *testing.T) {
 			(1, 302, 'finished', 1), (1, 303, 'want_to_listen', 0);
 		INSERT INTO favorite_list (id, user_id, name, kind) VALUES (302, 1, 'Family list', 'user');
 		INSERT INTO favorite_list_item (list_id, work_id) VALUES (302, 303);
-		INSERT INTO user_media_progress (user_id, media_item_id, position_seconds, completed) VALUES (1, 312, 19.5, 0);
 		INSERT INTO user_work_playback_cursor (user_id, work_id, media_item_id, file_source_id, location_id, location_type, position_seconds, completed)
 		VALUES (1, 302, 312, 32, 312, 'local', 19.5, 0);
 	`); err != nil {
@@ -607,7 +604,6 @@ func TestMediaCleanupForgetWorkDeletesLogicalFamilyAndUserState(t *testing.T) {
 		"SELECT COUNT(*) FROM media_item WHERE id IN (312, 313)",
 		"SELECT COUNT(*) FROM metadata_snapshot WHERE external_id IN ('RJ00000011', 'RJ00000012')",
 		"SELECT COUNT(*) FROM user_work_state WHERE work_id IN (302, 303)",
-		"SELECT COUNT(*) FROM user_media_progress WHERE media_item_id = 312",
 		"SELECT COUNT(*) FROM user_work_playback_cursor WHERE work_id = 302",
 		"SELECT COUNT(*) FROM favorite_list_item WHERE list_id = 302 AND work_id = 303",
 	} {
@@ -748,5 +744,89 @@ func TestFetchPlanRequiresDownloadsManageBecauseItMaySyncMetadata(t *testing.T) 
 
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+}
+
+// A folder edit rewrites a location's path in place. A cleanup queued before
+// the edit leaves that file alone, deletes the rest, and reports the skip.
+func TestMediaLocationCleanupLeavesAMovedLocationAlone(t *testing.T) {
+	dataRoot := t.TempDir()
+	library := filepath.Join(dataRoot, "Library")
+	if err := os.MkdirAll(library, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"track.mp3", "other.mp3"} {
+		if err := os.WriteFile(filepath.Join(library, name), []byte("audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db := openMigratedTestDB(t)
+	server := NewServer(db, config.Config{DataRoot: dataRoot})
+	movedID := insertTestLocalMediaLocation(t, db, "Library/track.mp3")
+	result, err := db.Exec(`INSERT INTO media_file_location (media_item_id, file_source_id, location_type, path, availability)
+		SELECT media_item_id, file_source_id, 'local', 'Library/other.mp3', 'available' FROM media_file_location WHERE id = ?`, movedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID, _ := result.LastInsertId()
+	queued, err := server.enqueueMediaLocationCleanup(context.Background(), []mediaCleanupTargetRequest{
+		{Kind: "local", LocationID: movedID},
+		{Kind: "local", LocationID: otherID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(library, "track.mp3"), filepath.Join(library, "renamed.mp3")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(library, "track.mp3"), []byte("another file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE media_file_location SET path = 'Library/renamed.mp3' WHERE id = ?", movedID); err != nil {
+		t.Fatal(err)
+	}
+
+	var job workflowJobRecord
+	if err := db.QueryRow(`SELECT id, workflow_run_id, workflow_node_run_id, worker_type, payload_json, checkpoint_json,
+		'', resume_count, retry_count, max_retries FROM workflow_job WHERE id = ?`, queued.JobID).Scan(
+		&job.ID, &job.RunID, &job.NodeRunID, &job.WorkerType, &job.PayloadJSON, &job.CheckpointJSON,
+		&job.LockedBy, &job.ResumeCount, &job.RetryCount, &job.MaxRetries,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE workflow_job SET status = 'running' WHERE id = ?", job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.executeMediaLocationCleanupJob(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"track.mp3", "renamed.mp3"} {
+		if _, err := os.Stat(filepath.Join(library, name)); err != nil {
+			t.Fatalf("%s after its delete was skipped: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(library, "other.mp3")); !os.IsNotExist(err) {
+		t.Fatalf("other.mp3 still exists or stat failed unexpectedly: %v", err)
+	}
+	for id, want := range map[int64]string{movedID: "available", otherID: "unavailable"} {
+		var availability string
+		if err := db.QueryRow("SELECT availability FROM media_file_location WHERE id = ?", id).Scan(&availability); err != nil {
+			t.Fatal(err)
+		}
+		if availability != want {
+			t.Fatalf("location %d availability = %q, want %q", id, availability, want)
+		}
+	}
+	var runStatus, summary string
+	var events int
+	if err := db.QueryRow("SELECT status, summary_json FROM workflow_run WHERE id = ?", queued.RunID).Scan(&runStatus, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM workflow_event WHERE workflow_run_id = ? AND event_type = 'media_cleanup.location_changed'", queued.RunID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "partial" || events != 1 || !strings.Contains(summary, `"changed_locations":[{"location_id":`) || !strings.Contains(summary, `"current_path":"Library/renamed.mp3"`) {
+		t.Fatalf("run = %q, events %d, summary %s", runStatus, events, summary)
 	}
 }

@@ -38,25 +38,25 @@ func (s *Server) setWorkLyricsAssignments(w http.ResponseWriter, r *http.Request
 	}
 	workID, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work id", false)
 		return
 	}
 	var payload struct {
 		Assignments []lyricsAssignmentChange `json:"assignments"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body", false)
 		return
 	}
 	changes, err := normalizeLyricsAssignmentChanges(payload.Assignments)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	familyWorkIDs, err := s.lyricsAssignmentFamily(r.Context(), workID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
 		writeError(w, err)
@@ -65,7 +65,8 @@ func (s *Server) setWorkLyricsAssignments(w http.ResponseWriter, r *http.Request
 	if err := s.applyLyricsAssignmentChanges(r.Context(), user.ID, familyWorkIDs, changes); err != nil {
 		var requestErr lyricsAssignmentRequestError
 		if errors.As(err, &requestErr) {
-			writeJSON(w, requestErr.status, map[string]string{"error": requestErr.message})
+			code, retryable := defaultErrorClassification(requestErr.status)
+			writeAPIError(w, requestErr.status, code, requestErr.message, retryable)
 			return
 		}
 		writeError(w, err)
@@ -194,4 +195,19 @@ func upsertLyricsAssignment(ctx context.Context, tx *sql.Tx, audioID int64, lang
 			updated_at = CURRENT_TIMESTAMP
 	`, audioID, language, lyricsID, origin, nullableUserID(userID))
 	return err
+}
+
+// insertLyricsAssignmentIfAbsent stores an automatic assignment only when the
+// track has no library lyrics in that language, and reports whether it did.
+func insertLyricsAssignmentIfAbsent(ctx context.Context, tx *sql.Tx, audioID int64, language string, lyricsID int64, origin string, userID int64) (bool, error) {
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO media_lyrics_assignment (audio_media_item_id, language, lyrics_media_item_id, origin, assigned_by_user_id)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(audio_media_item_id, language) DO NOTHING
+	`, audioID, language, lyricsID, origin, nullableUserID(userID))
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows > 0, err
 }

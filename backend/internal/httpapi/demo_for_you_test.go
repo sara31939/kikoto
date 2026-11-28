@@ -79,7 +79,7 @@ func TestDemoForYouSamplesAdmittedWorksWithoutRecording(t *testing.T) {
 	}
 	// Saving a temperature is still a write.
 	response = httptest.NewRecorder()
-	s.Routes().ServeHTTP(response, httptest.NewRequest(http.MethodPatch, "/api/auth/me/preferences", strings.NewReader(`{"forYouTemperature":"safe"}`)))
+	s.Routes().ServeHTTP(response, httptest.NewRequest(http.MethodPatch, "/api/auth/me/preferences", strings.NewReader(`{"forYouTemperature":1}`)))
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("PATCH preferences in Demo = %d", response.Code)
 	}
@@ -143,6 +143,11 @@ func TestDemoShowsTranslationPlanAndSampleModels(t *testing.T) {
 	s.Routes().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/works/1/ai-translation", strings.NewReader(`{"languages":["en-us"],"categories":["title"]}`)))
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("Demo translation request = %d", response.Code)
+	}
+	response = httptest.NewRecorder()
+	s.Routes().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/translation/batch", strings.NewReader(`{"workIds":[1],"languages":["en-us"],"categories":["title"]}`)))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("Demo batch translation request = %d", response.Code)
 	}
 }
 

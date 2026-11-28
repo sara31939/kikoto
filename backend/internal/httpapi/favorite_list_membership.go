@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/yexca/kikoto/backend/internal/library"
+	"github.com/yexca/kikoto/backend/internal/personal"
 )
 
 // maxFavoriteMembershipBatchWorks bounds one bulk membership request. The
@@ -39,12 +40,21 @@ func (s *Server) summarizeFavoriteListMembership(w http.ResponseWriter, r *http.
 		WorkIDs []int64 `json:"workIds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body", false)
 		return
 	}
 	workIDs, err := normalizeFavoriteMembershipWorkIDs(payload.WorkIDs)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
+		return
+	}
+	// Membership belongs to each family's canonical work.
+	if _, workIDs, err = s.canonicalWorkIDs(r.Context(), workIDs); err != nil {
+		writeError(w, err)
+		return
+	}
+	if len(workIDs) == 0 {
+		writeJSON(w, http.StatusOK, favoriteListMembershipSummary{Lists: []favoriteListMembershipCount{}})
 		return
 	}
 	query, args := favoriteMembershipCountQuery(user.ID, workIDs)
@@ -121,9 +131,30 @@ type workMemberList struct {
 }
 
 // loadWorkMemberListsBatch returns, for each work, the user and smart lists
-// that show it, in list order: the lists a work card names. A smart list
-// counts whether it holds the work by hand or through its rule.
+// that show it: the lists a work card names. The lists the work was added to
+// by hand come first, the most recent addition leading. A smart list that
+// holds the work only through its rule has no time of addition, so those
+// follow in list order.
 func (s *Server) loadWorkMemberListsBatch(ctx context.Context, userID int64, workIDs []int64) (map[int64][]workMemberList, error) {
+	canonical, unique, err := s.canonicalWorkIDs(ctx, workIDs)
+	if err != nil {
+		return nil, err
+	}
+	lists, err := s.loadStoredWorkMemberLists(ctx, userID, unique)
+	if err != nil {
+		return nil, err
+	}
+	result := byRequestedWork(workIDs, canonical, lists, func() []workMemberList { return nil })
+	for id, value := range result {
+		if value == nil {
+			delete(result, id)
+		}
+	}
+	return result, nil
+}
+
+// loadStoredWorkMemberLists reads the lists of the given canonical works.
+func (s *Server) loadStoredWorkMemberLists(ctx context.Context, userID int64, workIDs []int64) (map[int64][]workMemberList, error) {
 	result := make(map[int64][]workMemberList, len(workIDs))
 	if userID <= 0 || len(workIDs) == 0 {
 		return result, nil
@@ -138,6 +169,7 @@ func (s *Server) loadWorkMemberListsBatch(ctx context.Context, userID int64, wor
 		return nil, err
 	}
 	ordered := []workMemberList{}
+	listsByID := map[int64]workMemberList{}
 	for rows.Next() {
 		var list workMemberList
 		if err := rows.Scan(&list.ID, &list.Name); err != nil {
@@ -145,6 +177,7 @@ func (s *Server) loadWorkMemberListsBatch(ctx context.Context, userID int64, wor
 			return nil, err
 		}
 		ordered = append(ordered, list)
+		listsByID[list.ID] = list
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -160,19 +193,16 @@ func (s *Server) loadWorkMemberListsBatch(ctx context.Context, userID int64, wor
 	if err != nil {
 		return nil, err
 	}
-	members := map[int64]map[int64]bool{}
-	addMember := func(listID, workID int64) {
-		if members[listID] == nil {
-			members[listID] = map[int64]bool{}
-		}
-		members[listID][workID] = true
-	}
+	// Hand additions, newest first. Additions within one second fall back to
+	// the row id, which grows with every insert.
+	addedByHand := map[int64]map[int64]bool{}
 	handRows, err := s.db.QueryContext(ctx, `
 		SELECT item.list_id, item.work_id
 		FROM favorite_list_item AS item
 		INNER JOIN favorite_list AS list ON list.id = item.list_id
-		WHERE list.user_id = ? AND list.kind = 'user'
+		WHERE list.user_id = ? AND list.kind IN `+library.ManualFavoriteListKindsSQL+`
 			AND item.work_id IN (`+sqlPlaceholders(len(workIDs))+`)
+		ORDER BY item.created_at DESC, item.id DESC
 	`, append([]any{userID}, int64Args(workIDs)...)...)
 	if err != nil {
 		return nil, err
@@ -183,7 +213,11 @@ func (s *Server) loadWorkMemberListsBatch(ctx context.Context, userID int64, wor
 			_ = handRows.Close()
 			return nil, err
 		}
-		addMember(listID, workID)
+		if addedByHand[listID] == nil {
+			addedByHand[listID] = map[int64]bool{}
+		}
+		addedByHand[listID][workID] = true
+		result[workID] = append(result[workID], listsByID[listID])
 	}
 	if err := handRows.Err(); err != nil {
 		_ = handRows.Close()
@@ -192,11 +226,12 @@ func (s *Server) loadWorkMemberListsBatch(ctx context.Context, userID int64, wor
 	if err := handRows.Close(); err != nil {
 		return nil, err
 	}
-	for _, list := range editable {
-		if list.Kind != "smart" {
+	for _, list := range ordered {
+		smart := editable[list.ID]
+		if smart.Kind != "smart" {
 			continue
 		}
-		where, args := smartListMemberWhere(list.ID, list.Match)
+		where, args := smartListMemberWhere(smart.ID, smart.Match)
 		smartRows, err := s.db.QueryContext(ctx, "SELECT work.id FROM work WHERE work.id IN ("+sqlPlaceholders(len(workIDs))+") AND "+where, append(int64Args(workIDs), args...)...)
 		if err != nil {
 			return nil, err
@@ -207,7 +242,9 @@ func (s *Server) loadWorkMemberListsBatch(ctx context.Context, userID int64, wor
 				_ = smartRows.Close()
 				return nil, err
 			}
-			addMember(list.ID, workID)
+			if !addedByHand[list.ID][workID] {
+				result[workID] = append(result[workID], list)
+			}
 		}
 		if err := smartRows.Err(); err != nil {
 			_ = smartRows.Close()
@@ -215,13 +252,6 @@ func (s *Server) loadWorkMemberListsBatch(ctx context.Context, userID int64, wor
 		}
 		if err := smartRows.Close(); err != nil {
 			return nil, err
-		}
-	}
-	for _, list := range ordered {
-		for _, workID := range workIDs {
-			if members[list.ID][workID] {
-				result[workID] = append(result[workID], list)
-			}
 		}
 	}
 	return result, nil
@@ -241,17 +271,17 @@ func (s *Server) updateFavoriteListMembership(w http.ResponseWriter, r *http.Req
 		RemoveListIDs []int64 `json:"removeListIds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body", false)
 		return
 	}
 	workIDs, err := normalizeFavoriteMembershipWorkIDs(payload.WorkIDs)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	add, remove, err := normalizeFavoriteMembershipListChanges(payload.AddListIDs, payload.RemoveListIDs)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
@@ -263,9 +293,9 @@ func (s *Server) updateFavoriteListMembership(w http.ResponseWriter, r *http.Req
 	if err := applyFavoriteListMembershipChanges(r.Context(), tx, user.ID, workIDs, add, remove); err != nil {
 		switch {
 		case errors.Is(err, errInvalidFavoriteListID):
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		case errors.Is(err, sql.ErrNoRows):
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 		default:
 			writeError(w, err)
 		}
@@ -290,9 +320,14 @@ func applyFavoriteListMembershipChanges(ctx context.Context, tx *sql.Tx, userID 
 			}
 		}
 	}
-	for _, workID := range workIDs {
+	for _, requestedID := range workIDs {
 		var exists int
-		if err := tx.QueryRowContext(ctx, "SELECT 1 FROM work WHERE id = ?", workID).Scan(&exists); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT 1 FROM work WHERE id = ?", requestedID).Scan(&exists); err != nil {
+			return err
+		}
+		// Membership belongs to the family's canonical work.
+		workID, err := personal.CanonicalWorkID(ctx, tx, requestedID)
+		if err != nil {
 			return err
 		}
 		for _, changes := range []struct {
@@ -370,14 +405,18 @@ func (s *Server) getWorkFavoriteLists(w http.ResponseWriter, r *http.Request) {
 	}
 	workID, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work id", false)
 		return
 	}
 	if err := s.requireWorkExists(r.Context(), workID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
+		writeError(w, err)
+		return
+	}
+	if workID, err = s.canonicalWorkID(r.Context(), workID); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -396,14 +435,19 @@ func (s *Server) setWorkFavoriteLists(w http.ResponseWriter, r *http.Request) {
 	}
 	workID, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work id", false)
 		return
 	}
 	if err := s.requireWorkExists(r.Context(), workID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
+		writeError(w, err)
+		return
+	}
+	requestedID := workID
+	if workID, err = s.canonicalWorkID(r.Context(), workID); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -411,7 +455,7 @@ func (s *Server) setWorkFavoriteLists(w http.ResponseWriter, r *http.Request) {
 		ListIDs []int64 `json:"listIds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body", false)
 		return
 	}
 	selected := map[int64]bool{}
@@ -428,7 +472,7 @@ func (s *Server) setWorkFavoriteLists(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = tx.Rollback() }()
 	if err := applyWorkFavoriteListSelection(r.Context(), tx, user.ID, workID, selected); err != nil {
 		if errors.Is(err, errInvalidFavoriteListID) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 			return
 		}
 		writeError(w, err)
@@ -448,7 +492,7 @@ func (s *Server) setWorkFavoriteLists(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workId": workID, "favorite": favorite, "lists": lists})
+	writeJSON(w, http.StatusOK, map[string]any{"workId": requestedID, "favorite": favorite, "lists": lists})
 }
 
 // applyWorkFavoriteListSelection makes the work belong to exactly the selected

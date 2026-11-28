@@ -61,7 +61,7 @@ Confirmed records are removed; unconfirmed or quarantined reports remain in
 their original server/account scope across sign-out until acknowledged, history
 clearing invalidates them, or browser/app storage is cleared. Queue capacity and
 recovery behavior are described in
-[Playback reports](docs/architecture/frontend.md#playback-reports).
+[Playback reports](docs/architecture/frontend/playback-reports.md).
 
 The Android client stores the configured server address and a bearer session in
 the app's private preferences. The iOS client stores the configured server
@@ -74,7 +74,7 @@ ends and are exported only when the user chooses to copy them.
 ## Anonymous Library Access
 
 Production mode requires authentication by default. A super administrator can
-enable anonymous Library browsing and media playback under Settings -> Users.
+enable anonymous Library browsing and media playback under System -> Users.
 While that setting is enabled, authentication still protects personal state,
 configuration, and mutations, but it is not a privacy boundary for the complete
 Library. Restrict network access when the collection itself must remain private.

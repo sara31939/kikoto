@@ -15,6 +15,7 @@ import (
 	"github.com/yexca/kikoto/backend/internal/account"
 	"github.com/yexca/kikoto/backend/internal/config"
 	"github.com/yexca/kikoto/backend/internal/dlsite"
+	"github.com/yexca/kikoto/backend/internal/kikoeru"
 	"github.com/yexca/kikoto/backend/internal/localfs"
 	"github.com/yexca/kikoto/backend/internal/sqlutil"
 	"github.com/yexca/kikoto/backend/internal/storagepool"
@@ -38,7 +39,7 @@ func TestDetectedMediaUpsertsReuseExistingRowsWithoutReturningClauses(t *testing
 		t.Fatal(err)
 	}
 	file := localfs.LocalFile{RelPath: "TEST-WORK-LOCAL-001/track.mp3", WorkRelPath: "track.mp3", Title: "Track", SizeBytes: 100}
-	firstItemID, err := upsertDetectedMediaItem(context.Background(), tx, workID, folder, file, "audio", 1)
+	firstItemID, err := upsertDetectedMediaItem(context.Background(), tx, workID, sourceID, folder, file, "audio", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +49,7 @@ func TestDetectedMediaUpsertsReuseExistingRowsWithoutReturningClauses(t *testing
 	}
 	file.Title = "Renamed track"
 	file.SizeBytes = 200
-	secondItemID, err := upsertDetectedMediaItem(context.Background(), tx, workID, folder, file, "audio", 1)
+	secondItemID, err := upsertDetectedMediaItem(context.Background(), tx, workID, sourceID, folder, file, "audio", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +77,142 @@ func TestDetectedMediaUpsertsReuseExistingRowsWithoutReturningClauses(t *testing
 	}
 }
 
+// A Fetch records its published files on the remote media items. Scanning the
+// folder must keep each file on that item instead of adding a second local
+// item and a second location for the same path.
+func TestLocalScanKeepsFetchedFileOnItsMediaItem(t *testing.T) {
+	ctx := context.Background()
+	db := openMigratedTestDB(t)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	folder := localfs.WorkFolder{Code: "RJ00000000", Title: "Example Work", RelPath: "Library/RJ00000000"}
+	workID, err := upsertDetectedWork(ctx, tx, folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID, err := NewServer(db, config.Config{DataRoot: t.TempDir(), LocalScanDepth: 2}).upsertLocalFileSource(ctx, tx, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteSourceID, err := sqlutil.InsertID(ctx, tx, `INSERT INTO file_source (code, display_name, source_type, enabled)
+		VALUES ('example_remote_a', 'Example Remote A', 'kikoeru_compatible', 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetchedItemID, err := sqlutil.InsertID(ctx, tx, `INSERT INTO media_item (work_id, kind, title, track_no, fingerprint)
+		VALUES (?, 'audio', 'track.mp3', 1, ?)`, workID, fmt.Sprintf("remote:%d:RJ00000000:track.mp3", remoteSourceID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO media_file_location (media_item_id, file_source_id, location_type, path, size_bytes, availability)
+		VALUES (?, ?, 'local', 'Library/RJ00000000/track.mp3', 100, 'available')`, fetchedItemID, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	folder.Files = []localfs.LocalFile{{RelPath: "Library/RJ00000000/track.mp3", WorkRelPath: "track.mp3", Title: "track", SizeBytes: 100, FileVersion: "100:1"}}
+	for range 2 {
+		if _, err := persistIndexedLocalFiles(ctx, tx, workID, sourceID, folder); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	var locations, items int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_file_location WHERE location_type = 'local' AND path = 'Library/RJ00000000/track.mp3'`).Scan(&locations); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_item WHERE work_id = ?`, workID).Scan(&items); err != nil {
+		t.Fatal(err)
+	}
+	var holderID int64
+	var fingerprint, fileVersion string
+	if err := db.QueryRow(`SELECT item.id, item.fingerprint, location.file_version FROM media_file_location AS location
+		JOIN media_item AS item ON item.id = location.media_item_id
+		WHERE location.path = 'Library/RJ00000000/track.mp3'`).Scan(&holderID, &fingerprint, &fileVersion); err != nil {
+		t.Fatal(err)
+	}
+	if locations != 1 || items != 1 || holderID != fetchedItemID || fingerprint != "local:RJ00000000:track.mp3" || fileVersion != "100:1" {
+		t.Fatalf("scan = %d locations, %d items, holder %d (fetched %d), fingerprint %q, version %q",
+			locations, items, holderID, fetchedItemID, fingerprint, fileVersion)
+	}
+}
+
+// After a scan takes a fetched file's item over as a local item, the next sync
+// of the remote source refreshes that item's remote location instead of adding
+// a second item and location for the same source path.
+func TestRemoteSyncAfterScanKeepsFetchedFileOnItsMediaItem(t *testing.T) {
+	ctx := context.Background()
+	db := openMigratedTestDB(t)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	folder := localfs.WorkFolder{Code: "RJ00000000", Title: "Example Work", RelPath: "Library/RJ00000000"}
+	workID, err := upsertDetectedWork(ctx, tx, folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceID, err := NewServer(db, config.Config{DataRoot: t.TempDir(), LocalScanDepth: 2}).upsertLocalFileSource(ctx, tx, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteSourceID, err := sqlutil.InsertID(ctx, tx, `INSERT INTO file_source (code, display_name, source_type, enabled)
+		VALUES ('example_remote_a', 'Example Remote A', 'kikoeru_compatible', 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracks := func(streamURL string) []kikoeru.Track {
+		return []kikoeru.Track{{Type: "audio", Title: "track.mp3", MediaStreamURL: streamURL}}
+	}
+	if _, _, err := syncRemoteTrackTree(ctx, tx, remoteSourceID, workID, "RJ00000000", tracks("https://media.invalid/first.mp3")); err != nil {
+		t.Fatal(err)
+	}
+	fetchedItemID, err := sqlutil.SelectID(ctx, tx, `SELECT id FROM media_item WHERE work_id = ?`, workID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The Fetch publishes the file on the remote item, and a scan records it.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO media_file_location (media_item_id, file_source_id, location_type, path, size_bytes, availability)
+		VALUES (?, ?, 'local', 'Library/RJ00000000/track.mp3', 100, 'available')`, fetchedItemID, sourceID); err != nil {
+		t.Fatal(err)
+	}
+	folder.Files = []localfs.LocalFile{{RelPath: "Library/RJ00000000/track.mp3", WorkRelPath: "track.mp3", Title: "track", SizeBytes: 100, FileVersion: "100:1"}}
+	if _, err := persistIndexedLocalFiles(ctx, tx, workID, sourceID, folder); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := syncRemoteTrackTree(ctx, tx, remoteSourceID, workID, "RJ00000000", tracks("https://media.invalid/second.mp3")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	var items, remoteLocations int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_item WHERE work_id = ?`, workID).Scan(&items); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM media_file_location WHERE location_type = 'remote_stream'`).Scan(&remoteLocations); err != nil {
+		t.Fatal(err)
+	}
+	var holderID int64
+	var fingerprint, title, streamURL string
+	if err := db.QueryRow(`SELECT item.id, item.fingerprint, item.title, location.stream_url FROM media_file_location AS location
+		JOIN media_item AS item ON item.id = location.media_item_id
+		WHERE location.location_type = 'remote_stream'`).Scan(&holderID, &fingerprint, &title, &streamURL); err != nil {
+		t.Fatal(err)
+	}
+	if items != 1 || remoteLocations != 1 || holderID != fetchedItemID || fingerprint != "local:RJ00000000:track.mp3" ||
+		title != "track" || streamURL != "https://media.invalid/second.mp3" {
+		t.Fatalf("sync after scan = %d items, %d remote locations, holder %d (fetched %d), fingerprint %q, title %q, stream %q",
+			items, remoteLocations, holderID, fetchedItemID, fingerprint, title, streamURL)
+	}
+}
+
 func TestLocalLibraryScanDefaultsToLocalPresenceOnly(t *testing.T) {
 	db := openMigratedTestDB(t)
 	dataRoot := t.TempDir()
@@ -93,12 +230,8 @@ func TestLocalLibraryScanDefaultsToLocalPresenceOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := server.enqueueLocalScan(context.Background(), "manual", "manual")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Status != "queued" || second.Status != "queued" || first.RunID == second.RunID {
-		t.Fatalf("queued local scan results = %#v / %#v", first, second)
+	if first.Status != "queued" {
+		t.Fatalf("queued local scan result = %#v", first)
 	}
 	var snapshotCountBefore int
 	if err := db.QueryRow("SELECT COUNT(*) FROM metadata_snapshot").Scan(&snapshotCountBefore); err != nil {
@@ -158,14 +291,11 @@ func TestLocalLibraryScanDefaultsToLocalPresenceOnly(t *testing.T) {
 	if err := db.QueryRow("SELECT COUNT(*) FROM workflow_run WHERE workflow_code = 'metadata_sync'").Scan(&metadataRunCount); err != nil {
 		t.Fatal(err)
 	}
-	var firstStatus, secondStatus string
+	var firstStatus string
 	if err := db.QueryRow("SELECT status FROM workflow_run WHERE id = ?", first.RunID).Scan(&firstStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT status FROM workflow_run WHERE id = ?", second.RunID).Scan(&secondStatus); err != nil {
-		t.Fatal(err)
-	}
-	if runCount != 2 || nodeCount != 4 || jobCount != 1 || snapshotCount != 0 || remotePresenceCount != 0 || metadataRunCount != 0 || firstStatus != "succeeded" || secondStatus != "queued" {
+	if runCount != 1 || nodeCount != 4 || jobCount != 1 || snapshotCount != 0 || remotePresenceCount != 0 || metadataRunCount != 0 || firstStatus != "succeeded" {
 		t.Fatalf("local-only run counts = runs %d nodes %d jobs %d snapshots %d remote presence %d metadata runs %d", runCount, nodeCount, jobCount, snapshotCount, remotePresenceCount, metadataRunCount)
 	}
 	if server.dlsiteClient.(*fakeDemoScanDLsiteClient).calls[code] != 0 {
@@ -173,193 +303,124 @@ func TestLocalLibraryScanDefaultsToLocalPresenceOnly(t *testing.T) {
 	}
 }
 
-func TestLocalLibraryScanFollowUpQueuesIndependentMetadataRun(t *testing.T) {
+// A local scan's After triggers follow it: a metadata sync when the scan added
+// works, and the file index when a complete scan left folders unindexed. A
+// scan that adds nothing and leaves every folder indexed starts neither, and
+// the scan itself never calls a metadata provider.
+func TestLocalScanAfterTriggersFollowAddedWorksAndUnindexedFolders(t *testing.T) {
+	ctx := context.Background()
 	db := openMigratedTestDB(t)
 	dataRoot := t.TempDir()
 	code := "RJ00000012"
 	writeDemoScanFile(t, dataRoot, code, "track.mp3", "audio")
-	if _, err := db.Exec(`INSERT INTO app_setting (key, value_json) VALUES ('remote_request_delay_base_seconds', '0')`); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeDemoScanDLsiteClient{
-		products: map[string]dlsite.Product{code: demoScanProduct(code, "Follow-up work", "general", nil, nil, nil)},
-		errors:   map[string]error{},
-		calls:    map[string]int{},
-	}
+	client := &fakeDemoScanDLsiteClient{products: map[string]dlsite.Product{}, errors: map[string]error{}, calls: map[string]int{}}
 	server := NewServer(db, config.Config{DataRoot: dataRoot, LocalScanDepth: 2})
 	server.dlsiteClient = client
+	if err := server.ensureSystemWorkflowDefinitions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DELETE FROM workflow_trigger`,
+		`INSERT INTO workflow_trigger (id, workflow_definition_id, trigger_type, display_name, enabled, schedule_json, config_json)
+			VALUES (71, (SELECT id FROM workflow_definition WHERE code = 'metadata_sync'), 'after_workflow', 'Metadata after scan', 1, '{"after":"local_library_scan"}', '{}'),
+				(72, (SELECT id FROM workflow_definition WHERE code = 'local_media_index'), 'after_workflow', 'Index after scan', 1, '{"after":"local_library_scan"}', '{"mode":"incremental"}')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runsOf := func(code string) (count int, triggerType, reason string) {
+		t.Helper()
+		if err := db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(trigger_type), ''), COALESCE(MAX(trigger_reason), '') FROM workflow_run WHERE workflow_code = ?`, code).
+			Scan(&count, &triggerType, &reason); err != nil {
+			t.Fatal(err)
+		}
+		return count, triggerType, reason
+	}
 
-	scan, err := server.enqueueLocalScanWithOptions(context.Background(), "manual", "manual", 0, true)
+	scan, err := server.enqueueLocalScan(ctx, "manual", "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, ok, err := server.claimNextQueuedWorkflowJob(context.Background(), "local-scan-follow-up-test")
-	if err != nil || !ok || job.RunID != scan.RunID {
-		t.Fatalf("claim local scan job = %#v, %t, %v", job, ok, err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	if err := server.executeLocalScanJob(context.Background(), job); err != nil {
+	if err := server.runNextQueuedWorkflowJob(ctx); err != nil {
 		t.Fatal(err)
+	}
+	wantReason := fmt.Sprintf("after_run:%d", scan.RunID)
+	for _, code := range []string{"metadata_sync", localMediaIndexWorkflowCode} {
+		if count, triggerType, reason := runsOf(code); count != 1 || triggerType != "after_workflow" || reason != wantReason {
+			t.Fatalf("%s after a scan that added a work = %d runs %s/%s", code, count, triggerType, reason)
+		}
+	}
+	if client.calls[code] != 0 {
+		t.Fatalf("the scan called the metadata provider %d times", client.calls[code])
 	}
 
-	var metadataRunID int64
-	var metadataStatus, triggerType, triggerReason, inputJSON string
-	if err := db.QueryRow(`
-		SELECT id, status, trigger_type, trigger_reason, input_json
-		FROM workflow_run
-		WHERE workflow_code = 'metadata_sync'
-	`).Scan(&metadataRunID, &metadataStatus, &triggerType, &triggerReason, &inputJSON); err != nil {
+	// The index run reads the new folder; the metadata run is left aside.
+	if _, err := db.Exec(`UPDATE workflow_job SET status = 'cancelled' WHERE worker_type = 'metadata_sync'`); err != nil {
 		t.Fatal(err)
 	}
-	var metadataInput metadataSyncRunInput
-	if err := json.Unmarshal([]byte(inputJSON), &metadataInput); err != nil {
+	if _, err := db.Exec(`UPDATE workflow_run SET status = 'cancelled' WHERE workflow_code = 'metadata_sync'`); err != nil {
 		t.Fatal(err)
 	}
-	var scanStatus string
-	var scanNodes, scanCandidates, snapshotsBefore int
-	if err := db.QueryRow("SELECT status FROM workflow_run WHERE id = ?", scan.RunID).Scan(&scanStatus); err != nil {
+	if err := server.runNextQueuedWorkflowJob(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM workflow_node_run WHERE workflow_run_id = ?", scan.RunID).Scan(&scanNodes); err != nil {
+	if _, err := server.enqueueLocalScan(ctx, "manual", "manual"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM workflow_candidate WHERE workflow_run_id = ?", scan.RunID).Scan(&scanCandidates); err != nil {
+	if err := server.runNextQueuedWorkflowJob(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM metadata_snapshot").Scan(&snapshotsBefore); err != nil {
-		t.Fatal(err)
-	}
-	if scanStatus != "succeeded" || scanNodes != 4 || scanCandidates != 0 || metadataStatus != "queued" || triggerType != "follow_up" || triggerReason != "local_scan_follow_up" || metadataInput.SourceRunID != scan.RunID || snapshotsBefore != 0 || client.calls[code] != 0 {
-		t.Fatalf("separate runs = scan %s/%d nodes/%d candidates, metadata %d %s %s/%s input %#v snapshots %d calls %d", scanStatus, scanNodes, scanCandidates, metadataRunID, metadataStatus, triggerType, triggerReason, metadataInput, snapshotsBefore, client.calls[code])
-	}
-
-	metadataJob, ok, err := server.claimNextQueuedWorkflowJob(context.Background(), "metadata-follow-up-test")
-	if err != nil || !ok || metadataJob.RunID != metadataRunID || metadataJob.WorkerType != "metadata_sync" {
-		t.Fatalf("claim metadata follow-up = %#v, %t, %v", metadataJob, ok, err)
-	}
-	if err := server.executeDLsiteMetadataSyncJob(context.Background(), metadataJob); err != nil {
-		t.Fatal(err)
-	}
-	var snapshotsAfter int
-	if err := db.QueryRow("SELECT COUNT(*) FROM metadata_snapshot").Scan(&snapshotsAfter); err != nil {
-		t.Fatal(err)
-	}
-	if snapshotsAfter != 1 || client.calls[code] != 1 {
-		t.Fatalf("metadata follow-up = snapshots %d calls %d", snapshotsAfter, client.calls[code])
+	for _, code := range []string{"metadata_sync", localMediaIndexWorkflowCode} {
+		if count, _, _ := runsOf(code); count != 1 {
+			t.Fatalf("%s after a scan that found nothing new = %d runs, want the first only", code, count)
+		}
 	}
 }
 
-func TestLocalLibraryScanFollowUpCoalescesIntoQueuedMetadataRun(t *testing.T) {
-	db := openMigratedTestDB(t)
-	server := NewServer(db, config.Config{DataRoot: t.TempDir(), LocalScanDepth: 2})
-	scan, err := server.enqueueLocalScanWithOptions(context.Background(), "manual", "manual", 0, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	job, ok, err := server.claimNextQueuedWorkflowJob(context.Background(), "local-scan-coalesce-test")
-	if err != nil || !ok || job.RunID != scan.RunID {
-		t.Fatalf("claim local scan job = %#v, %t, %v", job, ok, err)
-	}
-	existing, err := server.enqueueDLsiteMetadataSync(context.Background(), "manual", "manual")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := server.executeLocalScanJob(context.Background(), job); err != nil {
-		t.Fatal(err)
-	}
-	var metadataRuns int
-	if err := db.QueryRow("SELECT COUNT(*) FROM workflow_run WHERE workflow_code = 'metadata_sync'").Scan(&metadataRuns); err != nil {
-		t.Fatal(err)
-	}
-	var detailJSON string
-	if err := db.QueryRow("SELECT detail_json FROM workflow_event WHERE workflow_run_id = ? AND event_type = 'local_library_scan.follow_up_queued'", scan.RunID).Scan(&detailJSON); err != nil {
-		t.Fatal(err)
-	}
-	var detail struct {
-		MetadataRunID int64 `json:"metadata_run_id"`
-		Coalesced     bool  `json:"coalesced"`
-	}
-	if err := json.Unmarshal([]byte(detailJSON), &detail); err != nil {
-		t.Fatal(err)
-	}
-	if metadataRuns != 1 || detail.MetadataRunID != existing.RunID || !detail.Coalesced {
-		t.Fatalf("coalesced follow-up = runs %d detail %#v existing %d", metadataRuns, detail, existing.RunID)
-	}
-}
-
-func TestCreateLocalScanRunAcceptsOptionalFollowUp(t *testing.T) {
+// A manual scan takes no options: it always walks the whole library, and what
+// follows it is up to the After triggers.
+func TestCreateLocalScanRunTakesNoOptions(t *testing.T) {
 	db := openMigratedTestDB(t)
 	server := NewServer(db, config.Config{DataRoot: t.TempDir(), LocalScanDepth: 2})
 	actor := account.User{ID: 1, Role: "admin", Permissions: account.PermissionsForRole("admin")}
-
-	request := httptest.NewRequest(http.MethodPost, "/api/workflow-runs/local-scan", strings.NewReader(`{"followUpRun":true}`))
-	request = request.WithContext(context.WithValue(request.Context(), currentUserKey, actor))
-	response := httptest.NewRecorder()
-	server.createLocalScanRun(response, request)
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("follow-up local scan response = %d, %s", response.Code, response.Body.String())
+	for _, test := range []struct {
+		body string
+		want int
+	}{
+		{"", http.StatusAccepted},
+		// Clients from before the After triggers still send the follow-up
+		// choice; it is ignored rather than refused.
+		{`{"followUpRun":false}`, http.StatusAccepted},
+		{`{"followUpRun":true}`, http.StatusAccepted},
+		{`{"scanMode":"full"}`, http.StatusBadRequest},
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/api/workflow-runs/local-scan", strings.NewReader(test.body))
+		request = request.WithContext(context.WithValue(request.Context(), currentUserKey, actor))
+		response := httptest.NewRecorder()
+		server.createLocalScanRun(response, request)
+		if response.Code != test.want {
+			t.Fatalf("local scan %q = %d %s, want %d", test.body, response.Code, response.Body.String(), test.want)
+		}
 	}
-	var result localScanResult
-	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	var inputJSON string
-	if err := db.QueryRow("SELECT input_json FROM workflow_run WHERE id = ?", result.RunID).Scan(&inputJSON); err != nil {
-		t.Fatal(err)
-	}
-	var payload localScanJobPayload
-	if err := json.Unmarshal([]byte(inputJSON), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if !result.FollowUpRun || !payload.FollowUpRun {
-		t.Fatalf("follow-up request = result %#v payload %#v", result, payload)
-	}
-
-	request = httptest.NewRequest(http.MethodPost, "/api/workflow-runs/local-scan", nil)
-	request = request.WithContext(context.WithValue(request.Context(), currentUserKey, actor))
-	response = httptest.NewRecorder()
-	server.createLocalScanRun(response, request)
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("default local scan response = %d, %s", response.Code, response.Body.String())
-	}
-	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.FollowUpRun {
-		t.Fatalf("default local scan follow-up = %#v", result)
+	var followUps int
+	if err := db.QueryRow("SELECT COUNT(*) FROM workflow_run WHERE workflow_code = 'metadata_sync'").Scan(&followUps); err != nil || followUps != 0 {
+		t.Fatalf("metadata runs after manual scans = %d, %v", followUps, err)
 	}
 }
 
-func TestRetryLocalScanPreservesFollowUpChoice(t *testing.T) {
-	db := openMigratedTestDB(t)
-	server := NewServer(db, config.Config{DataRoot: t.TempDir(), LocalScanDepth: 2})
-	original, err := server.enqueueLocalScanWithOptions(context.Background(), "manual", "manual", 0, true)
+// A Scan trigger saved by a client from before the After triggers carries the
+// follow-up choice; it is dropped from the stored options, not refused.
+func TestLocalScanTriggerConfigDropsTheOldFollowUpChoice(t *testing.T) {
+	config, err := normalizeLocalScanTriggerConfig(`{"scanMode":"full","followUpRun":true}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("UPDATE workflow_run SET status = 'failed', finished_at = CURRENT_TIMESTAMP WHERE id = ?", original.RunID); err != nil {
-		t.Fatal(err)
+	if stored := mustJSON(config); stored != `{"scanMode":"full"}` {
+		t.Fatalf("stored scan trigger options = %s", stored)
 	}
-	if _, err := db.Exec("UPDATE workflow_job SET status = 'failed' WHERE workflow_run_id = ?", original.RunID); err != nil {
-		t.Fatal(err)
-	}
-	response := requestWorkflowRunAction(t, server.retryWorkflowRun, original.RunID, account.User{
-		ID: 1, Role: "admin", Permissions: account.PermissionsForRole("admin"),
-	})
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("retry local scan response = %d, %s", response.Code, response.Body.String())
-	}
-	var inputJSON string
-	if err := db.QueryRow("SELECT input_json FROM workflow_run WHERE id != ? AND workflow_code = 'local_library_scan' ORDER BY id DESC LIMIT 1", original.RunID).Scan(&inputJSON); err != nil {
-		t.Fatal(err)
-	}
-	var payload localScanJobPayload
-	if err := json.Unmarshal([]byte(inputJSON), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if !payload.FollowUpRun {
-		t.Fatalf("retried local scan input = %s", inputJSON)
+	if _, err := normalizeLocalScanTriggerConfig(`{"scanMode":"full","other":true}`); err == nil {
+		t.Fatal("an unknown scan trigger option was accepted")
 	}
 }
 
@@ -1118,4 +1179,73 @@ func localScanMissingLocationCount(t *testing.T, db *sqlutil.DB, runID int64) in
 		t.Fatal(err)
 	}
 	return summary.MissingLocations
+}
+
+// A complete scan requested while one is queued or running returns that run;
+// changes from the folder watcher still queue their own incremental run.
+// A complete-scan request joins a complete scan that is still queued, adding its
+// trigger, and queues its own run while one is running: the running scan may
+// already have passed the folders that changed.
+func TestLocalScanRequestJoinsActiveCompleteScan(t *testing.T) {
+	db := openMigratedTestDB(t)
+	server := NewServer(db, config.Config{DataRoot: t.TempDir(), LocalScanDepth: 2})
+	ctx := context.Background()
+	first, err := server.enqueueLocalScan(ctx, "manual", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_trigger (id, workflow_definition_id, trigger_type, display_name)
+		VALUES (5, (SELECT id FROM workflow_definition WHERE code = 'local_library_scan'), 'schedule', 'Example interval')`); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := server.enqueueLocalScanWithOptions(ctx, "schedule", "scheduled_interval", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.RunID != first.RunID || queued.JobID != first.JobID || queued.Status != "queued" {
+		t.Fatalf("request while queued = %#v, want run %d", queued, first.RunID)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := updateTriggerForQueuedSystemRun(ctx, tx, first.RunID, "failed", []string{"example failure"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var triggerError string
+	if err := db.QueryRow("SELECT last_error_message FROM workflow_trigger WHERE id = 5").Scan(&triggerError); err != nil || triggerError != "example failure" {
+		t.Fatalf("joining trigger result = %q, %v", triggerError, err)
+	}
+
+	if _, ok, err := server.claimNextQueuedWorkflowJob(ctx, "local-scan-single-flight"); err != nil || !ok {
+		t.Fatalf("claim = %t, %v", ok, err)
+	}
+	recovery, err := server.enqueueLocalScanWithPayload(ctx, "filesystem_event", "data_directories_changed", 0, localScanJobPayload{
+		ScanMode: localScanModeFull, FullFallbackReason: "watcher_recovery",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovery.RunID == first.RunID {
+		t.Fatal("a complete-scan request joined the running scan")
+	}
+	again, err := server.enqueueLocalScan(ctx, "manual", "retry_run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.RunID != recovery.RunID {
+		t.Fatalf("request while a scan is queued = run %d, want the queued run %d", again.RunID, recovery.RunID)
+	}
+	incremental, err := server.enqueueLocalScanWithPayload(ctx, "filesystem_event", "data_directories_changed", 0, localScanJobPayload{
+		ScanMode: localScanModeIncremental, ChangedPaths: []string{"RJ00000000"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if incremental.RunID == first.RunID || incremental.RunID == recovery.RunID {
+		t.Fatal("watcher changes joined a complete scan")
+	}
 }

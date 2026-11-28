@@ -19,17 +19,17 @@ type knownLocalWorkRoot struct {
 }
 
 func (s *Server) executeIncrementalLocalScanJob(ctx context.Context, job workflowJobRecord, payload localScanJobPayload) error {
-	_ = s.updateWorkflowJobCheckpoint(ctx, job.ID, "discovering", map[string]any{
+	s.checkpointJobOrLog(ctx, job, "discovering", map[string]any{
 		"root": payload.Root, "scan_mode": localScanModeIncremental, "changed_path_count": len(payload.ChangedPaths),
 	}, 0, 0)
 
 	scope, err := s.localScanScope(ctx, payload.Root, payload.ScanDepth)
 	if err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	if len(scope.online) == 0 {
-		_ = s.failClaimedWorkflowJob(ctx, job, errLibraryUnavailable.Error())
+		s.failJobOrLog(ctx, job, errLibraryUnavailable.Error())
 		return errLibraryUnavailable
 	}
 	// Changes outside the online pools, such as an unregistered folder or an
@@ -50,7 +50,7 @@ func (s *Server) executeIncrementalLocalScanJob(ctx context.Context, job workflo
 	scanSummary.DetectedWorks = len(workFolders)
 	knownRoots, err := s.loadKnownLocalWorkRoots(ctx)
 	if err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	knownRoots = scope.filterKnownRoots(knownRoots)
@@ -78,14 +78,14 @@ func (s *Server) executeIncrementalLocalScanJob(ctx context.Context, job workflo
 
 	nodeIDs, err := workflowNodeIDsByNodeID(ctx, s.db, job.RunID)
 	if err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	result, runSummary, _, err := s.persistIncrementalLocalScanResults(
 		ctx, job, payload, scope, workFolders, scanSummary, knownRoots, nodeIDs,
 	)
 	if err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	scope.applyOfflineResult(&result)
@@ -96,16 +96,19 @@ func (s *Server) executeIncrementalLocalScanJob(ctx context.Context, job workflo
 	if len(scope.unreadable) > 0 {
 		runSummary["unreadable_folders"] = scope.unreadable
 	}
-	_ = s.updateWorkflowJobCheckpoint(ctx, job.ID, "finishing", map[string]any{
+	s.checkpointJobOrLog(ctx, job, "finishing", map[string]any{
 		"detected_works": result.DetectedWorks, "scan_mode": localScanModeIncremental,
 	}, result.ScannedFiles, result.ScannedFiles)
 	if err := s.finishQueuedLocalScanJob(ctx, job, nodeIDs["sync"], result, runSummary); err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	if scanSummary.ScannedFiles > 0 {
 		s.requestLocalMediaProbe()
 	}
+	// The incremental scan indexes every work it touched, so it leaves the
+	// file index nothing to follow.
+	s.dispatchLocalScanAfterTriggers(ctx, job.RunID, result.NewWorkCodes, false)
 	return nil
 }
 
@@ -307,11 +310,7 @@ func (persistence *incrementalLocalScanPersistence) markMissingWorks() error {
 		if persistence.state.seenWorkIDs[workID] {
 			continue
 		}
-		if _, err := persistence.tx.ExecContext(persistence.ctx, `
-			UPDATE work_source_presence
-			SET availability = 'missing', last_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-			WHERE work_id = ? AND file_source_id = ? AND presence_type = 'local'
-		`, workID, persistence.fileSourceID); err != nil {
+		if err := persistence.markPresenceMissing(workID); err != nil {
 			return err
 		}
 		missing, err := markAvailableLocalLocationsMissingForWork(persistence.ctx, persistence.tx, workID, persistence.fileSourceID, persistence.state.scope)
@@ -323,6 +322,34 @@ func (persistence *incrementalLocalScanPersistence) markMissingWorks() error {
 	return nil
 }
 
+// markPresenceMissing marks an affected work's presence missing only when this
+// scan observes the root the presence records, as the full scan does. A work
+// can be affected through a folder inside the scope while its presence names
+// another folder in an offline pool or deeper than the scan depth; that
+// presence keeps its state.
+func (persistence *incrementalLocalScanPersistence) markPresenceMissing(workID int64) error {
+	var root string
+	err := persistence.tx.QueryRowContext(persistence.ctx, `
+		SELECT source_url FROM work_source_presence
+		WHERE work_id = ? AND file_source_id = ? AND presence_type = 'local'
+	`, workID, persistence.fileSourceID).Scan(&root)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if normalizeFolderRootPath(root) != "" && !persistence.state.scope.observes(root) {
+		return nil
+	}
+	_, err = persistence.tx.ExecContext(persistence.ctx, `
+		UPDATE work_source_presence
+		SET availability = 'missing', last_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE work_id = ? AND file_source_id = ? AND presence_type = 'local'
+	`, workID, persistence.fileSourceID)
+	return err
+}
+
 func incrementalLocalScanRunSummary(payload localScanJobPayload, scanSummary localfs.Summary, persistence *incrementalLocalScanPersistence) map[string]any {
 	return map[string]any{
 		"candidate_folders": scanSummary.CandidateFolders, "detected_works": scanSummary.DetectedWorks,
@@ -330,7 +357,7 @@ func incrementalLocalScanRunSummary(payload localScanJobPayload, scanSummary loc
 		"duplicate_groups":  localDuplicateGroupSummaries(scanSummary.DuplicateGroups),
 		"updated_locations": persistence.state.updatedLocations, "skipped_locations": persistence.state.skippedLocations,
 		"missing_locations": persistence.state.missingLocations, "new_work_codes": persistence.state.newWorkCodes,
-		"follow_up_requested": false, "scan_mode": localScanModeIncremental,
+		"scan_mode":          localScanModeIncremental,
 		"changed_path_count": len(payload.ChangedPaths), "affected_works": len(persistence.affectedWorkIDs),
 	}
 }

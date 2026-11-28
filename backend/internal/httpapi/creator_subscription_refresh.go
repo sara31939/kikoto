@@ -27,10 +27,8 @@ const (
 	// creatorSubscriptionRecentPull skips a catalog pull when a detail refresh
 	// or another run pulled the catalog this recently.
 	creatorSubscriptionRecentPull = 6 * time.Hour
-	// creatorSubscriptionReleaseGrace is how far before a subscription took
-	// effect a work may have been released and still count as new. Older works
-	// that surface later, such as through a full catalog refresh, are recorded
-	// as seen without a feed entry.
+	// creatorSubscriptionReleaseGrace bounds the age of a release at refresh
+	// time. Older works discovered later count as seen without a feed entry.
 	creatorSubscriptionReleaseGrace = 30 * 24 * time.Hour
 )
 
@@ -148,12 +146,12 @@ func (execution *creatorSubscriptionExecution) fail(node, message string) {
 func (s *Server) executeCreatorSubscriptionRefreshJob(ctx context.Context, job workflowJobRecord) error {
 	var payload creatorSubscriptionJobPayload
 	if err := decodeWorkflowJobPayload(job.PayloadJSON, &payload); err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, "Subscription refresh input is invalid")
+		s.failJobOrLog(ctx, job, "Subscription refresh input is invalid")
 		return err
 	}
 	nodeIDs, err := workflowNodeIDsByNodeID(ctx, s.db, job.RunID)
 	if err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	execution := &creatorSubscriptionExecution{
@@ -161,23 +159,23 @@ func (s *Server) executeCreatorSubscriptionRefreshJob(ctx context.Context, job w
 		feed:   map[int64][]string{},
 	}
 	if err := s.activateCreatorSubscriptions(ctx); err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, "Subscriptions could not be loaded")
+		s.failJobOrLog(ctx, job, "Subscriptions could not be loaded")
 		return err
 	}
 	if err := s.refreshSubscribedCreatorCatalogs(ctx, job, execution); err != nil {
 		if ctx.Err() == nil {
-			_ = s.failClaimedWorkflowJob(ctx, job, "Subscribed catalogs could not be refreshed")
+			s.failJobOrLog(ctx, job, "Subscribed catalogs could not be refreshed")
 		}
 		return err
 	}
 	if err := s.activateCreatorSubscriptions(ctx); err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, "Subscriptions could not be loaded")
+		s.failJobOrLog(ctx, job, "Subscriptions could not be loaded")
 		return err
 	}
-	_ = s.updateWorkflowJobCheckpoint(ctx, job.ID, "new_works", execution.result, 0, 0)
+	s.checkpointJobOrLog(ctx, job, "new_works", execution.result, 0, 0)
 	if err := s.processCreatorReleaseCandidates(ctx, job.RunID, s.newDLsiteMetadataSyncer(ctx), execution); err != nil {
 		if ctx.Err() == nil {
-			_ = s.failClaimedWorkflowJob(ctx, job, "New works could not be added to feeds")
+			s.failJobOrLog(ctx, job, "New works could not be added to feeds")
 		}
 		return err
 	}
@@ -190,7 +188,7 @@ func (s *Server) executeCreatorSubscriptionRefreshJob(ctx context.Context, job w
 		execution.result.Status = "partial"
 	}
 	if err := s.finishCreatorSubscriptionJob(ctx, job, nodeIDs, execution); err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, "Subscription refresh could not be finalized")
+		s.failJobOrLog(ctx, job, "Subscription refresh could not be finalized")
 		return err
 	}
 	return nil
@@ -245,7 +243,7 @@ func (s *Server) refreshSubscribedCreatorCatalogs(ctx context.Context, job workf
 		}
 		result.Refreshed++
 		execution.catalogs = append(execution.catalogs, circle.circleID)
-		_ = s.updateWorkflowJobCheckpoint(ctx, job.ID, "catalogs", result, index+1, total)
+		s.checkpointJobOrLog(ctx, job, "catalogs", result, index+1, total)
 	}
 	sourceIDs, err := s.compatibleRemoteSourceIDs(ctx)
 	if err != nil {
@@ -284,7 +282,7 @@ func (s *Server) refreshSubscribedCreatorCatalogs(ctx context.Context, job workf
 		}
 		result.Refreshed++
 		execution.catalogs = append(execution.catalogs, label)
-		_ = s.updateWorkflowJobCheckpoint(ctx, job.ID, "catalogs", result, len(circles)+index+1, total)
+		s.checkpointJobOrLog(ctx, job, "catalogs", result, len(circles)+index+1, total)
 	}
 	return nil
 }
@@ -425,7 +423,6 @@ type creatorReleaseSubscriber struct {
 	partyID           int64
 	seriesID          string
 	personID          int64
-	activatedAt       time.Time
 	watchAvailability bool
 }
 
@@ -457,7 +454,7 @@ func (s *Server) creatorReleaseSubscribers(ctx context.Context, candidate creato
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT sub.id, sub.user_id, sub.subject_kind, COALESCE(sub.party_id, 0), sub.series_title_id,
-			COALESCE(sub.person_id, 0), sub.activated_at, sub.watch_availability
+			COALESCE(sub.person_id, 0), sub.watch_availability
 		FROM creator_subscription AS sub
 		INNER JOIN user_account AS account ON account.id = sub.user_id AND account.enabled = 1
 		WHERE sub.activated_at IS NOT NULL AND (`+strings.Join(where, " OR ")+`)
@@ -470,12 +467,8 @@ func (s *Server) creatorReleaseSubscribers(ctx context.Context, candidate creato
 	subscribers := []creatorReleaseSubscriber{}
 	for rows.Next() {
 		var item creatorReleaseSubscriber
-		var activatedAt string
-		if err := rows.Scan(&item.subscriptionID, &item.userID, &item.kind, &item.partyID, &item.seriesID, &item.personID, &activatedAt, &item.watchAvailability); err != nil {
+		if err := rows.Scan(&item.subscriptionID, &item.userID, &item.kind, &item.partyID, &item.seriesID, &item.personID, &item.watchAvailability); err != nil {
 			return nil, err
-		}
-		if parsed, err := parseSQLiteTime(activatedAt); err == nil {
-			item.activatedAt = parsed
 		}
 		subscribers = append(subscribers, item)
 	}
@@ -533,17 +526,14 @@ func creatorReleaseEventType(work creatorReleaseWork, now time.Time) string {
 	return "released"
 }
 
-// creatorReleaseIsRecent applies the grace window to one subscriber. A work
-// without a release date counts as new.
-func creatorReleaseIsRecent(releaseDate string, activatedAt time.Time) bool {
-	if releaseDate == "" || activatedAt.IsZero() {
-		return true
-	}
+// creatorReleaseIsRecent requires a confirmed release date within the refresh's
+// grace window; catalog discovery alone is not evidence of a new release.
+func creatorReleaseIsRecent(releaseDate string, now time.Time) bool {
 	released, err := time.Parse("2006-01-02", releaseDate)
 	if err != nil {
-		return true
+		return false
 	}
-	return !released.Before(activatedAt.Add(-creatorSubscriptionReleaseGrace).Truncate(24 * time.Hour))
+	return !released.Before(now.UTC().Add(-creatorSubscriptionReleaseGrace).Truncate(24 * time.Hour))
 }
 
 func (s *Server) processCreatorReleaseCandidates(ctx context.Context, runID int64, syncer dlsiteFamilyMetadataSyncer, execution *creatorSubscriptionExecution) error {
@@ -569,9 +559,9 @@ func (s *Server) processCreatorReleaseCandidates(ctx context.Context, runID int6
 		if err != nil {
 			return err
 		}
-		// A catalog date older than every subscriber's grace window settles the
-		// code without a metadata request.
-		if candidate.releaseDate != "" && !anyCreatorSubscriberRecent(subscribers, candidate.releaseDate) {
+		// A known old catalog date settles the code without a metadata request.
+		// An undated catalog row still needs metadata to establish its date.
+		if len(subscribers) == 0 || (candidate.releaseDate != "" && !creatorReleaseIsRecent(candidate.releaseDate, now)) {
 			if err := s.markCreatorReleaseSeen(ctx, candidate); err != nil {
 				return err
 			}
@@ -603,8 +593,14 @@ func (s *Server) processCreatorReleaseCandidates(ctx context.Context, runID int6
 			return err
 		}
 		releaseDate := firstNonEmpty(work.releaseDate, candidate.releaseDate)
+		if !creatorReleaseIsRecent(releaseDate, now) {
+			if err := s.markCreatorReleaseSeen(ctx, candidate); err != nil {
+				return err
+			}
+			continue
+		}
 		eventType := creatorReleaseEventType(work, now)
-		added, err := s.addCreatorReleaseFeedItems(ctx, runID, candidate, subscribers, eventType, releaseDate)
+		added, err := s.addCreatorReleaseFeedItems(ctx, runID, candidate, subscribers, eventType)
 		if err != nil {
 			return err
 		}
@@ -628,18 +624,9 @@ func (s *Server) processCreatorReleaseCandidates(ctx context.Context, runID int6
 	return nil
 }
 
-func anyCreatorSubscriberRecent(subscribers []creatorReleaseSubscriber, releaseDate string) bool {
-	for _, subscriber := range subscribers {
-		if creatorReleaseIsRecent(releaseDate, subscriber.activatedAt) {
-			return true
-		}
-	}
-	return false
-}
-
-// addCreatorReleaseFeedItems adds one feed entry per subscriber whose grace
-// window includes the release, and reports which subscriptions received one.
-func (s *Server) addCreatorReleaseFeedItems(ctx context.Context, runID int64, candidate creatorReleaseCandidate, subscribers []creatorReleaseSubscriber, eventType string, releaseDate string) (map[int64]bool, error) {
+// addCreatorReleaseFeedItems adds one feed entry per subscriber for a confirmed
+// recent release, and reports which subscriptions received one.
+func (s *Server) addCreatorReleaseFeedItems(ctx context.Context, runID int64, candidate creatorReleaseCandidate, subscribers []creatorReleaseSubscriber, eventType string) (map[int64]bool, error) {
 	added := map[int64]bool{}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -647,9 +634,6 @@ func (s *Server) addCreatorReleaseFeedItems(ctx context.Context, runID int64, ca
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, subscriber := range subscribers {
-		if !creatorReleaseIsRecent(releaseDate, subscriber.activatedAt) {
-			continue
-		}
 		var partyID, personID any
 		if subscriber.partyID > 0 {
 			partyID = subscriber.partyID
@@ -759,11 +743,15 @@ func (s *Server) dispatchSubscriptionAvailabilityWatch(ctx context.Context, runI
 
 func (s *Server) finishCreatorSubscriptionJob(ctx context.Context, job workflowJobRecord, nodeIDs map[string]int64, execution *creatorSubscriptionExecution) error {
 	result := execution.result
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginTxWithDatabaseBusyRetry(ctx, s.db)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	cancelled, err := workflowRunCancelledTx(ctx, tx, job.RunID)
+	if err != nil {
+		return err
+	}
 	catalogStatus, metadataStatus, watchStatus := "succeeded", "succeeded", "succeeded"
 	catalogFailures, metadataFailures, watchFailures := execution.failures["catalogs"], execution.failures["metadata"], execution.failures["watch"]
 	if len(catalogFailures) > 0 {
@@ -789,28 +777,17 @@ func (s *Server) finishCreatorSubscriptionJob(ctx context.Context, job workflowJ
 		{"watch", watchStatus, map[string]any{"state": execution.watch, "run_id": result.WatchRunID}, watchFailures},
 	}
 	for _, update := range updates {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE workflow_node_run SET status = ?, output_json = ?, error_message = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?
-		`, update.status, mustJSON(update.output), strings.Join(update.failures, "\n"), nodeIDs[update.node]); err != nil {
+		if err := finishWorkflowNodeRunTx(ctx, tx, nodeIDs[update.node], update.status, mustJSON(update.output), strings.Join(update.failures, "\n")); err != nil {
 			return err
 		}
 	}
 	errorMessage := strings.Join(result.Failures, "\n")
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE workflow_job
-		SET status = ?, error_message = ?, locked_by = '', locked_at = NULL, heartbeat_at = NULL, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, result.Status, errorMessage, job.ID); err != nil {
+	if err := finishWorkflowRunResultTx(ctx, tx, job.RunID, job.ID, result.Status, errorMessage, 0, 0, mustJSON(result)); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE workflow_run SET status = ?, summary_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?`, result.Status, mustJSON(result), job.RunID); err != nil {
-		return err
-	}
-	if result.Status == "succeeded" {
-		if err := updateWorkflowTriggerSuccess(ctx, tx, job.RunID); err != nil {
-			return err
-		}
-	} else if err := updateWorkflowTriggerFailure(ctx, tx, job.RunID, "Subscription refresh completed with some failures"); err != nil {
+	// A cancelled run keeps its result; the feeds below still receive the
+	// works the refresh found.
+	if err := updateWorkflowTriggerResultTx(ctx, tx, job.RunID, cancelled, result.Status, "Subscription refresh completed with some failures"); err != nil {
 		return err
 	}
 	for userID, codes := range execution.feed {

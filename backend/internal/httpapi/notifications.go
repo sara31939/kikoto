@@ -51,7 +51,7 @@ func (s *Server) getRemoteTrackRunStatus(w http.ResponseWriter, r *http.Request)
 	}
 	runID, err := parseInt64PathValue(r, "id")
 	if err != nil || runID <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid track run id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid track run id", false)
 		return
 	}
 	var result remoteTrackRunStatus
@@ -65,7 +65,7 @@ func (s *Server) getRemoteTrackRunStatus(w http.ResponseWriter, r *http.Request)
 		WHERE run.id = ? AND run.workflow_code = 'remote_source_sync'
 	`, actor.ID, runID).Scan(&result.RunID, &result.Status, &result.SummaryJSON)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "track run not found"})
+		writeAPIError(w, http.StatusNotFound, "not_found", "track run not found", false)
 		return
 	}
 	if err != nil {
@@ -82,29 +82,38 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, pageSize := notificationPageParams(r)
-	var total int64
-	if err := s.db.QueryRowContext(r.Context(), `
-		SELECT COUNT(*) FROM workflow_notification
-		WHERE user_id = ? AND dismissed_at IS NULL AND status IN ('succeeded', 'failed')
-	`, actor.ID).Scan(&total); err != nil {
+	result, err := s.loadNotificationsPage(r.Context(), actor.ID, page, pageSize)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// loadNotificationsPage reads one page of a user's undismissed notifications
+// with the totals the bell shows.
+func (s *Server) loadNotificationsPage(ctx context.Context, userID int64, page, pageSize int) (workflowNotificationsPage, error) {
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM workflow_notification
+		WHERE user_id = ? AND dismissed_at IS NULL AND status IN ('succeeded', 'failed')
+	`, userID).Scan(&total); err != nil {
+		return workflowNotificationsPage{}, err
+	}
 	var clearableTotal int64
-	if err := s.db.QueryRowContext(r.Context(), `
+	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_notification
 		WHERE user_id = ? AND dismissed_at IS NULL AND status = 'succeeded'
 			AND notification_type IN (`+clearableNotificationTypesSQL+`)
-	`, actor.ID).Scan(&clearableTotal); err != nil {
-		writeError(w, err)
-		return
+	`, userID).Scan(&clearableTotal); err != nil {
+		return workflowNotificationsPage{}, err
 	}
 	totalPages := max(1, (int(total)+pageSize-1)/pageSize)
 	if page > totalPages {
 		page = totalPages
 	}
 	offset := (page - 1) * pageSize
-	rows, err := s.db.QueryContext(r.Context(), `
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT notification.id, notification.workflow_run_id, notification.notification_type,
 			notification.status, notification.work_id,
 			NULLIF(CAST(json_extract(run.input_json, '$.source_id') AS INTEGER), 0),
@@ -114,10 +123,9 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 		WHERE notification.user_id = ? AND notification.dismissed_at IS NULL AND notification.status IN ('succeeded', 'failed')
 		ORDER BY notification.created_at DESC, notification.id DESC
 		LIMIT ? OFFSET ?
-	`, actor.ID, pageSize, offset)
+	`, userID, pageSize, offset)
 	if err != nil {
-		writeError(w, err)
-		return
+		return workflowNotificationsPage{}, err
 	}
 	defer rows.Close()
 	notifications := []workflowNotificationRecord{}
@@ -126,8 +134,7 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 		var workID sql.NullInt64
 		var fileSourceID sql.NullInt64
 		if err := rows.Scan(&item.ID, &item.WorkflowRunID, &item.Type, &item.Status, &workID, &fileSourceID, &item.WorkCode, &item.Message, &item.CreatedAt); err != nil {
-			writeError(w, err)
-			return
+			return workflowNotificationsPage{}, err
 		}
 		if workID.Valid {
 			item.WorkID = &workID.Int64
@@ -138,22 +145,21 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 		notifications = append(notifications, item)
 	}
 	if err := rows.Err(); err != nil {
-		writeError(w, err)
-		return
+		return workflowNotificationsPage{}, err
 	}
-	if redactor := s.remoteAddressRedactorFor(r.Context()); redactor != nil {
+	if redactor := s.remoteAddressRedactorFor(ctx); redactor != nil {
 		for index := range notifications {
 			notifications[index].Message = redactor.text(notifications[index].Message)
 		}
 	}
-	writeJSON(w, http.StatusOK, workflowNotificationsPage{
+	return workflowNotificationsPage{
 		Notifications:  notifications,
 		Page:           page,
 		PageSize:       pageSize,
 		Total:          total,
 		TotalPages:     totalPages,
 		ClearableTotal: clearableTotal,
-	})
+	}, nil
 }
 
 func notificationPageParams(r *http.Request) (int, int) {
@@ -180,7 +186,7 @@ func (s *Server) dismissNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid notification id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid notification id", false)
 		return
 	}
 	result, err := s.db.ExecContext(r.Context(), `
@@ -194,7 +200,7 @@ func (s *Server) dismissNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	affected, _ := result.RowsAffected()
 	if affected == 0 {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "notification not found"})
+		writeAPIError(w, http.StatusNotFound, "not_found", "notification not found", false)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -219,6 +225,9 @@ func (s *Server) clearSucceededNotifications(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "dismissed": affected})
 }
 
+// createRemoteFetchNotification records a Fetch run's outcome for the accounts
+// that follow it. A changed outcome is shown again even where the earlier one
+// was dismissed, so a retry that succeeds after a dismissed failure notifies.
 func (s *Server) createRemoteFetchNotification(ctx context.Context, runID int64, status string, payload remoteWorkFetchJobPayload) error {
 	if runID <= 0 {
 		return nil
@@ -249,9 +258,10 @@ func (s *Server) createRemoteFetchNotification(ctx context.Context, runID int64,
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_notification
-		SET status = ?, work_id = COALESCE(?, work_id), work_code = ?, message = ?
+		SET dismissed_at = CASE WHEN status IS NOT ? THEN NULL ELSE dismissed_at END,
+			status = ?, work_id = COALESCE(?, work_id), work_code = ?, message = ?
 		WHERE workflow_run_id = ? AND notification_type = 'remote_fetch'
-	`, status, nullableSQLInt64(workID), code, message, runID); err != nil {
+	`, status, status, nullableSQLInt64(workID), code, message, runID); err != nil {
 		return err
 	}
 	if payload.RequestedByUserID <= 0 {
@@ -263,6 +273,7 @@ func (s *Server) createRemoteFetchNotification(ctx context.Context, runID int64,
 		)
 		VALUES (?, ?, 'remote_fetch', ?, ?, ?, ?)
 		ON CONFLICT(user_id, workflow_run_id, notification_type) DO UPDATE SET
+			dismissed_at = CASE WHEN workflow_notification.status IS NOT excluded.status THEN NULL ELSE workflow_notification.dismissed_at END,
 			status = excluded.status,
 			work_id = excluded.work_id,
 			work_code = excluded.work_code,
@@ -326,9 +337,10 @@ func (s *Server) createRemoteTrackNotification(ctx context.Context, runID int64,
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_notification
-		SET status = ?, work_id = COALESCE(?, work_id), work_code = ?, message = ?
+		SET dismissed_at = CASE WHEN status IS NOT ? THEN NULL ELSE dismissed_at END,
+			status = ?, work_id = COALESCE(?, work_id), work_code = ?, message = ?
 		WHERE workflow_run_id = ? AND notification_type = 'remote_track'
-	`, status, nullableSQLInt64(workID), code, message, runID); err != nil {
+	`, status, status, nullableSQLInt64(workID), code, message, runID); err != nil {
 		return err
 	}
 	if payload.RequestedByUserID <= 0 {
@@ -340,6 +352,7 @@ func (s *Server) createRemoteTrackNotification(ctx context.Context, runID int64,
 		)
 		VALUES (?, ?, 'remote_track', ?, ?, ?, ?)
 		ON CONFLICT(user_id, workflow_run_id, notification_type) DO UPDATE SET
+			dismissed_at = CASE WHEN workflow_notification.status IS NOT excluded.status THEN NULL ELSE workflow_notification.dismissed_at END,
 			status = excluded.status,
 			work_id = excluded.work_id,
 			work_code = excluded.work_code,

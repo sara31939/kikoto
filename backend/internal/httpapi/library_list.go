@@ -113,7 +113,7 @@ func (s *Server) listWorks(w http.ResponseWriter, r *http.Request) {
 	userID := optionalUserID(r.Context())
 	recommendationSessionID := strings.TrimSpace(r.URL.Query().Get("recommendationSession"))
 	if recommendationSessionID != "" && !recommendationSessionIDPattern.MatchString(recommendationSessionID) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid recommendation session"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid recommendation session", false)
 		return
 	}
 	options := library.ListOptions{
@@ -126,6 +126,9 @@ func (s *Server) listWorks(w http.ResponseWriter, r *http.Request) {
 		RecommendationSessionID: recommendationSessionID,
 		DemoOnly:                s.cfg.IsDemo(),
 		TitleLanguages:          s.titleSortLanguages(r.Context(), r.URL.Query().Get("sort")),
+	}
+	if localOnlyRequest(r.Context()) {
+		options.VisibilityPredicateSQL = library.LocalPresencePredicateSQL()
 	}
 	showDemoScores := s.cfg.IsDemo() && (options.IncludeRecommendation || strings.EqualFold(options.Sort, "recommend"))
 	if s.cfg.IsDemo() {
@@ -146,6 +149,11 @@ func (s *Server) listWorks(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	if localOnlyRequest(r.Context()) {
+		for index := range works {
+			works[index].SourcePresence = localSourcePresence(works[index].SourcePresence)
+		}
 	}
 	if showDemoScores {
 		for index := range works {

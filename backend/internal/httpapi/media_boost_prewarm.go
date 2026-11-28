@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/yexca/kikoto/backend/internal/library"
 	"github.com/yexca/kikoto/backend/internal/localfs"
 )
 
@@ -46,26 +47,15 @@ type boostPrewarmCandidate struct {
 // considers, oldest library entries first so coverage grows in a stable
 // order across runs.
 func (s *Server) boostPrewarmCandidates(ctx context.Context) ([]boostPrewarmCandidate, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT mfl.id, mfl.path
-		FROM media_file_location mfl
-		JOIN media_item mi ON mi.id = mfl.media_item_id
-		WHERE mfl.location_type = 'local' AND mfl.availability = 'available' AND mi.has_audio = 1
-		ORDER BY mfl.id
-	`)
+	locations, err := library.LocalAudioLocations(ctx, s.db)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	candidates := []boostPrewarmCandidate{}
-	for rows.Next() {
-		var candidate boostPrewarmCandidate
-		if err := rows.Scan(&candidate.locationID, &candidate.relativePath); err != nil {
-			return nil, err
-		}
-		candidates = append(candidates, candidate)
+	candidates := make([]boostPrewarmCandidate, 0, len(locations))
+	for _, location := range locations {
+		candidates = append(candidates, boostPrewarmCandidate{locationID: location.ID, relativePath: location.Path})
 	}
-	return candidates, rows.Err()
+	return candidates, nil
 }
 
 // prewarmBoostGainDB answers the boost for one candidate, measuring the

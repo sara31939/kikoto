@@ -1,7 +1,7 @@
 .PHONY: backend-format backend-lint backend-lint-full backend-verify backend-vuln backend-test backend-test-container backend-coverage backend-vet backend-race backend-build backend-run frontend-install frontend-dev frontend-build frontend-coverage frontend-format frontend-lint frontend-docs frontend-i18n frontend-audit frontend-audit-signatures dependency-audit frontend-playwright-install frontend-e2e-smoke frontend-e2e android-sync android-test android-build ios-sync ios-build docker-build docker-up docker-down docker-status docker-logs smoke smoke-api smoke-up smoke-down smoke-status smoke-logs sensitive-check sensitive-check-test privacy-check ci-style ci-backend ci-frontend ci-local ci
 .PHONY: ci-plan ci-plan-test ci-results ci-backend-static ci-backend-coverage ci-backend-race ci-production production-smoke production-e2e
 .PHONY: backend-race-shard backend-race-durations go-test-shard-test
-.PHONY: frontend-e2e-container playwright-image-check
+.PHONY: frontend-e2e-container frontend-e2e-linux playwright-image-check
 .PHONY: pr-description-check pr-description-test
 .PHONY: actionlint ci-metrics ci-metrics-test
 .PHONY: browse-performance browse-production-performance playback-performance recommendation-performance
@@ -23,16 +23,17 @@ NPX ?= npx
 NODE ?= node
 DOCKER ?= docker
 DOCKER_IMAGE ?= kikoto:dev
-GO_IMAGE ?= golang:1.26.10@sha256:fb456410ab4c979617acaf28c46b2b9fe60b11bcc3dc8ceea0eaeb3e7cd0f8a8
+GO_IMAGE ?= golang:1.26.11@sha256:7af425da11f4fc1a9308eb704369e3f6d1c44e35bac0f874a59ade3f20fdc07e
 # Its tag follows @playwright/test in frontend/package-lock.json; make
 # playwright-image-check enforces that.
-PLAYWRIGHT_IMAGE ?= mcr.microsoft.com/playwright:v1.64.1-noble@sha256:47b510dd9230bf0b9bfc9b20102241e577ea7a99334ab4c3ca19f19770e9b8ea
+PLAYWRIGHT_IMAGE ?= mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
 # Keep build contexts, .env lookup, mounts, and the project name rooted here.
 DOCKER_COMPOSE_DEV = $(DOCKER) compose --project-directory "$(CURDIR)" -f deploy/compose/dev.yml
 SMOKE_COMPOSE_PROJECT := kikoto-smoke
 SMOKE_CONFIG_DIR := ./.smoke/config
 SMOKE_CACHE_DIR := ./.smoke/cache
 SMOKE_DATA_DIR := ./.smoke/data
+SMOKE_RECORD_DIR := ./.smoke/record
 SMOKE_BACKEND_PORT := 17659
 SMOKE_FRONTEND_PORT := 17655
 SMOKE_HEALTH_URL := http://127.0.0.1:$(SMOKE_BACKEND_PORT)/health
@@ -52,6 +53,7 @@ $(SMOKE_TARGETS): export KIKOTO_ROOT_ACCOUNT_MODE := setup
 $(SMOKE_TARGETS): export KIKOTO_HTTP_ADDR := 0.0.0.0:7659
 $(SMOKE_TARGETS): export KIKOTO_DB_PATH := /config/kikoto.db
 $(SMOKE_TARGETS): export KIKOTO_DATA_ROOT := /data
+$(SMOKE_TARGETS): export KIKOTO_RECORD_ROOT := /record
 $(SMOKE_TARGETS): export KIKOTO_CACHE_ROOT := /cache
 $(SMOKE_TARGETS): export KIKOTO_LOCAL_SCAN_DEPTH := 3
 $(SMOKE_TARGETS): export KIKOTO_SESSION_COOKIE_SECURE := false
@@ -60,6 +62,7 @@ $(SMOKE_TARGETS): export KIKOTO_REMOTE_SOURCES_ENABLED := false
 $(SMOKE_TARGETS): export KIKOTO_DEV_CONFIG_DIR := $(SMOKE_CONFIG_DIR)
 $(SMOKE_TARGETS): export KIKOTO_DEV_CACHE_DIR := $(SMOKE_CACHE_DIR)
 $(SMOKE_TARGETS): export KIKOTO_DEV_DATA_DIR := $(SMOKE_DATA_DIR)
+$(SMOKE_TARGETS): export KIKOTO_DEV_RECORD_DIR := $(SMOKE_RECORD_DIR)
 $(SMOKE_TARGETS): export KIKOTO_DEV_BACKEND_PORT := $(SMOKE_BACKEND_PORT)
 $(SMOKE_TARGETS): export KIKOTO_DEV_FRONTEND_PORT := $(SMOKE_FRONTEND_PORT)
 $(SMOKE_TARGETS): export KIKOTO_SMOKE_HEALTH_URL := $(SMOKE_HEALTH_URL)
@@ -106,6 +109,7 @@ backend-format:
 	cd backend && $(GO) run ../scripts/check-go-format.go . ../scripts
 
 backend-lint:
+	cd backend && $(GO) run ../scripts/check-go-dropped-errors.go .
 	cd backend && $(GO) run $(GOLANGCI_LINT_PACKAGE) run --config=$(GOLANGCI_LINT_CONFIG) --new-from-rev=$(GOLANGCI_LINT_BASE) --timeout=$(GOLANGCI_LINT_TIMEOUT) --color=never ./...
 
 backend-lint-full:
@@ -142,6 +146,7 @@ backend-coverage:
 
 backend-vet:
 	cd backend && $(GO) vet ./...
+	cd backend && $(GO) run ../scripts/check-api-errors.go internal/httpapi
 
 backend-race:
 	cd backend && $(GO) test -race -timeout=20m ./...
@@ -169,6 +174,10 @@ frontend-format: frontend-install
 
 frontend-lint: frontend-install
 	cd frontend && $(NPM) run lint && $(NPM) run typecheck:e2e
+	$(NODE) --test scripts/check-e2e-locators.test.mjs
+	$(NODE) scripts/check-e2e-locators.mjs
+	$(NODE) --test scripts/check-hook-deps-suppressions.test.mjs
+	$(NODE) scripts/check-hook-deps-suppressions.mjs
 
 frontend-docs: frontend-install
 	$(NODE) --test scripts/check-doc-links.test.mjs
@@ -177,6 +186,11 @@ frontend-docs: frontend-install
 frontend-i18n:
 	$(NODE) --test scripts/check-ui-copy.test.mjs
 	$(NODE) scripts/check-ui-copy.mjs
+
+.PHONY: duplicate-helper-check
+duplicate-helper-check:
+	$(NODE) --test scripts/check-duplicate-helpers.test.mjs
+	$(NODE) scripts/check-duplicate-helpers.mjs
 
 frontend-audit: frontend-install
 	cd frontend && $(NPM) audit --audit-level=moderate
@@ -201,6 +215,32 @@ frontend-e2e: frontend-playwright-install
 # package. It runs the host's node_modules, so the host must be Linux.
 frontend-e2e-container: frontend-install
 	$(DOCKER) run --rm --ipc=host --user "$$(id -u):$$(id -g)" -e CI -e HOME=/tmp -v "$(CURDIR):/src" -w /src/frontend $(PLAYWRIGHT_IMAGE) npm run test:e2e -- $(E2E_ARGS)
+
+# The browser suite in the pinned Playwright image with DejaVu Sans, the
+# default sans font of the hosted ubuntu runners, as the only Latin sans font,
+# so text that wraps or overflows only with its wider metrics fails locally. It
+# streams VERSION and frontend/ into the container instead of mounting them,
+# runs npm ci there, and copies test-results back, so it also works from Git
+# Bash on Windows.
+# It needs a POSIX shell and network access for apt-get and npm.
+E2E_LINUX_CONTAINER ?= kikoto-e2e-linux
+E2E_LINUX_EXCLUDES := node_modules test-results playwright-report .vite dist coverage android ios
+frontend-e2e-linux: export MSYS_NO_PATHCONV := 1
+frontend-e2e-linux:
+	@$(DOCKER) rm -f $(E2E_LINUX_CONTAINER) >/dev/null 2>&1 || true
+	@rm -rf frontend/test-results
+	tar $(addprefix --exclude=frontend/,$(E2E_LINUX_EXCLUDES)) -cf - VERSION frontend | \
+	$(DOCKER) run -i --ipc=host --name $(E2E_LINUX_CONTAINER) -e CI=1 -v kikoto-e2e-linux-npm:/root/.npm $(PLAYWRIGHT_IMAGE) \
+	  bash -euc 'mkdir /work && tar -xf - -C /work && cd /work/frontend; \
+	    apt-get update -qq && apt-get install -y -qq --no-install-recommends fonts-dejavu-core >/dev/null; \
+	    rm -rf /usr/share/fonts/truetype/liberation* /usr/share/fonts/truetype/freefont; \
+	    fc-cache -f; fc-match sans-serif | grep -q "DejaVu Sans" || { echo "sans-serif is not DejaVu Sans: $$(fc-match sans-serif)" >&2; exit 1; }; \
+	    npm ci --engine-strict=false --no-audit; \
+	    npm run test:e2e -- "$$@"' frontend-e2e-linux $(E2E_ARGS); \
+	status=$$?; \
+	$(DOCKER) cp $(E2E_LINUX_CONTAINER):/work/frontend/test-results frontend/test-results >/dev/null 2>&1 || true; \
+	$(DOCKER) rm -f $(E2E_LINUX_CONTAINER) >/dev/null; \
+	exit $$status
 
 android-sync: frontend-build
 	cd frontend && $(NPX) cap sync android
@@ -317,10 +357,21 @@ ci-metrics:
 ci-metrics-test:
 	$(NODE) --test scripts/ci-metrics.test.mjs
 
-ci-style: frontend-format frontend-lint frontend-docs frontend-i18n sensitive-check-test ci-plan-test go-test-shard-test playwright-image-check pr-description-test ci-metrics-test actionlint
+ci-style: frontend-format frontend-lint frontend-docs frontend-i18n duplicate-helper-check sensitive-check-test ci-plan-test go-test-shard-test playwright-image-check pr-description-test ci-metrics-test actionlint
+
+.PHONY: backend-sql-ratchet backend-sql-ratchet-lower
+
+# The SQL that internal/httpapi runs directly may only shrink; see
+# backend/AGENTS.md#layering. The lower target records a smaller count.
+backend-sql-ratchet:
+	cd backend && $(GO) test ../scripts/check-httpapi-sql.go ../scripts/check-httpapi-sql_test.go
+	cd backend && $(GO) run ../scripts/check-httpapi-sql.go
+
+backend-sql-ratchet-lower:
+	cd backend && $(GO) run ../scripts/check-httpapi-sql.go -lower
 
 # Coverage executes the full suite; retain the separate race-instrumented run.
-ci-backend-static: backend-format backend-lint backend-verify backend-vuln backend-vet
+ci-backend-static: backend-format backend-lint backend-verify backend-vuln backend-vet backend-sql-ratchet
 
 ci-backend-coverage: backend-coverage
 

@@ -54,6 +54,13 @@ func (s *Server) loadCircleDetailWithWorksQuery(ctx context.Context, userID int6
 	if err != nil {
 		return circleDetail{}, err
 	}
+	// The demo cannot refresh, and its catalog shows only eligible works.
+	metadataMissing := 0
+	if !s.cfg.IsDemo() {
+		if metadataMissing, err = s.countCircleMetadataMissingWorks(ctx, partyID); err != nil {
+			return circleDetail{}, err
+		}
+	}
 	var refresh *creatorRefreshRun
 	if latest, ok, err := s.latestCircleCatalogSyncRun(ctx, externalID, false); err != nil {
 		return circleDetail{}, err
@@ -73,8 +80,9 @@ func (s *Server) loadCircleDetailWithWorksQuery(ctx context.Context, userID int6
 			HasMore:   hasMore,
 			Truncated: worksQuery.Legacy && hasMore,
 		},
-		Series:  series,
-		Refresh: refresh,
+		Series:               series,
+		MetadataMissingWorks: metadataMissing,
+		Refresh:              refresh,
 	}, nil
 }
 
@@ -109,13 +117,6 @@ func (s *Server) demoCircleEligible(ctx context.Context, partyID int64) (bool, e
 			)
 	`, partyID, partyID).Scan(&eligible)
 	return eligible, err
-}
-
-func maxInt(left int, right int) int {
-	if left > right {
-		return left
-	}
-	return right
 }
 
 func (s *Server) loadCircleSeries(ctx context.Context, partyID int64) ([]circleSeries, error) {
@@ -200,7 +201,7 @@ func (s *Server) loadCircleSeries(ctx context.Context, partyID int64) ([]circleS
 			item.LocalWorks = min(item.LocalWorks, item.Works)
 			item.RemoteWorks = min(item.RemoteWorks, item.Works-item.LocalWorks)
 		}
-		item.MissingWorks = maxInt(0, item.Works-item.LocalWorks-item.RemoteWorks)
+		item.MissingWorks = max(0, item.Works-item.LocalWorks-item.RemoteWorks)
 	}
 	return items, nil
 }

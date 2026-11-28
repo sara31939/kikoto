@@ -34,7 +34,7 @@ func TestRemoteFetchFollowUpPreviewTakesTheFetchedFilesIntoAccount(t *testing.T)
 	fixture := newFolderEditFixture(t, serveFolderEditMedia)
 	originalName := strings.TrimPrefix(fixture.originalPath, fixture.root+"/")
 	followUp := &remoteFetchFollowUp{Additions: []workFolderEditAdditionRequest{
-		{Kind: "remote", SourceID: 7, RemoteCode: "RJ00000002", Path: folderEditVTTPath, Language: followUpLanguage("zh-cn")},
+		{Kind: "remote", SourceID: 7, RemoteCode: "RJ00000002", Path: folderEditVTTPath},
 		{Kind: "local", FolderID: fixture.folderID, Path: originalName},
 		// The Fetch already publishes this file at the same place.
 		{Kind: "remote", SourceID: 7, RemoteCode: "RJ00000002", Path: folderEditAudioPath},
@@ -44,7 +44,7 @@ func TestRemoteFetchFollowUpPreviewTakesTheFetchedFilesIntoAccount(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.Summary.Add != 2 || preview.Summary.Lyrics != 1 || preview.Summary.Conflict != 1 {
+	if preview.Summary.Add != 2 || preview.Summary.Conflict != 1 {
 		t.Fatalf("follow-up summary = %+v", preview.Summary)
 	}
 	targets := map[string]string{}
@@ -52,7 +52,7 @@ func TestRemoteFetchFollowUpPreviewTakesTheFetchedFilesIntoAccount(t *testing.T)
 		targets[item.ItemKey] = item.TargetPath + " " + item.Action
 	}
 	for key, want := range map[string]string{
-		"remote:7:RJ00000002:" + folderEditVTTPath:                   followUpFetchRoot + "/lyrics_kikoto/zh-hans/" + folderEditVTTPath + " cache_download",
+		"remote:7:RJ00000002:" + folderEditVTTPath:                   followUpFetchRoot + "/" + folderEditVTTPath + " cache_download",
 		"local:" + jsonNumber(fixture.folderID) + ":" + originalName: followUpFetchRoot + "/" + originalName + " copy_local",
 		"remote:7:RJ00000002:" + folderEditAudioPath:                 followUpFetchRoot + "/" + folderEditAudioPath + " conflict",
 	} {
@@ -83,8 +83,7 @@ func TestRemoteFetchFollowUpEditsThePublishedFolderOnce(t *testing.T) {
 	}
 	ctx := context.Background()
 	payload := remoteWorkFetchJobPayload{SourceID: 7, WorkCode: "RJ00000002", FollowUp: &remoteFetchFollowUp{
-		Additions:   []workFolderEditAdditionRequest{{Kind: "remote", SourceID: 7, RemoteCode: "RJ00000002", Path: folderEditVTTPath, Language: followUpLanguage("zh-cn")}},
-		Assignments: []workFolderEditAssignment{{AudioPath: folderEditAudioPath, ItemKey: "remote:7:RJ00000002:" + folderEditVTTPath}},
+		Additions: []workFolderEditAdditionRequest{{Kind: "remote", SourceID: 7, RemoteCode: "RJ00000002", Path: folderEditVTTPath}},
 	}}
 	tx, err := fixture.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -130,17 +129,73 @@ func TestRemoteFetchFollowUpEditsThePublishedFolderOnce(t *testing.T) {
 	if err := fixture.server.executeWorkFolderEditJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	lyricsPath := followUpFetchRoot + "/lyrics_kikoto/zh-hans/" + folderEditVTTPath
-	if content, err := os.ReadFile(fixture.targetFile("../" + lyricsPath)); err != nil || string(content) != lyricsFetchVTT {
-		t.Fatalf("follow-up lyrics = %q, %v", content, err)
+	followed := followUpFetchRoot + "/" + folderEditVTTPath
+	if content, err := os.ReadFile(fixture.targetFile("../" + followed)); err != nil || string(content) != lyricsFetchVTT {
+		t.Fatalf("follow-up file = %q, %v", content, err)
 	}
-	var assigned int
-	if err := fixture.db.QueryRow(`
-		SELECT COUNT(*) FROM media_lyrics_assignment AS assignment
-		INNER JOIN media_file_location AS audio ON audio.media_item_id = assignment.audio_media_item_id
-		WHERE assignment.language = 'zh-cn' AND audio.path = ?
-	`, followUpFetchRoot+"/"+folderEditAudioPath).Scan(&assigned); err != nil || assigned != 1 {
-		t.Fatalf("assignments of the fetched audio = %d, %v", assigned, err)
+}
+
+// A Fetch queued while follow-ups still took lyrics languages and track
+// bindings says in Activity, once, what its follow-up no longer does.
+func TestRemoteFetchFollowUpReportsLyricsChosenBeforeTheUpdate(t *testing.T) {
+	fixture := newFolderEditFixture(t, serveFolderEditMedia)
+	fixture.addSiblingFolder(t, map[string]string{folderEditAudioPath: folderEditRemoteAudio})
+	var localSourceID int64
+	if err := fixture.db.QueryRow("SELECT file_source_id FROM work_folder_location WHERE work_id = 902").Scan(&localSourceID); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	payload := remoteWorkFetchJobPayload{SourceID: 7, WorkCode: "RJ00000002", FollowUp: &remoteFetchFollowUp{
+		Additions: []workFolderEditAdditionRequest{{Kind: "remote", SourceID: 7, RemoteCode: "RJ00000002", Path: folderEditVTTPath}},
+	}}
+	tx, err := fixture.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitionID, err := workflow.EnsureDefinition(ctx, tx, "remote_work_fetch", "Fetch remote work", "", remoteWorkFetchDefinition())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := workflow.InsertRun(ctx, tx, definitionID, "remote_work_fetch", "Fetch RJ00000002", "succeeded", "manual", "fetch_selected", payload, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The follow-up was recorded with a lyrics language and a track binding.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_run SET input_json = json_set(input_json,
+			'$.follow_up.additions[0].language', 'ja',
+			'$.follow_up.assignments', json('[{"itemKey":"remote:7:RJ00000002:`+folderEditVTTPath+`","audioPath":"`+folderEditAudioPath+`"}]'))
+		WHERE id = ?
+	`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	manifest := remoteFetchManifestRecord{WorkflowRunID: runID, WorkID: 902, LocalSourceID: localSourceID, TargetRoot: followUpFetchRoot}
+
+	fixture.server.startRemoteFetchFollowUp(ctx, manifest)
+	fixture.server.startRemoteFetchFollowUp(ctx, manifest)
+	if runs := fixture.queuedRuns(t); runs != 1 {
+		t.Fatalf("follow-up runs = %d, want 1", runs)
+	}
+	rows, err := fixture.db.Query(`SELECT message FROM workflow_event WHERE workflow_run_id = ? AND event_type = 'fetch.follow_up_lyrics_not_kept' AND level = 'warn'`, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []string{}
+	for rows.Next() {
+		var message string
+		if err := rows.Scan(&message); err != nil {
+			t.Fatal(err)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || !strings.Contains(messages[0], "added at their own paths") || !strings.Contains(messages[0], "1 track bindings were not stored") {
+		t.Fatalf("lyrics notices = %q", messages)
 	}
 }
 
@@ -158,7 +213,7 @@ func TestRemoteFetchFollowUpStartsOnceAfterARestart(t *testing.T) {
 	seedCompletedFetch := func(targetRoot string) int64 {
 		t.Helper()
 		payload := remoteWorkFetchJobPayload{SourceID: 7, WorkCode: "RJ00000002", FollowUp: &remoteFetchFollowUp{
-			Additions: []workFolderEditAdditionRequest{{Kind: "remote", SourceID: 7, RemoteCode: "RJ00000002", Path: folderEditVTTPath, Language: followUpLanguage("zh-cn")}},
+			Additions: []workFolderEditAdditionRequest{{Kind: "remote", SourceID: 7, RemoteCode: "RJ00000002", Path: folderEditVTTPath}},
 		}}
 		tx, err := fixture.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -252,7 +307,7 @@ func TestRemoteFetchFollowUpStartsOnceAfterARestart(t *testing.T) {
 
 func TestRemoteFetchWithFollowUpNeedsFilePermissionAndAFetchedFile(t *testing.T) {
 	fixture := newFolderEditFixture(t, serveFolderEditMedia)
-	followUp := map[string]any{"additions": []any{lyricsAddition(remoteAddition("RJ00000002", folderEditVTTPath), "zh-cn")}}
+	followUp := map[string]any{"additions": []any{remoteAddition("RJ00000002", folderEditVTTPath)}}
 	for name, test := range map[string]struct {
 		body        map[string]any
 		permissions []string
@@ -261,13 +316,6 @@ func TestRemoteFetchWithFollowUpNeedsFilePermissionAndAFetchedFile(t *testing.T)
 		"without file permission": {
 			body:        map[string]any{"paths": []string{folderEditAudioPath}, "followUp": followUp},
 			permissions: []string{"remote:fetch", "metadata:sync"}, status: http.StatusForbidden,
-		},
-		"assigning without library permission": {
-			body: map[string]any{"paths": []string{folderEditAudioPath}, "followUp": map[string]any{
-				"additions":   followUp["additions"],
-				"assignments": []any{map[string]any{"audioPath": folderEditAudioPath, "itemKey": "remote:7:RJ00000002:" + folderEditVTTPath}},
-			}},
-			permissions: []string{"remote:fetch", "metadata:sync", "downloads:manage"}, status: http.StatusForbidden,
 		},
 		"without a fetched file": {
 			body:        map[string]any{"followUp": followUp},
@@ -292,8 +340,4 @@ func TestRemoteFetchWithFollowUpNeedsFilePermissionAndAFetchedFile(t *testing.T)
 	if err := fixture.db.QueryRow("SELECT COUNT(*) FROM workflow_run WHERE workflow_code IN ('remote_work_fetch', ?)", workFolderEditWorkflowCode).Scan(&runs); err != nil || runs != 0 {
 		t.Fatalf("refused Fetches queued %d runs, %v", runs, err)
 	}
-}
-
-func followUpLanguage(language string) *string {
-	return &language
 }

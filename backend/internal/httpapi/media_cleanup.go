@@ -64,12 +64,36 @@ type mediaCleanupJobPayload struct {
 	Mode         mediaCleanupMode     `json:"mode"`
 	ActorUserID  int64                `json:"actorUserId,omitempty"`
 	ForgetNodeID int64                `json:"forgetNodeId,omitempty"`
+	// RequestedByUserID names the account that started the run, so it can
+	// cancel and retry its own run.
+	RequestedByUserID int64 `json:"requested_by_user_id,omitempty"`
+	// Works, when set, takes the place of Targets: the run cleans each
+	// work's folders in turn (see executeLocalWorkCleanup).
+	Works       []localWorkCleanupJobWork `json:"works,omitempty"`
+	ClearRating bool                      `json:"clearRating,omitempty"`
+	ClearMark   bool                      `json:"clearMark,omitempty"`
 }
 
 type mediaCleanupCheckpoint struct {
 	CompletedKeys  []string `json:"completedKeys"`
 	CompletedCount int      `json:"completedCount"`
 	Deleted        int      `json:"deleted"`
+	// ChangedLocations are the file targets left alone because their location
+	// no longer recorded the queued file when the run reached them.
+	ChangedLocations []mediaCleanupChangedLocation `json:"changedLocations,omitempty"`
+	// The rest is the progress of a run that cleans works in turn.
+	DoneWorks      []int                         `json:"doneWorks,omitempty"`
+	Failures       []localWorkCleanupFailure     `json:"failures,omitempty"`
+	Forgotten      []string                      `json:"forgotten,omitempty"`
+	Retained       []unlinkedWorkMaintenanceSkip `json:"retained,omitempty"`
+	ClearedRatings int64                         `json:"clearedRatings,omitempty"`
+	ClearedMarks   int64                         `json:"clearedMarks,omitempty"`
+}
+
+type mediaCleanupChangedLocation struct {
+	LocationID  int64  `json:"location_id"`
+	Path        string `json:"path"`
+	CurrentPath string `json:"current_path"`
 }
 
 type mediaCleanupResult struct {
@@ -95,12 +119,12 @@ func (s *Server) cleanupMediaLocations(w http.ResponseWriter, r *http.Request) {
 	}
 	var request mediaCleanupRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body", false)
 		return
 	}
 	mode, err := parseMediaCleanupMode(request.Mode)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	if mode == mediaCleanupForgetWork {
@@ -121,6 +145,9 @@ func (s *Server) cleanupMediaLocations(w http.ResponseWriter, r *http.Request) {
 type mediaCleanupOptions struct {
 	Mode        mediaCleanupMode
 	ActorUserID int64
+	Works       []localWorkCleanupJobWork
+	ClearRating bool
+	ClearMark   bool
 }
 
 func parseMediaCleanupMode(value string) (mediaCleanupMode, error) {
@@ -137,16 +164,15 @@ func parseMediaCleanupMode(value string) (mediaCleanupMode, error) {
 func writeMediaCleanupError(w http.ResponseWriter, err error) {
 	var symlinkErr symlinkMediaLocationError
 	if errors.As(err, &symlinkErr) {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": symlinkErr.Error(), "runId": symlinkErr.RunID, "candidateId": symlinkErr.CandidateID,
+		// The path stays in the review run the response points to.
+		writeAPIErrorDetails(w, http.StatusConflict, "conflict", "a local media file is a symlink; review the location before deleting", false, map[string]any{
+			"runId": symlinkErr.RunID, "candidateId": symlinkErr.CandidateID,
 		})
 		return
 	}
 	var conflictErr mediaCleanupTargetConflictError
 	if errors.As(err, &conflictErr) {
-		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": conflictErr.Error(), "code": "media_cleanup_target_changed", "retryable": false,
-		})
+		writeAPIError(w, http.StatusConflict, "media_cleanup_target_changed", conflictErr.Error(), false)
 		return
 	}
 	writeError(w, err)
@@ -242,8 +268,17 @@ func (s *Server) insertMediaCleanupWorkflow(ctx context.Context, targets []media
 	if err != nil {
 		return 0, 0, err
 	}
-	payload := mediaCleanupJobPayload{Targets: targets, Mode: options.Mode, ActorUserID: options.ActorUserID}
-	runID, err := workflow.InsertRun(ctx, tx, definition, spec.Code, spec.DisplayName, "queued", "manual", "delete_selected", payload, map[string]any{"locations": len(targets), "mode": options.Mode})
+	payload := mediaCleanupJobPayload{
+		Targets: targets, Mode: options.Mode, ActorUserID: options.ActorUserID, RequestedByUserID: options.ActorUserID,
+		Works: options.Works, ClearRating: options.ClearRating, ClearMark: options.ClearMark,
+	}
+	summary := map[string]any{"locations": len(targets), "mode": options.Mode}
+	progressTotal := len(targets)
+	if len(options.Works) > 0 {
+		summary = map[string]any{"works": len(options.Works), "mode": options.Mode}
+		progressTotal = len(options.Works)
+	}
+	runID, err := workflow.InsertRun(ctx, tx, definition, spec.Code, spec.DisplayName, "queued", "manual", "delete_selected", payload, summary)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -254,7 +289,7 @@ func (s *Server) insertMediaCleanupWorkflow(ctx context.Context, targets []media
 	jobID, err := workflow.InsertJob(ctx, tx, runID, workflow.JobSpec{
 		NodeRunID: cleanupNodeID, WorkerType: "media_location_cleanup", Status: "queued", Priority: workflow.JobPriorityUserInitiated, ResourceKey: mediaCleanupResourceKey, Payload: payload,
 		Checkpoint: mediaCleanupCheckpoint{CompletedKeys: []string{}}, Recoverable: true, MaxRetries: 3,
-		ProgressCurrent: 0, ProgressTotal: len(targets),
+		ProgressCurrent: 0, ProgressTotal: progressTotal,
 	})
 	if err != nil {
 		return 0, 0, err
@@ -266,9 +301,13 @@ func (s *Server) insertMediaCleanupWorkflow(ctx context.Context, targets []media
 }
 
 func insertMediaCleanupNodeRuns(ctx context.Context, tx *sql.Tx, runID int64, payload mediaCleanupJobPayload) (mediaCleanupJobPayload, int64, error) {
+	selected := map[string]any{"locations": len(payload.Targets)}
+	if len(payload.Works) > 0 {
+		selected = map[string]any{"works": len(payload.Works)}
+	}
 	if _, err := workflow.InsertNodeRun(ctx, tx, runID, workflow.NodeRunSpec{
 		NodeID: "select", NodeType: "select_media_items", DisplayName: "Select media locations", Position: 1, Status: "succeeded",
-		Input: payload, Output: map[string]any{"locations": len(payload.Targets)},
+		Input: payload, Output: selected,
 	}); err != nil {
 		return payload, 0, err
 	}
@@ -529,6 +568,7 @@ func (s *Server) restoreMediaCleanupFolders(ctx context.Context, runID int64) er
 	if runID <= 0 {
 		return nil
 	}
+	s.returnStagedCleanupFolders(context.WithoutCancel(ctx), runID, nil)
 	err := withDatabaseBusyRetry(context.WithoutCancel(ctx), func() error {
 		_, err := s.db.ExecContext(context.WithoutCancel(ctx), `
 		UPDATE work_folder_location
@@ -578,7 +618,7 @@ func (s *Server) finishCancelledMediaCleanup(ctx context.Context, job workflowJo
 func (s *Server) executeMediaLocationCleanupJob(ctx context.Context, job workflowJobRecord) error {
 	payload, checkpoint, err := decodeMediaCleanupExecution(job)
 	if err != nil {
-		_ = s.failClaimedWorkflowJob(context.WithoutCancel(ctx), job, err.Error())
+		s.failJobOrLog(context.WithoutCancel(ctx), job, err.Error())
 		return err
 	}
 	statusCtx := context.WithoutCancel(ctx)
@@ -591,13 +631,16 @@ func (s *Server) executeMediaLocationCleanupJob(ctx context.Context, job workflo
 	if stopped, err := s.stopMediaCleanupIfNeeded(ctx, statusCtx, job.RunID, finishCancelled); stopped {
 		return err
 	}
+	if len(payload.Works) > 0 {
+		return s.executeLocalWorkCleanup(ctx, statusCtx, job, payload, checkpoint, finishCancelled)
+	}
 	completed := mediaCleanupCompletedKeys(checkpoint)
 	if stopped, err := s.processMediaCleanupTargets(ctx, statusCtx, job, payload, &checkpoint, completed, finishCancelled); stopped {
 		return err
 	}
 	workIDs, err := mediaCleanupForgetWorkIDs(payload)
 	if err != nil {
-		_ = s.failClaimedWorkflowJob(statusCtx, job, err.Error())
+		s.failJobOrLog(statusCtx, job, err.Error())
 		return err
 	}
 	if stopped, err := s.stopMediaCleanupIfNeeded(ctx, statusCtx, job.RunID, finishCancelled); stopped {
@@ -678,7 +721,14 @@ func (s *Server) processMediaCleanupTargets(
 			}
 		}
 		target.CleanupRunID = job.RunID
-		didDelete, err := s.clearMediaCleanupTarget(statusCtx, target)
+		changed, err := s.skipChangedMediaCleanupFile(statusCtx, job.RunID, target, checkpoint)
+		if err != nil {
+			return true, s.failMediaCleanupTarget(statusCtx, job, err)
+		}
+		didDelete := false
+		if !changed {
+			didDelete, err = s.clearMediaCleanupTarget(statusCtx, target)
+		}
 		if err != nil {
 			if stopped, stopErr := s.stopMediaCleanupIfNeeded(ctx, statusCtx, job.RunID, finishCancelled); stopped {
 				return true, stopErr
@@ -701,6 +751,29 @@ func (s *Server) processMediaCleanupTargets(
 	return false, nil
 }
 
+// skipChangedMediaCleanupFile reports whether a file target is left alone
+// because its location no longer records the queued file, such as after a
+// folder edit renamed it. The run records the file in its checkpoint and an
+// event and finishes as partial.
+func (s *Server) skipChangedMediaCleanupFile(ctx context.Context, runID int64, target mediaCleanupTarget, checkpoint *mediaCleanupCheckpoint) (bool, error) {
+	if target.Kind != "local" {
+		return false, nil
+	}
+	currentPath, err := s.checkQueuedLocalMediaFile(ctx, queuedLocalMediaFile{
+		LocationID: target.LocationID, MediaItemID: target.MediaItemID,
+		WorkID: target.WorkID, SourceID: target.SourceID, Path: target.Path,
+	})
+	if !errors.Is(err, errLocalMediaLocationChanged) {
+		return false, err
+	}
+	changed := mediaCleanupChangedLocation{LocationID: target.LocationID, Path: target.Path, CurrentPath: currentPath}
+	if err := s.recordWorkflowRunEvent(ctx, runID, "warn", "media_cleanup.location_changed", errLocalMediaLocationChanged.Error(), changed); err != nil {
+		return false, err
+	}
+	checkpoint.ChangedLocations = append(checkpoint.ChangedLocations, changed)
+	return true, nil
+}
+
 func (s *Server) clearMediaCleanupTarget(ctx context.Context, target mediaCleanupTarget) (bool, error) {
 	switch target.Kind {
 	case "cache":
@@ -714,8 +787,8 @@ func (s *Server) clearMediaCleanupTarget(ctx context.Context, target mediaCleanu
 }
 
 func (s *Server) failMediaCleanupTarget(ctx context.Context, job workflowJobRecord, err error) error {
-	_ = s.restoreMediaCleanupFolders(ctx, job.RunID)
-	_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+	logWorkflowWriteError(ctx, "restore cleanup folders", job, s.restoreMediaCleanupFolders(ctx, job.RunID))
+	s.failJobOrLog(ctx, job, err.Error())
 	return err
 }
 
@@ -749,15 +822,18 @@ func (s *Server) finishMediaCleanupExecution(
 	finishCancelled func() error,
 ) error {
 	fileOutput := map[string]any{"locations": len(payload.Targets), "deleted": checkpoint.Deleted}
+	if len(checkpoint.ChangedLocations) > 0 {
+		fileOutput["changed_locations"] = checkpoint.ChangedLocations
+	}
 	tx, err := beginTxWithDatabaseBusyRetry(ctx, s.db)
 	if err != nil {
-		_ = s.restoreMediaCleanupFolders(ctx, job.RunID)
+		logWorkflowWriteError(ctx, "restore cleanup folders", job, s.restoreMediaCleanupFolders(ctx, job.RunID))
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 	var runStatus string
 	if err := tx.QueryRowContext(ctx, "SELECT status FROM workflow_run WHERE id = ?", job.RunID).Scan(&runStatus); err != nil {
-		_ = s.restoreMediaCleanupFolders(ctx, job.RunID)
+		logWorkflowWriteError(ctx, "restore cleanup folders", job, s.restoreMediaCleanupFolders(ctx, job.RunID))
 		return err
 	}
 	if runStatus == "cancelled" {
@@ -765,7 +841,11 @@ func (s *Server) finishMediaCleanupExecution(
 		return finishCancelled()
 	}
 	if payload.Mode == mediaCleanupFilesOnly {
-		return s.finishMediaCleanupFilesOnly(ctx, tx, job, fileOutput, finishCancelled)
+		status := "succeeded"
+		if len(checkpoint.ChangedLocations) > 0 {
+			status = "partial"
+		}
+		return s.finishMediaCleanupFilesOnly(ctx, tx, job, status, fileOutput, finishCancelled)
 	}
 	return s.finishMediaCleanupForget(ctx, tx, job, payload, checkpoint, workIDs, fileOutput, finishCancelled)
 }
@@ -774,6 +854,7 @@ func (s *Server) finishMediaCleanupFilesOnly(
 	ctx context.Context,
 	tx *sql.Tx,
 	job workflowJobRecord,
+	runStatus string,
 	fileOutput map[string]any,
 	finishCancelled func() error,
 ) error {
@@ -784,7 +865,7 @@ func (s *Server) finishMediaCleanupFilesOnly(
 	}{
 		{"UPDATE workflow_node_run SET status = 'succeeded', output_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('queued', 'running')", []any{output, job.NodeRunID}},
 		{"UPDATE workflow_job SET status = 'succeeded', progress_current = progress_total, locked_by = '', locked_at = NULL, heartbeat_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'running'", []any{job.ID}},
-		{"UPDATE workflow_run SET status = 'succeeded', summary_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('queued', 'running')", []any{output, job.RunID}},
+		{"UPDATE workflow_run SET status = ?, summary_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('queued', 'running')", []any{runStatus, output, job.RunID}},
 	}
 	for _, update := range updates {
 		affected, err := execMediaCleanupUpdate(ctx, tx, update.query, update.args...)
@@ -797,8 +878,8 @@ func (s *Server) finishMediaCleanupFilesOnly(
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		_ = s.restoreMediaCleanupFolders(ctx, job.RunID)
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		logWorkflowWriteError(ctx, "restore cleanup folders", job, s.restoreMediaCleanupFolders(ctx, job.RunID))
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	return nil
@@ -817,6 +898,7 @@ type mediaCleanupForgetResult struct {
 	purge          unlinkedWorkDeleteResult
 	forgetNodeID   int64
 	status         string
+	runStatus      string
 	forgetOutput   map[string]any
 	combinedOutput map[string]any
 }
@@ -847,6 +929,10 @@ func (s *Server) prepareMediaCleanupForget(
 	if partial {
 		status = "partial"
 	}
+	runStatus := status
+	if len(checkpoint.ChangedLocations) > 0 {
+		runStatus = "partial"
+	}
 	forgetOutput := map[string]any{
 		"forgotten_family_count": purge.DeletedFamilyCount,
 		"forgotten_work_count":   purge.DeletedWorkCount,
@@ -865,8 +951,11 @@ func (s *Server) prepareMediaCleanupForget(
 		"deleted_codes":          purge.DeletedCodes,
 		"skipped":                purge.Skipped,
 	}
+	if len(checkpoint.ChangedLocations) > 0 {
+		combinedOutput["changed_locations"] = checkpoint.ChangedLocations
+	}
 	return mediaCleanupForgetResult{
-		purge: purge, forgetNodeID: forgetNodeID, status: status,
+		purge: purge, forgetNodeID: forgetNodeID, status: status, runStatus: runStatus,
 		forgetOutput: forgetOutput, combinedOutput: combinedOutput,
 	}, nil
 }
@@ -921,7 +1010,7 @@ func (s *Server) finishMediaCleanupForget(
 			return err
 		}
 	}
-	affected, err := execMediaCleanupUpdate(ctx, tx, "UPDATE workflow_run SET status = ?, summary_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('queued', 'running')", result.status, mustJSON(result.combinedOutput), job.RunID)
+	affected, err := execMediaCleanupUpdate(ctx, tx, "UPDATE workflow_run SET status = ?, summary_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('queued', 'running')", result.runStatus, mustJSON(result.combinedOutput), job.RunID)
 	if err != nil {
 		return err
 	}
@@ -930,8 +1019,8 @@ func (s *Server) finishMediaCleanupForget(
 		return finishCancelled()
 	}
 	if err := tx.Commit(); err != nil {
-		_ = s.restoreMediaCleanupFolders(ctx, job.RunID)
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		logWorkflowWriteError(ctx, "restore cleanup folders", job, s.restoreMediaCleanupFolders(ctx, job.RunID))
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	return nil
@@ -946,6 +1035,15 @@ func (s *Server) clearLocalWorkRoot(ctx context.Context, target mediaCleanupTarg
 	// The lyrics folder's marker is never indexed, so no file target removes
 	// it; it goes with the folder that holds it.
 	if err := s.removeLyricsRootMarker(target.Path); err != nil {
+		return false, err
+	}
+	// Nor are the sidecars a NAS or operating system keeps beside the files,
+	// such as Thumbs.db or @eaDir; they go with the folder as in a merge.
+	absoluteRoot, err := validateDestructivePath(s.cfg.DataRoot, target.Path, true, true)
+	if err != nil {
+		return false, err
+	}
+	if err := s.removeWorkFolderEditMergeSidecars(absoluteRoot); err != nil {
 		return false, err
 	}
 	rootPath, err := validateDestructiveDirectoryTree(s.cfg.DataRoot, target.Path)
@@ -1013,6 +1111,15 @@ func (s *Server) markLocalWorkRootUnavailable(ctx context.Context, target mediaC
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := markLocalWorkRootUnavailableTx(ctx, tx, target); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// markLocalWorkRootUnavailableTx records in tx that a local work root and its
+// files left the library.
+func markLocalWorkRootUnavailableTx(ctx context.Context, tx *sql.Tx, target mediaCleanupTarget) error {
 	root := normalizeFolderRootPath(target.Path)
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE media_file_location
@@ -1062,9 +1169,6 @@ func (s *Server) markLocalWorkRootUnavailable(ctx context.Context, target mediaC
 			last_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE work_id = ? AND file_source_id = ? AND presence_type = 'local'
 	`, available, remainingRoot, remainingRoot, target.WorkID, target.SourceID); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
 		return err
 	}
 	return nil

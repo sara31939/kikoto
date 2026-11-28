@@ -32,12 +32,12 @@ func (s *Server) resolveWorkEntityLink(w http.ResponseWriter, r *http.Request) {
 	}
 	code := normalizeWorkCode(r.PathValue("code"))
 	if code == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work code"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work code", false)
 		return
 	}
 	request, err := decodeWorkEntityLinkRequest(r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	// Only a metadata:sync user may fetch from the provider, and only for a
@@ -47,11 +47,11 @@ func (s *Server) resolveWorkEntityLink(w http.ResponseWriter, r *http.Request) {
 	resolution, stage, err := s.resolveWorkEntityLinkRoute(r.Context(), code, request, canFetch)
 	if err != nil {
 		if stage == "metadata" {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Could not load entity metadata for this work."})
+			writeAPIError(w, http.StatusBadGateway, "upstream_unavailable", "Could not load entity metadata for this work.", true)
 			return
 		}
 		if stage == "catalog" {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Could not load the series catalog for this circle."})
+			writeAPIError(w, http.StatusBadGateway, "upstream_unavailable", "Could not load the series catalog for this circle.", true)
 			return
 		}
 		writeError(w, err)
@@ -66,7 +66,7 @@ func (s *Server) resolveWorkEntityLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("No %s link was found for this work.", request.Kind)})
+	writeAPIError(w, http.StatusNotFound, "not_found", fmt.Sprintf("No %s link was found for this work.", request.Kind), false)
 }
 
 // lookupWorkEntityLink resolves a route from already persisted relationships
@@ -75,7 +75,7 @@ func (s *Server) resolveWorkEntityLink(w http.ResponseWriter, r *http.Request) {
 func (s *Server) lookupWorkEntityLink(w http.ResponseWriter, r *http.Request) {
 	code := normalizeWorkCode(r.PathValue("code"))
 	if code == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work code"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work code", false)
 		return
 	}
 	request, err := normalizeWorkEntityLinkRequest(workEntityLinkRequest{
@@ -83,7 +83,7 @@ func (s *Server) lookupWorkEntityLink(w http.ResponseWriter, r *http.Request) {
 		Name: r.URL.Query().Get("name"),
 	})
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	if !s.requireDemoWorkCode(w, r, code) {
@@ -95,7 +95,7 @@ func (s *Server) lookupWorkEntityLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if route == "" {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("No %s link was found for this work.", request.Kind)})
+		writeAPIError(w, http.StatusNotFound, "not_found", fmt.Sprintf("No %s link was found for this work.", request.Kind), false)
 		return
 	}
 	writeJSON(w, http.StatusOK, workEntityLinkResponse{Kind: request.Kind, Route: route, Resolved: true})
@@ -123,7 +123,20 @@ type workEntityLinkResolution struct {
 	Fetched bool
 }
 
+// errAmbiguousWorkEntityLink is a name several credited voice actors of the
+// work share. It links to none of them, and a provider request cannot settle
+// it, so none is made.
+var errAmbiguousWorkEntityLink = errors.New("several credited voice actors share the name")
+
 func (s *Server) resolveWorkEntityLinkRoute(ctx context.Context, code string, request workEntityLinkRequest, canFetch bool) (workEntityLinkResolution, string, error) {
+	resolution, stage, err := s.resolveWorkEntityLinkRouteSteps(ctx, code, request, canFetch)
+	if errors.Is(err, errAmbiguousWorkEntityLink) {
+		return workEntityLinkResolution{}, "", nil
+	}
+	return resolution, stage, err
+}
+
+func (s *Server) resolveWorkEntityLinkRouteSteps(ctx context.Context, code string, request workEntityLinkRequest, canFetch bool) (workEntityLinkResolution, string, error) {
 	if route, err := s.findWorkEntityRoute(ctx, code, request); err != nil {
 		return workEntityLinkResolution{}, "", err
 	} else if route != "" {
@@ -277,13 +290,29 @@ func (s *Server) findWorkEntityRoute(ctx context.Context, code string, request w
 			))`
 			args = append(args, request.Name, request.Name)
 		}
-		query += " ORDER BY person.id ASC LIMIT 1"
-		err := s.db.QueryRowContext(ctx, query, args...).Scan(&routeKey)
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", nil
-		}
+		// Two credited voice actors may share a name; a name that matches
+		// several of them links to none rather than to a guess.
+		query += " GROUP BY person.id ORDER BY person.id ASC LIMIT 2"
+		rows, err := s.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return "", err
+		}
+		defer func() { _ = rows.Close() }()
+		matches := 0
+		for rows.Next() {
+			if err := rows.Scan(&routeKey); err != nil {
+				return "", err
+			}
+			matches++
+		}
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+		if matches > 1 {
+			return "", errAmbiguousWorkEntityLink
+		}
+		if matches == 0 {
+			return "", nil
 		}
 		return "/voices/" + url.PathEscape(routeKey), nil
 	}

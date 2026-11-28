@@ -24,6 +24,7 @@ import (
 	"github.com/yexca/kikoto/backend/internal/llm"
 	"github.com/yexca/kikoto/backend/internal/metasync"
 	"github.com/yexca/kikoto/backend/internal/proxyconfig"
+	"github.com/yexca/kikoto/backend/internal/record"
 	"github.com/yexca/kikoto/backend/internal/sqlutil"
 	"github.com/yexca/kikoto/backend/internal/storage"
 	"github.com/yexca/kikoto/backend/internal/workflow"
@@ -44,7 +45,10 @@ type Server struct {
 	accessPolicy                   *accesspolicy.Store
 	initialSetup                   initialSetupState
 	loginThrottle                  *auththrottle.Limiter
+	loginDelay                     *auththrottle.Delayer
 	libraryStore                   *library.Store
+	recordStore                    *record.Store
+	recordThumbnails               *record.Thumbnailer
 	workflowStore                  *workflow.Store
 	cfg                            config.Config
 	dlsiteEndpoints                dlsite.Endpoints
@@ -70,6 +74,7 @@ type Server struct {
 	hlsSessions                    hlsSessions
 	videoKeyframeIndexes           videoKeyframeIndexes
 	videoKeyframePrefetch          videoKeyframePrefetch
+	recordMediaDetails             recordMediaDetails
 	videoHardware                  videoHardwareState
 	mediaPreparationFailures       mediaPreparationFailures
 	loudnessMeasurements           loudnessMeasurementSlot
@@ -128,8 +133,9 @@ func NewServer(db *sqlutil.DB, cfg config.Config) *Server {
 		llmRequestSlots: make(chan struct{}, 2),
 		asrStore:        asr.NewStore(db),
 		statistics:      storage.NewStatisticsMaintainer(db),
-		db:              db, accountStore: account.NewStore(db), accessPolicy: accesspolicy.NewStore(db), libraryStore: library.NewStore(db), workflowStore: workflow.NewStore(db), cfg: cfg,
+		db:              db, accountStore: account.NewStore(db), accessPolicy: accesspolicy.NewStore(db), libraryStore: library.NewStore(db), recordStore: record.NewStore(db, cfg.RecordRoot, record.WithProber(record.FFprobe)), workflowStore: workflow.NewStore(db), cfg: cfg,
 		loginThrottle:                  auththrottle.New(),
+		loginDelay:                     auththrottle.NewDelayer(loginAccountDelayPolicy),
 		dlsiteEndpoints:                dlsiteEndpoints,
 		metadataCoordinator:            metasync.NewCoordinator(),
 		metadataPreviews:               map[string]metadataPreviewRecord{},
@@ -148,6 +154,7 @@ func NewServer(db *sqlutil.DB, cfg config.Config) *Server {
 		appUpdateEndpoints:             defaultAppUpdateEndpoints(),
 		lifetime:                       newServerLifetime(),
 	}
+	server.recordThumbnails = server.newRecordThumbnailer(record.FFmpeg)
 	server.proxyConfig = &proxyConfigStore{load: server.loadProxyConfig}
 	server.metadataTransport = newMetadataTransport(dlsiteEndpoints, func(ctx context.Context) (proxyRoute, error) {
 		return server.resolveProxyRoute(ctx, proxyconfig.ScopeDLsite, 0)
@@ -200,6 +207,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/setup", s.completeInitialSetup)
 	mux.HandleFunc("PATCH /api/access-policy", s.updateAccessPolicy)
 	mux.HandleFunc("GET /api/notifications", s.listNotifications)
+	mux.HandleFunc("GET /api/notifications/summary", s.notificationSummary)
 	mux.HandleFunc("POST /api/notifications/clear-succeeded", s.clearSucceededNotifications)
 	mux.HandleFunc("DELETE /api/notifications/{id}", s.dismissNotification)
 	mux.HandleFunc("GET /api/remote-track-runs/{id}", s.getRemoteTrackRunStatus)
@@ -215,6 +223,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/works/{id}", s.getWork)
 	mux.HandleFunc("GET /api/works/{id}/recommendation", s.getWorkRecommendation)
 	mux.HandleFunc("GET /api/works/{id}/playback-cursor", s.getWorkPlaybackCursor)
+	mux.HandleFunc("GET /api/works/{id}/resume-queue", s.getWorkResumeQueue)
+	mux.HandleFunc("POST /api/playback/queue/resolve", s.resolvePlaybackQueue)
 	mux.HandleFunc("POST /api/recommendation-events", s.recordRecommendationEvents)
 	mux.HandleFunc("GET /api/recommendation-telemetry", s.getRecommendationTelemetry)
 	mux.HandleFunc("POST /api/for-you/draw", s.drawForYou)
@@ -254,18 +264,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/works/{id}/metadata-tags", s.setWorkMetadataTags)
 	mux.HandleFunc("GET /api/works/{id}/manual-overrides", s.getWorkManualOverrides)
 	mux.HandleFunc("PATCH /api/works/{id}/manual-overrides", s.updateWorkManualOverrides)
-	mux.HandleFunc("PUT /api/works/{id}/llm-translation", s.applyLLMTranslation)
-	mux.HandleFunc("POST /api/works/{id}/llm-precheck", s.precheckLLMWork)
-	mux.HandleFunc("GET /api/works/{id}/llm-lyrics-translations", s.listLLMLyricsTranslations)
-	mux.HandleFunc("GET /api/works/{id}/llm-previews/{preview}/lyrics", s.llmPreviewLyricsText)
-	mux.HandleFunc("POST /api/llm/lyrics-assets/{asset}/publish", s.retryLLMLyricsPublication)
-	mux.HandleFunc("GET /api/works/{id}/llm-reviews", s.listLLMReviews)
 	mux.HandleFunc("GET /api/works/{id}/llm-translations", s.listLLMTranslations)
 	mux.HandleFunc("POST /api/works/{id}/llm-reviews/{review}/restore", s.restoreLLMTranslation)
-	mux.HandleFunc("DELETE /api/works/{id}/llm-previews/{preview}", s.rejectLLMPreview)
 	mux.HandleFunc("DELETE /api/works/{id}/llm-translations/{language}/{field}", s.revokeLLMTranslation)
 	mux.HandleFunc("GET /api/works/{id}/ai-translation", s.getAITranslationPlan)
 	mux.HandleFunc("POST /api/works/{id}/ai-translation", s.createAITranslation)
+	mux.HandleFunc("POST /api/translation/batch", s.createAITranslationBatch)
 	mux.HandleFunc("GET /api/translation/items", s.listTranslationItems)
 	mux.HandleFunc("GET /api/translation/items/{id}/text", s.translationItemText)
 	mux.HandleFunc("POST /api/translation/items/accept", s.acceptTranslationItems)
@@ -361,8 +365,30 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/voices/{personId}/tags", s.setVoiceUserTags)
 	mux.HandleFunc("GET /api/assets/covers/", s.getCoverAsset)
 	mux.HandleFunc("GET /api/assets/manual/{file}", s.getManualAsset)
+	recordRoute := s.whenRecordLibraryEnabled
+	mux.HandleFunc("GET /api/records", recordRoute(s.getRecordRoot))
+	mux.HandleFunc("POST /api/records/root/initialize", recordRoute(s.initializeRecordRoot))
+	mux.HandleFunc("POST /api/records/root/restore-marker", recordRoute(s.restoreRecordMarker))
+	mux.HandleFunc("GET /api/records/tree", recordRoute(s.listRecordTree))
+	mux.HandleFunc("GET /api/records/assets/{id}", recordRoute(s.getRecordAsset))
+	mux.HandleFunc("GET /api/records/assets/{id}/siblings", recordRoute(s.getRecordAssetSiblings))
+	mux.HandleFunc("DELETE /api/records/assets/{id}", recordRoute(s.deleteRecordAsset))
+	handleSlowFirstResponse("GET /api/records/assets/{id}/stream", recordRoute(s.endsOnShutdown(s.streamRecordAsset)))
+	mux.HandleFunc("GET /api/records/folders/{id}/artwork/{role}", recordRoute(s.serveRecordArtwork))
+	mux.HandleFunc("DELETE /api/records/folders/{id}", recordRoute(s.deleteRecordFolder))
+	handleSlowFirstResponse("POST /api/records/scans", recordRoute(s.scanRecords))
+	mux.HandleFunc("POST /api/records/probes", recordRoute(s.probeRecords))
+	mux.HandleFunc("GET /api/records/assets/{id}/progress", recordRoute(s.getRecordProgress))
+	mux.HandleFunc("PUT /api/records/assets/{id}/progress", recordRoute(s.updateRecordProgress))
+	mux.HandleFunc("GET /api/records/continue", recordRoute(s.listRecordContinue))
+	handleSlowFirstResponse("GET /api/records/assets/{id}/thumbnail", recordRoute(s.endsOnShutdown(s.serveRecordThumbnail)))
+	mux.HandleFunc("GET /api/records/assets/{id}/subtitle", recordRoute(s.serveRecordSubtitle))
+	mux.HandleFunc("GET /api/records/assets/{id}/playback", recordRoute(s.getRecordPlaybackInfo))
+	handleSlowFirstResponse("GET /api/records/assets/{id}/hls/{file}", recordRoute(s.endsOnShutdown(s.serveRecordHLS)))
+	handleSlowFirstResponse("GET /api/records/assets/{id}/subtitles/{file}", recordRoute(s.serveRecordEmbeddedSubtitle))
+	handleSlowFirstResponse("GET /api/records/assets/{id}/download", recordRoute(s.endsOnShutdown(s.downloadRecordAsset)))
 	handleSlowFirstResponse("GET /api/media/{id}/stream", s.endsOnShutdown(s.streamMedia))
-	mux.HandleFunc("GET /api/media/{id}/playback", s.getVideoPlaybackInfo)
+	mux.HandleFunc("GET /api/media/{id}/playback", s.getMediaPlaybackInfo)
 	mux.HandleFunc("GET /api/media/{id}/loudness", s.getMediaLoudness)
 	handleSlowFirstResponse("GET /api/media/{id}/hls/{file}", s.endsOnShutdown(s.serveMediaHLS))
 	handleSlowFirstResponse("GET /api/media/{id}/subtitles/{file}", s.serveVideoSubtitle)
@@ -370,6 +396,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/media/{id}/cache", s.deleteMediaCacheLocation)
 	mux.HandleFunc("DELETE /api/media/{id}/local", s.deleteMediaLocalLocation)
 	mux.HandleFunc("POST /api/media/cleanup", s.cleanupMediaLocations)
+	handleSlowFirstResponse("GET /api/maintenance/local-works/cleanup", s.listLocalWorkCleanup)
+	handleSlowFirstResponse("POST /api/maintenance/local-works/cleanup", s.cleanupLocalWorks)
 	handleSlowFirstResponse("GET /api/cache/overview", s.getCacheOverview)
 	handleSlowFirstResponse("GET /api/maintenance/database", s.getDatabaseMaintenance)
 	handleSlowFirstResponse("POST /api/maintenance/database/cleanup", s.cleanupDatabase)
@@ -393,6 +421,7 @@ func (s *Server) Routes() http.Handler {
 	handleSlowFirstResponse("DELETE /api/cache/transcodes", s.clearTranscodeCache)
 	mux.HandleFunc("GET /api/media/{id}/asset", s.serveMediaAsset)
 	mux.HandleFunc("GET /api/media/{id}/text", s.serveMediaText)
+	mux.HandleFunc("POST /api/lyrics/parse", s.parseLyricsText)
 	mux.HandleFunc("GET /api/media/{id}/download", s.downloadMedia)
 	mux.HandleFunc("PATCH /api/media-items/{id}/progress", s.updateMediaProgress)
 	mux.HandleFunc("GET /api/auth/me/preferences", s.getUserPreferences)
@@ -424,6 +453,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PATCH /api/file-sources/{id}", s.updateFileSource)
 	mux.HandleFunc("DELETE /api/file-sources/{id}", s.deleteFileSource)
 	mux.HandleFunc("POST /api/file-sources/{id}/health-check", s.checkFileSourceHealth)
+	mux.HandleFunc("PUT /api/file-sources/{id}/presence-check", s.updateSourcePresenceCheck)
 	handleSlowFirstResponse("GET /api/remote-sources/{id}/works", s.listRemoteSourceWorks)
 	mux.HandleFunc("POST /api/remote-sources/{id}/recommendations", s.scoreRemoteRecommendations)
 	handleSlowFirstResponse("GET /api/remote-sources/{id}/works/{code}", s.getRemoteSourceWork)
@@ -440,6 +470,7 @@ func (s *Server) Routes() http.Handler {
 	handleSlowFirstResponse("POST /api/remote-sources/{id}/works/{code}/cache", s.cacheRemoteSourceWorkMedia)
 	handleSlowFirstResponse("DELETE /api/works/{id}/tracked-sources/{sourceId}", s.untrackWorkSource)
 	mux.HandleFunc("GET /api/workflow-definitions", s.listWorkflowDefinitions)
+	mux.HandleFunc("GET /api/workflow-status", s.listWorkflowStatuses)
 	mux.HandleFunc("GET /api/workflow-presets", s.listWorkflowPresets)
 	mux.HandleFunc("POST /api/workflow-presets/{code}/runs", s.runWorkflowPreset)
 	mux.HandleFunc("GET /api/workflow-triggers", s.listWorkflowTriggers)
@@ -631,6 +662,9 @@ func (s *Server) RecoverInterruptedWorkflows(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.settleInterruptedWorkflowRuns(ctx, "startup interrupted before completion"); err != nil {
+		return err
+	}
+	if err := s.failUnrunnableWorkflowGraphRuns(ctx); err != nil {
 		return err
 	}
 	if err := s.reconcileRemoteFetchManifests(ctx); err != nil {

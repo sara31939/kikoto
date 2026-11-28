@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/yexca/kikoto/backend/internal/accesspolicy"
 	"github.com/yexca/kikoto/backend/internal/config"
 )
 
@@ -30,7 +31,25 @@ func (s *Server) anonymousAccessMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if s.anonymousAccessEnabled() && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		if s.anonymousAccessEnabled() && (r.Method == http.MethodGet || r.Method == http.MethodHead || playbackQueueResolveRequest(r)) {
+			// Remote-derived content can reveal the remote configuration,
+			// so without anonymous remote browsing a visitor reaches local
+			// content only (see anonymous_local_only.go).
+			if !s.accessPolicy.Current().AnonymousRemoteBrowsingEnabled {
+				refused := localOnlyRefusedPath(r.URL.Path)
+				if !refused {
+					var err error
+					if refused, err = s.localOnlyMediaRefused(r); err != nil {
+						writeError(w, err)
+						return
+					}
+				}
+				if refused {
+					writeAPIError(w, http.StatusUnauthorized, "authentication_required", "sign in to browse remote sources", false)
+					return
+				}
+				r = r.WithContext(withLocalOnly(r.Context()))
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -62,17 +81,21 @@ func (s *Server) updateAccessPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if mode := s.cfg.RuntimeMode(); mode != config.ModeProduction && mode != config.ModeDevelopment {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "anonymous access is not configurable in demo mode"})
+		writeAPIError(w, http.StatusConflict, "conflict", "anonymous access is not configurable in demo mode", false)
 		return
 	}
 	var payload struct {
-		AnonymousAccessEnabled *bool `json:"anonymousAccessEnabled"`
+		AnonymousAccessEnabled         *bool `json:"anonymousAccessEnabled"`
+		AnonymousRemoteBrowsingEnabled *bool `json:"anonymousRemoteBrowsingEnabled"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.AnonymousAccessEnabled == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "anonymousAccessEnabled is required"})
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.AnonymousAccessEnabled == nil && payload.AnonymousRemoteBrowsingEnabled == nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "anonymousAccessEnabled or anonymousRemoteBrowsingEnabled is required", false)
 		return
 	}
-	policy, err := s.accessPolicy.Update(r.Context(), actor.ID, *payload.AnonymousAccessEnabled)
+	policy, err := s.accessPolicy.UpdatePolicy(r.Context(), actor.ID, accesspolicy.PolicyUpdate{
+		AnonymousAccessEnabled:         payload.AnonymousAccessEnabled,
+		AnonymousRemoteBrowsingEnabled: payload.AnonymousRemoteBrowsingEnabled,
+	})
 	if err != nil {
 		writeError(w, err)
 		return

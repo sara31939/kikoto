@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yexca/kikoto/backend/internal/filesource"
 	"github.com/yexca/kikoto/backend/internal/kikoeru"
 )
 
@@ -49,7 +50,7 @@ type sourceAvailabilityCheckRequest struct {
 func (s *Server) getWorkSourceAvailability(w http.ResponseWriter, r *http.Request) {
 	code := strings.ToUpper(strings.TrimSpace(r.PathValue("code")))
 	if code == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "work code is required"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "work code is required", false)
 		return
 	}
 	if !s.requireDemoWorkCode(w, r, code) {
@@ -85,14 +86,16 @@ func (s *Server) checkWorkSourceAvailabilityNow(w http.ResponseWriter, r *http.R
 	}
 	code := strings.ToUpper(strings.TrimSpace(r.PathValue("code")))
 	if code == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "work code is required"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "work code is required", false)
 		return
 	}
 	if !s.requireDemoWorkCode(w, r, code) || refuseCustomWorkCode(w, code) {
 		return
 	}
 	var payload sourceAvailabilityCheckRequest
-	_ = json.NewDecoder(r.Body).Decode(&payload)
+	if !decodeOptionalJSONBody(w, r, &payload) {
+		return
+	}
 	response, err := s.checkWorkSourceAvailabilityForSources(r.Context(), code, payload.SourceID, "manual", "work_detail_source_check")
 	if err != nil {
 		writeError(w, err)
@@ -157,20 +160,18 @@ func (s *Server) checkOneWorkSourceAvailability(ctx context.Context, source remo
 		if errors.Is(err, errRemoteWorkNotFound) {
 			result.Status = "not_found"
 			result.Error = "work was not found"
-			_ = s.updateSourceHealth(ctx, source.ID, "healthy")
+			s.setSourceHealthOrLog(ctx, source.ID, "healthy")
 			return result, s.attachSourceAvailabilityFlags(ctx, &result, source.ID, code)
 		}
+		// Anything else, such as a lookup answered 404 whose listing fallback
+		// failed, leaves the question open.
 		result.Status = "error"
 		result.Error = "remote source request failed"
-		if isNotFoundLikeError(err) {
-			result.Status = "not_found"
-			result.Error = "work was not found"
-		}
 		slog.Warn("remote source availability check failed", "source_id", source.ID, "work_code", code, "error", err)
-		_ = s.updateSourceHealth(ctx, source.ID, "unavailable")
+		s.setSourceHealthOrLog(ctx, source.ID, "unavailable")
 		return result, s.attachSourceAvailabilityFlags(ctx, &result, source.ID, code)
 	}
-	_ = s.updateSourceHealth(ctx, source.ID, "healthy")
+	s.setSourceHealthOrLog(ctx, source.ID, "healthy")
 	workCode := normalizedRemoteWorkCode(remoteWork)
 	if workCode == "" {
 		workCode = code
@@ -210,17 +211,17 @@ func (s *Server) healthyRemoteSourceIDsForAvailability(ctx context.Context, only
 			continue
 		}
 		if strings.TrimSpace(source.Endpoint.APIURL) == "" {
-			_ = s.updateSourceHealth(ctx, source.ID, "unavailable")
+			s.setSourceHealthOrLog(ctx, source.ID, "unavailable")
 			continue
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err := s.checkRemoteSourceHealthWithClass(checkCtx, source, sourceRequestCrawl)
 		cancel()
 		if err != nil {
-			_ = s.updateSourceHealth(ctx, source.ID, "unavailable")
+			s.setSourceHealthOrLog(ctx, source.ID, "unavailable")
 			continue
 		}
-		_ = s.updateSourceHealth(ctx, source.ID, "healthy")
+		s.setSourceHealthOrLog(ctx, source.ID, "healthy")
 		healthy[source.ID] = true
 	}
 	return healthy, nil
@@ -355,55 +356,23 @@ func (s *Server) attachSourceAvailabilityFlags(ctx context.Context, result *sour
 	return nil
 }
 
+// loadRemoteSourcesForAvailability lists the remote sources by priority. A
+// source whose stored settings cannot be decoded is left out, as no request
+// may run on it; remoteSourceForUseFrom logs it.
 func (s *Server) loadRemoteSourcesForAvailability(ctx context.Context) ([]remoteSourceForUse, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT source.id, source.code, source.display_name, source.source_type, source.enabled, source.config_json,
-			COALESCE(endpoint.api_url, ''), COALESCE(endpoint.base_url, ''), COALESCE(endpoint.fallback_url, ''),
-			COALESCE(endpoint.work_url_template, ''), COALESCE(endpoint.restrict_outbound_hosts, 0),
-			COALESCE(endpoint.allowed_host_patterns_json, '[]')
-		FROM file_source AS source
-		LEFT JOIN file_source_endpoint AS endpoint ON endpoint.file_source_id = source.id
-		WHERE source.source_type IN ('kikoeru_compatible', 'kikoeru_compatible_number178')
-		ORDER BY source.priority ASC, source.id ASC
-	`)
+	records, err := filesource.List(ctx, s.db, filesource.RemoteSources)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	sources := []remoteSourceForUse{}
-	for rows.Next() {
-		var source remoteSourceForUse
-		var configJSON, allowedHostPatternsJSON string
-		if err := rows.Scan(
-			&source.ID,
-			&source.Code,
-			&source.DisplayName,
-			&source.SourceType,
-			&source.Enabled,
-			&configJSON,
-			&source.Endpoint.APIURL,
-			&source.Endpoint.BaseURL,
-			&source.Endpoint.FallbackURL,
-			&source.Endpoint.WorkURLTemplate,
-			&source.Endpoint.RestrictOutboundHosts,
-			&allowedHostPatternsJSON,
-		); err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(source.Endpoint.APIURL) == "" {
-			source.Endpoint.APIURL = source.Endpoint.BaseURL
-		}
-		if strings.TrimSpace(configJSON) != "" {
-			_ = json.Unmarshal([]byte(configJSON), &source.Config)
-		}
-		normalizeFileSourceConfig(&source.Config, source.SourceType)
-		_ = json.Unmarshal([]byte(allowedHostPatternsJSON), &source.Endpoint.AllowedHostPatterns)
-		if source.Endpoint.AllowedHostPatterns == nil {
-			source.Endpoint.AllowedHostPatterns = []string{}
+	sources := make([]remoteSourceForUse, 0, len(records))
+	for _, record := range records {
+		source, err := remoteSourceForUseFrom(record)
+		if err != nil {
+			continue
 		}
 		sources = append(sources, source)
 	}
-	return sources, rows.Err()
+	return sources, nil
 }
 
 func (s *Server) checkRemoteWorkAvailabilityWithClass(ctx context.Context, source remoteSourceForUse, code string, class sourceRequestClass) (kikoeru.Work, error) {
@@ -507,8 +476,17 @@ func (s *Server) recordAvailabilityPresence(ctx context.Context, tx *sql.Tx, cod
 			availability = "missing"
 		case "disabled":
 			availability = "disabled"
-		case "error", "unavailable":
+		case "unavailable":
 			availability = "unavailable"
+		case "error":
+			// A failed lookup, timeout, or program error is no answer about
+			// the work: the stored presence keeps what the source last said.
+			// Only the time it was asked advances, so a presence check moves
+			// on to works it asked longest ago.
+			if err := touchFailedSourcePresenceCheck(ctx, tx, workID, result.SourceID); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := upsertWorkSourcePresence(ctx, tx, workSourcePresence{
 			WorkID:       workID,
@@ -532,102 +510,15 @@ func (s *Server) recordAvailabilityPresence(ctx context.Context, tx *sql.Tx, cod
 	return nil
 }
 
-func (s *Server) runSourceChangeAvailabilityChecks(ctx context.Context, sourceID int64, reason string) {
-	healthySourceIDs, err := s.healthyRemoteSourceIDsForAvailability(ctx, sourceID)
-	if err != nil || len(healthySourceIDs) == 0 {
-		return
-	}
-	codes, err := s.localWorkCodesNeedingRemoteAvailability(ctx, sourceID, 0, 100)
-	if err != nil {
-		return
-	}
-	seen := map[string]bool{}
-	for _, rawCode := range codes {
-		code := strings.ToUpper(strings.TrimSpace(rawCode))
-		if code == "" || seen[code] {
-			continue
-		}
-		seen[code] = true
-		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		_, _ = s.checkWorkSourceAvailabilityForSourcesWithHealth(checkCtx, code, sourceID, healthySourceIDs, "source_poll", reason)
-		cancel()
-	}
-}
-
-func (s *Server) localWorkCodesNeedingRemoteAvailability(ctx context.Context, sourceID int64, staleAfter time.Duration, limit int) ([]string, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	staleCutoff := time.Now().UTC().Add(-staleAfter).Format("2006-01-02 15:04:05")
-	query := `
-		SELECT DISTINCT work.primary_code
-		FROM work
-		WHERE work.primary_code <> ''
-			AND EXISTS (
-				SELECT 1
-				FROM work_source_presence AS local_presence
-				WHERE local_presence.work_id = work.id
-					AND local_presence.presence_type = 'local'
-					AND local_presence.availability = 'available'
-			)
-			AND (
-	`
-	args := []any{}
-	if sourceID > 0 {
-		query += `
-				NOT EXISTS (
-					SELECT 1 FROM work_source_presence AS presence
-					WHERE presence.work_id = work.id
-						AND presence.file_source_id = ?
-						AND presence.presence_type = ?
-				)
-				OR EXISTS (
-					SELECT 1 FROM work_source_presence AS presence
-					WHERE presence.work_id = work.id
-						AND presence.file_source_id = ?
-						AND presence.presence_type = ?
-				)
-		`
-		args = append(args, sourceID, sourcePresenceTypeRemoteSource, sourceID, sourcePresenceTypeRemoteSource)
-	} else {
-		query += `
-				NOT EXISTS (
-					SELECT 1 FROM work_source_presence AS presence
-					WHERE presence.work_id = work.id
-						AND presence.presence_type = ?
-				)
-		`
-		args = append(args, sourcePresenceTypeRemoteSource)
-		if staleAfter > 0 {
-			query += `
-				OR EXISTS (
-					SELECT 1 FROM work_source_presence AS presence
-					WHERE presence.work_id = work.id
-						AND presence.presence_type = ?
-						AND (presence.last_checked_at IS NULL OR presence.last_checked_at < ?)
-				)
-			`
-			args = append(args, sourcePresenceTypeRemoteSource, staleCutoff)
-		}
-	}
-	query += `
-			)
-		ORDER BY work.updated_at DESC, work.id DESC
-		LIMIT ?
-	`
-	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	codes := []string{}
-	for rows.Next() {
-		var code string
-		if err := rows.Scan(&code); err != nil {
-			return nil, err
-		}
-		codes = append(codes, code)
-	}
-	return codes, rows.Err()
+// touchFailedSourcePresenceCheck records that a source was asked about a work
+// without an answer. A stored presence keeps its availability; a work never
+// answered for gets an `unknown` presence.
+func touchFailedSourcePresenceCheck(ctx context.Context, tx *sql.Tx, workID, sourceID int64) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO work_source_presence (work_id, file_source_id, presence_type, availability, last_checked_at)
+		VALUES (?, ?, ?, 'unknown', CURRENT_TIMESTAMP)
+		ON CONFLICT(work_id, file_source_id, presence_type) DO UPDATE SET
+			last_checked_at = CURRENT_TIMESTAMP
+	`, workID, sourceID, sourcePresenceTypeRemoteSource)
+	return err
 }

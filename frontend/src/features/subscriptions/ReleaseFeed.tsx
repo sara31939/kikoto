@@ -25,6 +25,7 @@ import { dateTimeFormat } from "@/i18n/format";
 import { useLocale } from "@/i18n/LocaleProvider";
 import { api, type ReleaseFeedFamily, type ReleaseFeedPage, type Work } from "@/lib/api";
 import { openCircleRoute } from "@/lib/circleNavigationState";
+import { startLoad } from "@/lib/effectScope";
 import { shownWorkSourcePresence, type ShownWorksSourceCheck } from "@/lib/shownWorksSourceCheck";
 
 import {
@@ -32,7 +33,9 @@ import {
   primaryReleaseEvent,
   RELEASE_FEED_SEEN_EVENT,
   releaseEventLabel,
+  releaseEventLabelled,
   releaseFeedSources,
+  type ReleaseFeedCardCredits,
   type ReleaseFeedDay,
 } from "./subscriptionModel";
 
@@ -171,9 +174,7 @@ export function ReleaseFeed({
   );
 
   useEffect(() => {
-    const controller = new AbortController();
-    void load(controller.signal);
-    return () => controller.abort();
+    return startLoad((signal) => load(signal));
     // A new reloadKey reads the feed again.
   }, [load, reloadKey]);
 
@@ -250,13 +251,13 @@ export function ReleaseFeed({
     return (group.date.getFullYear() === thisYear ? dayFormat : yearDayFormat).format(group.date);
   };
 
-  const card = (family: ReleaseFeedFamily) => {
+  const card = (family: ReleaseFeedFamily, view: WorkCardViewModel) => {
     const event = primaryReleaseEvent(family);
     const code = releaseFeedCode(family);
     return (
       <LayoutWorkCard
         layout={cardLayout}
-        work={releaseFeedCardView(family, t("workCard.unknownCircle"), sourceCheck)}
+        work={view}
         canOpen={!demo}
         onOpen={() => onOpenWork(code)}
         onCircleOpen={demo ? undefined : (externalId: string) => openCircleRoute(externalId)}
@@ -303,15 +304,23 @@ export function ReleaseFeed({
               className={workCollectionClassName()}
               style={workCollectionStyle(mobileColumns, desktopColumns, cardLayout)}
             >
-              {group.families.map((family) => (
-                <WorkCardContextItem
-                  key={family.key}
-                  label={releaseFeedTitle(family)}
-                  context={<ReleaseFeedContext family={family} />}
-                >
-                  {card(family)}
-                </WorkCardContextItem>
-              ))}
+              {group.families.map((family) => {
+                const view = releaseFeedCardView(family, t("workCard.unknownCircle"), sourceCheck);
+                return (
+                  <WorkCardContextItem
+                    key={family.key}
+                    label={releaseFeedTitle(family)}
+                    context={
+                      <ReleaseFeedContext
+                        family={family}
+                        credits={{ circle: view.circle, voices: (view.voiceActors ?? []).slice(0, 2) }}
+                      />
+                    }
+                  >
+                    {card(family, view)}
+                  </WorkCardContextItem>
+                );
+              })}
             </ol>
           </section>
         );
@@ -332,14 +341,17 @@ function releaseFeedTitle(family: ReleaseFeedFamily) {
   return family.work?.title || family.fallback.title || family.fallback.code;
 }
 
-/** What happened to a family and through which subscription, above its card. */
-function ReleaseFeedContext({ family }: { family: ReleaseFeedFamily }) {
+/**
+ * Above a family's card: the unread dot, the event when it is more than a new
+ * release, and the subscriptions the card's credit line does not already name.
+ */
+function ReleaseFeedContext({ family, credits }: { family: ReleaseFeedFamily; credits: ReleaseFeedCardCredits }) {
   const { t } = useTranslation();
   const event = primaryReleaseEvent(family);
   return (
-    <WorkCardContextStrip detail={releaseFeedSources(family, t).join(" · ")}>
+    <WorkCardContextStrip detail={releaseFeedSources(family, t, credits).join(" · ")}>
       {family.unread && <WorkCardUnreadDot label={t("subscriptions.feed.unread")} />}
-      {event && (
+      {releaseEventLabelled(event) && (
         <WorkCardStatusBadge tone={event.type === "available" ? "success" : "neutral"}>
           {releaseEventLabel(event, t)}
         </WorkCardStatusBadge>

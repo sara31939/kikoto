@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { MediaItem, RemoteTrack, WorkProgressSummary } from "@/lib/api";
+import type { MediaItem, MediaLyricsChoice, RemoteTrack } from "@/lib/api";
 import {
-  buildWorkResumeQueue,
   buildRemoteTree,
   buildTree,
   directoryLyricsAttachments,
@@ -12,14 +11,28 @@ import {
   formatDuration,
   formatTrackDuration,
   remoteSelectablePaths,
-  toPreferredPlayerTrack,
+  toPlayerTrack,
   toRemotePreviewPlayerTrack,
   treePathForTrack,
   treeStats,
 } from "./mediaTreeModel";
 
-function localMediaItem(id: number, kind: "audio" | "text", path: string): MediaItem {
+/** An item whose local location carries the lyrics choices the server ranks for it. */
+function withLyricsChoices(item: MediaItem, lyricsChoices: MediaLyricsChoice[]): MediaItem {
+  return { ...item, locations: item.locations.map((location) => ({ ...location, lyricsChoices })) };
+}
+
+/** The work folder the fixtures' files lie in, as the server names it on their locations. */
+const exampleFolder = { id: 1, root: "library/RJ00000000" };
+
+function localMediaItem(
+  id: number,
+  kind: "audio" | "text",
+  path: string,
+  folder: { id: number; root: string } = exampleFolder,
+): MediaItem {
   const pathParts = path.split("/");
+  const inFolder = path.startsWith(`${folder.root}/`);
   return {
     id,
     parentId: null,
@@ -40,6 +53,7 @@ function localMediaItem(id: number, kind: "audio" | "text", path: string): Media
         fileSourceName: "Local",
         locationType: "local",
         path,
+        ...(inFolder ? { folderId: folder.id, relativePath: path.slice(folder.root.length + 1) } : {}),
         streamUrl: kind === "audio" ? `/api/media/${id + 100}/stream` : "",
         downloadUrl: "",
         remoteHash: "",
@@ -65,7 +79,7 @@ describe("mediaTreeModel", () => {
     expect(formatTrackDuration(null)).toBe("");
   });
 
-  it("builds a local tree for one selected source and keeps alternate playback locations", () => {
+  it("builds a local tree for one selected source and keeps the server's playback locations", () => {
     const item = {
       id: 11,
       title: "01.mp3",
@@ -80,6 +94,8 @@ describe("mediaTreeModel", () => {
           fileSourceName: "Local",
           locationType: "local",
           path: "library/RJ00000001/audio/01.mp3",
+          folderId: 1,
+          relativePath: "audio/01.mp3",
           streamUrl: "/api/media/21/stream",
           downloadUrl: "",
           availability: "available",
@@ -99,9 +115,27 @@ describe("mediaTreeModel", () => {
           durationSeconds: 90,
         },
       ],
+      playbackLocations: [
+        {
+          locationId: 21,
+          locationType: "local",
+          streamUrl: "/api/media/21/stream",
+          sourceId: 1,
+          sourceName: "Local",
+          availability: "available",
+        },
+        {
+          locationId: 22,
+          locationType: "cache",
+          streamUrl: "/api/media/22/stream",
+          sourceId: 1,
+          sourceName: "Cache",
+          availability: "available",
+        },
+      ],
     } as MediaItem;
 
-    const tree = buildTree([item], 1, "RJ00000001");
+    const tree = buildTree([item], 1);
     const tracks = flattenTracks(tree);
 
     expect(tracks).toHaveLength(1);
@@ -117,7 +151,6 @@ describe("mediaTreeModel", () => {
         localMediaItem(2, "audio", "library/RJ00000000/Bonus/02.mp3"),
       ],
       1,
-      "RJ00000000",
     );
     const track = flattenTracks(tree).find((candidate) => candidate.locationId === 101);
 
@@ -132,7 +165,6 @@ describe("mediaTreeModel", () => {
         localMediaItem(2, "audio", "library/RJ00000000/Folder/Inner/Sub/02.mp3"),
       ],
       1,
-      "RJ00000000",
     );
     const track = flattenTracks(tree).find((candidate) => candidate.locationId === 102);
 
@@ -163,7 +195,6 @@ describe("mediaTreeModel", () => {
         ),
       ],
       1,
-      "RJ00000000",
     );
     const main = tree.children.get("Main");
     expect(main?.displayName).toBe("本篇");
@@ -184,189 +215,10 @@ describe("mediaTreeModel", () => {
   });
 
   it("returns the root path for a root file and falls back to its location id", () => {
-    const tree = buildTree([localMediaItem(1, "audio", "library/RJ00000000/root.mp3")], 1, "RJ00000000");
+    const tree = buildTree([localMediaItem(1, "audio", "library/RJ00000000/root.mp3")], 1);
 
     expect(treePathForTrack(tree, { playbackKey: "location:missing", locationId: 101 })).toEqual([]);
     expect(treePathForTrack(tree, { playbackKey: "location:missing", locationId: 999 })).toBeNull();
-  });
-
-  it("selects the best available location for work-level playback", () => {
-    const item = {
-      id: 11,
-      title: "01.mp3",
-      kind: "audio",
-      fingerprint: "fingerprint",
-      durationSeconds: 90,
-      progress: null,
-      locations: [
-        {
-          id: 31,
-          fileSourceId: 2,
-          fileSourceName: "Remote",
-          locationType: "remote_stream",
-          path: "remote/01.mp3",
-          streamUrl: "/remote/01",
-          downloadUrl: "",
-          availability: "remote",
-          sizeBytes: 1024,
-          durationSeconds: 90,
-        },
-        {
-          id: 21,
-          fileSourceId: 1,
-          fileSourceName: "Local",
-          locationType: "local",
-          path: "library/RJ00000001/audio/01.mp3",
-          streamUrl: "/api/media/21/stream",
-          downloadUrl: "",
-          availability: "available",
-          sizeBytes: 1024,
-          durationSeconds: 90,
-        },
-      ],
-    } as MediaItem;
-    const work = {
-      id: 7,
-      primaryCode: "RJ00000001",
-      title: "Work",
-      coverUrl: "",
-      circle: "Circle",
-      mediaItems: [item],
-    } as Parameters<typeof toPreferredPlayerTrack>[1];
-    const track = flattenTracks(buildTree([item], null, work.primaryCode))[0];
-
-    expect(toPreferredPlayerTrack(track, work, "/api/assets/covers/origin.jpg")).toMatchObject({
-      locationId: 21,
-      locationType: "local",
-      streamUrl: "/api/media/21/stream",
-      coverUrl: "/api/assets/covers/origin.jpg",
-    });
-  });
-
-  it("proxies tracked remote audio and video locations through the backend", () => {
-    const item = {
-      id: 31,
-      title: "clip.avi",
-      kind: "video",
-      hasAudio: true,
-      fingerprint: "tracked-remote-video",
-      durationSeconds: 30,
-      progress: null,
-      locations: [
-        {
-          id: 41,
-          fileSourceId: 9,
-          fileSourceName: "Remote",
-          locationType: "remote_stream",
-          path: "bonus/clip.avi",
-          streamUrl: "https://media.invalid/clip.avi",
-          downloadUrl: "",
-          availability: "remote",
-          sizeBytes: 2048,
-          durationSeconds: 30,
-        },
-      ],
-    } as MediaItem;
-    const file = flattenTracks(buildTree([item], null, "RJ00000001"))[0];
-    expect(file.streamUrl).toBe("/api/media/41/stream");
-    expect(file.locations[0]?.streamUrl).toBe("/api/media/41/stream");
-  });
-
-  it("uses the tracked media proxy when only a remote download URL is present", () => {
-    const item = {
-      id: 32,
-      title: "clip.avi",
-      kind: "video",
-      hasAudio: true,
-      fingerprint: "tracked-remote-download-only",
-      durationSeconds: 30,
-      progress: null,
-      locations: [
-        {
-          id: 42,
-          fileSourceId: 9,
-          fileSourceName: "Remote",
-          locationType: "remote_stream",
-          path: "bonus/clip.avi",
-          streamUrl: "",
-          downloadUrl: "https://media.invalid/clip.avi",
-          availability: "available",
-          sizeBytes: 2048,
-          durationSeconds: 30,
-        },
-      ],
-    } as MediaItem;
-
-    const file = flattenTracks(buildTree([item], null, "RJ00000001"))[0];
-    expect(file.streamUrl).toBe("/api/media/42/stream");
-    expect(file.locations[0]?.streamUrl).toBe("/api/media/42/stream");
-  });
-
-  it("builds explicit Resume from the cursor media edition and saved source", () => {
-    const item = {
-      id: 11,
-      title: "01.mp3",
-      kind: "audio",
-      fingerprint: "fingerprint",
-      durationSeconds: 90,
-      progress: null,
-      locations: [
-        {
-          id: 21,
-          fileSourceId: 1,
-          fileSourceName: "Local",
-          locationType: "local",
-          path: "library/RJ00000001/01.mp3",
-          streamUrl: "/api/media/21/stream",
-          downloadUrl: "",
-          availability: "available",
-          sizeBytes: 1024,
-          durationSeconds: 90,
-        },
-        {
-          id: 31,
-          fileSourceId: 2,
-          fileSourceName: "Example Remote",
-          locationType: "remote_stream",
-          path: "RJ00000001/01.mp3",
-          streamUrl: "/remote/01",
-          downloadUrl: "",
-          availability: "remote",
-          sizeBytes: 1024,
-          durationSeconds: 90,
-        },
-      ],
-    } as MediaItem;
-    const work = {
-      id: 7,
-      primaryCode: "RJ00000001",
-      title: "Work",
-      coverUrl: "",
-      circle: "Circle",
-      mediaItems: [item],
-    } as Parameters<typeof toPreferredPlayerTrack>[1];
-    const tracks = flattenTracks(buildTree([item], null, work.primaryCode));
-    const cursor = {
-      workId: 6,
-      mediaWorkId: 7,
-      mediaItemId: 11,
-      fileSourceId: 2,
-      locationId: 31,
-      locationType: "remote_stream",
-      title: "01.mp3",
-      positionSeconds: 42,
-      durationSeconds: 90,
-      lastPlayedAt: "2026-08-02 10:00:00",
-      completed: false,
-    } satisfies WorkProgressSummary;
-
-    expect(buildWorkResumeQueue(tracks, work, cursor)).toMatchObject({
-      locationId: 31,
-      positionSeconds: 42,
-      tracks: [{ mediaItemId: 11, locationId: 31, locationType: "remote_stream" }],
-    });
-    expect(buildWorkResumeQueue(tracks, work, { ...cursor, completed: true })).toBeNull();
-    expect(buildWorkResumeQueue(tracks, work, { ...cursor, mediaWorkId: 8 })).toBeNull();
   });
 
   it("hides items whose selected source only has missing locations", () => {
@@ -405,8 +257,8 @@ describe("mediaTreeModel", () => {
       ],
     } as MediaItem;
 
-    expect(treeStats(buildTree([item], 1, "RJ00000001")).files).toBe(0);
-    expect(flattenTracks(buildTree([item], null, "RJ00000001"))[0]).toMatchObject({ locationId: 31 });
+    expect(treeStats(buildTree([item], 1)).files).toBe(0);
+    expect(flattenTracks(buildTree([item], null))[0]).toMatchObject({ locationId: 31 });
   });
 
   it("keeps available non-playable files in the directory tree", () => {
@@ -424,6 +276,8 @@ describe("mediaTreeModel", () => {
           fileSourceName: "Local",
           locationType: "local",
           path: "library/RJ00000001/cover.jpg",
+          folderId: 1,
+          relativePath: "cover.jpg",
           streamUrl: "",
           downloadUrl: "/api/media/24/download",
           availability: "available",
@@ -433,7 +287,7 @@ describe("mediaTreeModel", () => {
       ],
     } as MediaItem;
 
-    const tree = buildTree([item], 1, "RJ00000001");
+    const tree = buildTree([item], 1);
 
     expect(treeStats(tree)).toMatchObject({ files: 1, playable: 0, sizeBytes: 2048 });
     expect(tree.files[0]).toMatchObject({ kind: "image", locationId: 24, title: "cover.jpg" });
@@ -441,11 +295,14 @@ describe("mediaTreeModel", () => {
   });
 
   it("marks only same-folder matched lyrics as collapsible directory attachments", () => {
-    const audio = localMediaItem(1, "audio", "library/RJ00000000/Main/01.mp3");
+    const audio = withLyricsChoices(localMediaItem(1, "audio", "library/RJ00000000/Main/01.mp3"), [
+      { lyricsMediaItemId: 2, locationId: 102, reason: "same_stem" },
+      { lyricsMediaItemId: 4, locationId: 104, reason: "same_stem" },
+    ]);
     const sidecar = localMediaItem(2, "text", "library/RJ00000000/Main/01.lrc");
     const notes = localMediaItem(3, "text", "library/RJ00000000/Main/notes.txt");
     const otherFolder = localMediaItem(4, "text", "library/RJ00000000/Bonus/01.vtt");
-    const tree = buildTree([audio, sidecar, notes, otherFolder], 1, "RJ00000000");
+    const tree = buildTree([audio, sidecar, notes, otherFolder], 1);
     const track = flattenTracks(tree)[0];
     const attachments = directoryLyricsAttachments(tree);
 
@@ -459,10 +316,16 @@ describe("mediaTreeModel", () => {
   });
 
   it("uses a library lyrics assignment as the automatic choice for directory rows and playback", () => {
-    const audio = { ...localMediaItem(1, "audio", "library/RJ00000000/Main/01.mp3"), assignedLyricsMediaItemId: 4 };
+    const audio = withLyricsChoices(
+      { ...localMediaItem(1, "audio", "library/RJ00000000/Main/01.mp3"), assignedLyricsMediaItemId: 4 },
+      [
+        { lyricsMediaItemId: 4, locationId: 104, reason: "assigned" },
+        { lyricsMediaItemId: 2, locationId: 102, reason: "same_stem" },
+      ],
+    );
     const sidecar = localMediaItem(2, "text", "library/RJ00000000/Main/01.lrc");
     const translated = localMediaItem(4, "text", "library/RJ00000000/Translated/Track1.vtt");
-    const tree = buildTree([audio, sidecar, translated], 1, "RJ00000000");
+    const tree = buildTree([audio, sidecar, translated], 1);
     const track = flattenTracks(tree)[0];
 
     expect(track.lyricsChoices).toMatchObject([
@@ -474,15 +337,16 @@ describe("mediaTreeModel", () => {
       id: 1,
       primaryCode: "RJ00000000",
       mediaItems: [audio, sidecar, translated],
-    } as Parameters<typeof toPreferredPlayerTrack>[1];
-    expect(toPreferredPlayerTrack({ ...track, lyricsChoices: undefined }, work).lyricsLocationId).toBe(104);
+    } as Parameters<typeof toPlayerTrack>[1];
+    expect(toPlayerTrack({ ...track, lyricsChoices: undefined }, work).lyricsLocationId).toBe(104);
   });
 
   it("collapses one generic folder lyric without duplicating its attachment row per audio", () => {
-    const first = localMediaItem(1, "audio", "library/RJ00000000/Main/01.mp3");
-    const second = localMediaItem(2, "audio", "library/RJ00000000/Main/02.mp3");
+    const sharedChoice: MediaLyricsChoice = { lyricsMediaItemId: 3, locationId: 103, reason: "shared_folder" };
+    const first = withLyricsChoices(localMediaItem(1, "audio", "library/RJ00000000/Main/01.mp3"), [sharedChoice]);
+    const second = withLyricsChoices(localMediaItem(2, "audio", "library/RJ00000000/Main/02.mp3"), [sharedChoice]);
     const shared = localMediaItem(3, "text", "library/RJ00000000/Main/lyrics.lrc");
-    const tree = buildTree([first, second, shared], 1, "RJ00000000");
+    const tree = buildTree([first, second, shared], 1);
     const attachments = directoryLyricsAttachments(tree);
 
     expect(flattenTracks(tree).every((track) => track.lyricsChoices?.[0]?.locationId === 103)).toBe(true);
@@ -625,11 +489,12 @@ describe("mediaTreeModel", () => {
     ).toBe(first.playbackKey);
   });
 
-  it("matches remote sidecar lyrics and keeps the remote URL on the player track", () => {
+  it("reads the remote lyrics the server ranks and keeps the remote URL on the player track", () => {
     const remoteTracks = [
       {
         type: "audio",
         title: "01.wma",
+        lyricsChoices: [{ path: "01.lrc", reason: "same_stem" }],
         streamUrl: "https://media.invalid/01.wma",
         downloadUrl: "",
         cacheAvailable: false,
@@ -653,38 +518,33 @@ describe("mediaTreeModel", () => {
       },
     ] as RemoteTrack[];
     const tree = buildRemoteTree(remoteTracks, { sourceId: 7, workCode: "RJ00000000" });
-    const files = flattenTreeFiles(tree);
     const audio = flattenTracks(tree)[0];
-    const playerTrack = toRemotePreviewPlayerTrack(
-      audio,
-      {
-        sourceId: 7,
-        sourceCode: "remote_a",
-        sourceName: "Remote A",
-        remoteId: "remote-1",
-        primaryCode: "RJ00000000",
-        remoteCode: "RJ00000000",
-        title: "Work",
-        coverUrl: "",
-        sourceUrl: "",
-        publicWorkUrl: "",
-        circle: "",
-        rating: null,
-        sales: null,
-        price: null,
-        ageRating: "",
-        releaseDate: "",
-        durationSeconds: null,
-        tags: [],
-        voiceActors: [],
-        importStatus: "remote_only",
-        workId: null,
-        metadataPresentation: { defaultVariantKey: "", variants: [] },
-        tracks: remoteTracks,
-        languageEditions: [],
-      },
-      files,
-    );
+    const playerTrack = toRemotePreviewPlayerTrack(audio, {
+      sourceId: 7,
+      sourceCode: "remote_a",
+      sourceName: "Remote A",
+      remoteId: "remote-1",
+      primaryCode: "RJ00000000",
+      remoteCode: "RJ00000000",
+      title: "Work",
+      coverUrl: "",
+      sourceUrl: "",
+      publicWorkUrl: "",
+      circle: "",
+      rating: null,
+      sales: null,
+      price: null,
+      ageRating: "",
+      releaseDate: "",
+      durationSeconds: null,
+      tags: [],
+      voiceActors: [],
+      importStatus: "remote_only",
+      workId: null,
+      metadataPresentation: { defaultVariantKey: "", variants: [] },
+      tracks: remoteTracks,
+      languageEditions: [],
+    });
     expect(playerTrack.lyricsChoices?.[0]).toMatchObject({
       title: "01.lrc",
       url: "/api/remote-sources/7/works/RJ00000000/text?path=01.lrc",
@@ -717,7 +577,7 @@ describe("mediaTreeModel", () => {
           },
         ],
       }) as MediaItem;
-    const tree = buildTree([videoItem(1, true), videoItem(2, false)], 1, "RJ00000001");
+    const tree = buildTree([videoItem(1, true), videoItem(2, false)], 1);
 
     expect(flattenTracks(tree).map((track) => track.mediaItemId)).toEqual([1]);
     expect(treeStats(tree)).toMatchObject({ files: 2, video: 2, playable: 1, durationSeconds: 45 });
@@ -857,32 +717,35 @@ describe("mediaTreeModel", () => {
   it("reads cached files through the media asset route, like local ones", () => {
     const item = localMediaItem(5, "text", "media/example_remote_a/RJ00000000/cover.png");
     item.locations[0] = { ...item.locations[0], locationType: "cache", fileSourceId: 7 };
-    const [file] = flattenTreeFiles(buildTree([item], 7, "RJ00000000"));
+    const [file] = flattenTreeFiles(buildTree([item], 7));
 
     expect(file.assetUrl).toBe(`/api/media/105/asset?v=${encodeURIComponent("fixture-5:1024")}`);
     expect(file.textPreviewUrl).toBe("");
   });
 
   it("shows one folder per copy when a work's local files lie in several folders", () => {
-    const single = buildTree([localMediaItem(1, "audio", "library/RJ00000000/mp3/01.mp3")], null, "RJ00000000");
+    // Folder names need not carry the work code, and names that differ only in case are different folders.
+    const main = { id: 1, root: "library/Example Folder" };
+    const lower = { id: 2, root: "library/example folder" };
+    const archive = { id: 3, root: "archive/Example Folder" };
+    const single = buildTree([localMediaItem(1, "audio", "library/Example Folder/mp3/01.mp3", main)], null);
     // A work in one folder shows that folder's contents, without naming the folder.
     expect(flattenTreeFiles(single).map((file) => file.sourcePath)).toEqual(["mp3/01.mp3"]);
 
     const tree = buildTree(
       [
-        localMediaItem(1, "audio", "library/RJ00000000/mp3/01.mp3"),
-        localMediaItem(2, "audio", "library/RJ00000000 mp3 only/01.mp3"),
-        localMediaItem(3, "audio", "archive/RJ00000000/mp3/01.mp3"),
+        localMediaItem(1, "audio", "library/Example Folder/mp3/01.mp3", main),
+        localMediaItem(2, "audio", "library/example folder/01.mp3", lower),
+        localMediaItem(3, "audio", "archive/Example Folder/mp3/01.mp3", archive),
       ],
       null,
-      "RJ00000000",
     );
     // Folders that share a name are told apart by their parent folder.
     expect(
       flattenTreeFiles(tree)
         .map((file) => file.sourcePath)
         .sort(),
-    ).toEqual(["RJ00000000 mp3 only/01.mp3", "archive / RJ00000000/mp3/01.mp3", "library / RJ00000000/mp3/01.mp3"]);
+    ).toEqual(["archive / Example Folder/mp3/01.mp3", "example folder/01.mp3", "library / Example Folder/mp3/01.mp3"]);
   });
 });
 

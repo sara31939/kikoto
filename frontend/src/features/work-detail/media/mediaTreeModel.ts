@@ -1,17 +1,15 @@
-import type { MediaItem, RemoteTrack, RemoteWorkDetail, WorkDetail, WorkProgressSummary } from "../../../lib/api";
-import { mediaItemLyricsAssignments } from "../../../lib/lyricsLanguage";
+import type { MediaItem, RemoteLyricsChoice, RemoteTrack, RemoteWorkDetail, WorkDetail } from "../../../lib/api";
 import { naturalNameCompare } from "../../../lib/naturalNameOrder";
 import type { PlayerTrack, PlayerTrackLocation } from "../../../player/playerTypes";
 import {
   audioExtensions,
-  findLocalLyricsChoices,
-  findRemoteLyricsMatches,
   isLyricsPath,
+  localLyricsChoices,
+  localLyricsFiles,
   type LyricsChoice,
 } from "../../../player/lyricsMatching";
 import { playbackKeyForLocation, remotePlaybackKey } from "../../../player/playbackIdentity";
 import { remoteMediaURL } from "../../../player/mediaPlayback";
-import { applyTrackLocation, preferredTrackLocation } from "../../../player/trackLocations";
 
 export type TreeNode = {
   name: string;
@@ -47,6 +45,8 @@ export type TreeTrack = {
   cacheStreamUrl: string;
   localLocationId: number | null;
   localPath: string;
+  /** The work folder that holds the local copy, as the server matches it. */
+  localFolderId: number | null;
   localAvailable: boolean;
   progress: MediaItem["progress"];
   locations: PlayerTrackLocation[];
@@ -77,10 +77,9 @@ export function emptyTree(): TreeNode {
   return { name: "", path: "", children: new Map(), files: [] };
 }
 
-export function buildTree(items: MediaItem[], fileSourceId: number | null, workCode: string): TreeNode {
+export function buildTree(items: MediaItem[], fileSourceId: number | null): TreeNode {
   const root = emptyTree();
-  const lyricsMatchPathsByLocationID = new Map<number, string>();
-  const folderLabels = localWorkFolderLabels(items, fileSourceId, workCode);
+  const folderLabels = localWorkFolderLabels(items, fileSourceId);
   for (const item of items) {
     const sourceLocations =
       fileSourceId === null
@@ -103,16 +102,15 @@ export function buildTree(items: MediaItem[], fileSourceId: number | null, workC
     const localLocation = sourceLocations.find(
       (candidate) => candidate.locationType === "local" && candidate.availability === "available",
     );
-    const parts = displayPathParts(location.path, location.locationType, workCode, folderLabels);
+    const parts = displayPathParts(location, folderLabels);
     const names = displayPathNames(location, parts.length);
     const fileName = parts.pop() ?? item.title;
     const displayTitle = names.pop();
-    const locationStreamUrl = playbackStreamURLForLocation(
-      location.id,
-      location.locationType,
-      item.kind,
-      locationPlaybackURL(location),
-    );
+    // The server lists the usable locations with the URL each plays through.
+    const playbackLocations = item.playbackLocations ?? [];
+    const locationStreamUrl =
+      playbackLocations.find((candidate) => candidate.locationId === location.id)?.streamUrl ??
+      locationPlaybackURL(location);
     let cursor = root;
     parts.forEach((part, index) => {
       if (!cursor.children.has(part)) {
@@ -150,31 +148,15 @@ export function buildTree(items: MediaItem[], fileSourceId: number | null, workC
       cacheStreamUrl: cacheLocation ? `/api/media/${cacheLocation.id}/stream` : "",
       localLocationId: localLocation?.id ?? null,
       localPath: localLocation?.path ?? "",
+      localFolderId: localLocation?.folderId ?? null,
       localAvailable: Boolean(localLocation),
       progress: item.progress,
       playbackKey: playbackKeyForLocation(location.id),
-      locations: item.locations
-        .filter(
-          (candidate) => locationPlaybackURL(candidate) && ["available", "remote"].includes(candidate.availability),
-        )
-        .map((candidate) => ({
-          locationId: candidate.id,
-          locationType: candidate.locationType,
-          streamUrl: playbackStreamURLForLocation(
-            candidate.id,
-            candidate.locationType,
-            item.kind,
-            locationPlaybackURL(candidate),
-          ),
-          sourceId: candidate.fileSourceId,
-          sourceName: candidate.fileSourceName,
-          availability: candidate.availability,
-        })),
+      locations: playbackLocations,
     });
-    lyricsMatchPathsByLocationID.set(location.id, location.path);
   }
   const displayRoot = normalizeDisplayTree(root);
-  attachLocalLyricsChoices(displayRoot, items, lyricsMatchPathsByLocationID);
+  attachLocalLyricsChoices(displayRoot, items);
   return displayRoot;
 }
 
@@ -182,16 +164,10 @@ function locationPlaybackURL(location: { locationType: string; streamUrl: string
   return location.streamUrl || (location.locationType === "remote_stream" ? location.downloadUrl : "");
 }
 
-function playbackStreamURLForLocation(locationId: number, locationType: string, kind: string, streamUrl: string) {
-  if (locationType === "remote_stream" && (kind === "audio" || kind === "video") && locationId > 0) {
-    return `/api/media/${locationId}/stream`;
-  }
-  return streamUrl;
-}
-
 export function buildRemoteTree(tracks: RemoteTrack[], identity?: RemoteTreeIdentity): TreeNode {
   let nextID = -1;
   const root = emptyTree();
+  const lyricsChoices = new Map<TreeTrack, RemoteLyricsChoice[]>();
   const walk = (nodes: RemoteTrack[], cursor: TreeNode) => {
     nodes.forEach((node, index) => {
       const title = (node.title ?? "").trim() || `Track ${index + 1}`;
@@ -211,7 +187,7 @@ export function buildRemoteTree(tracks: RemoteTrack[], identity?: RemoteTreeIden
         identity && !hasCache && hasRemoteMedia && (remoteKind === "audio" || remoteKind === "video")
           ? remoteMediaURL(identity.sourceId, identity.workCode, sourcePath)
           : node.streamUrl;
-      cursor.files.push({
+      const file: TreeTrack = {
         mediaItemId: nextID,
         locationId: hasCache ? node.cacheLocationId! : nextID,
         title,
@@ -238,6 +214,7 @@ export function buildRemoteTree(tracks: RemoteTrack[], identity?: RemoteTreeIden
           node.cacheAvailable && node.cacheLocationId !== null ? `/api/media/${node.cacheLocationId}/stream` : "",
         localLocationId: node.localLocationId,
         localPath: node.localPath,
+        localFolderId: null,
         localAvailable: node.localAvailable,
         progress: null,
         playbackKey: identity
@@ -281,13 +258,15 @@ export function buildRemoteTree(tracks: RemoteTrack[], identity?: RemoteTreeIden
               ]
             : []),
         ],
-      });
+      };
+      cursor.files.push(file);
+      if (node.lyricsChoices?.length) lyricsChoices.set(file, node.lyricsChoices);
       nextID -= 1;
     });
   };
   walk(tracks, root);
   const displayRoot = normalizeDisplayTree(root);
-  attachRemoteLyricsChoices(displayRoot);
+  attachRemoteLyricsChoices(displayRoot, lyricsChoices);
   return displayRoot;
 }
 
@@ -441,17 +420,6 @@ export function treeStats(node: TreeNode): TreeStats {
   return stats;
 }
 
-export function formatTreeStats(stats: TreeStats) {
-  const parts = [
-    stats.audio > 0 ? `${stats.audio} audio` : "",
-    stats.video > 0 ? `${stats.video} video` : "",
-    stats.audio === 0 && stats.video === 0 && stats.files > 0 ? `${stats.files} files` : "",
-    stats.knownSizeFiles > 0 ? formatBytes(stats.sizeBytes) : "",
-    stats.knownDurationMedia > 0 ? formatDuration(stats.durationSeconds) : "",
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join(" · ") : "";
-}
-
 export function formatBytes(value: number | null) {
   if (value === null) return "unknown";
   if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
@@ -482,7 +450,10 @@ export function toPlayerTrack(track: TreeTrack, work: WorkDetail, fallbackCoverU
   const audioItem = work.mediaItems.find((item) => item.id === track.mediaItemId);
   const lyricsChoices =
     track.lyricsChoices ??
-    findLocalLyricsChoices(track.sourcePath || track.title, work.mediaItems, mediaItemLyricsAssignments(audioItem));
+    localLyricsChoices(
+      audioItem?.locations.find((location) => location.id === track.locationId),
+      localLyricsFiles(work.mediaItems),
+    );
   const automaticLyrics = lyricsChoices[0] ?? null;
   const preferredLyricsMediaItemId =
     track.preferredLyricsMediaItemId !== undefined
@@ -497,6 +468,7 @@ export function toPlayerTrack(track: TreeTrack, work: WorkDetail, fallbackCoverU
     workTitle: work.title,
     coverUrl: work.coverUrl || fallbackCoverUrl,
     circle: work.circle,
+    voiceActors: work.voiceActors,
     progress: track.progress,
     progressRecordable: true,
     lyricsLocationId: lyrics?.locationId ?? null,
@@ -509,67 +481,9 @@ export function toPlayerTrack(track: TreeTrack, work: WorkDetail, fallbackCoverU
   };
 }
 
-export function toPreferredPlayerTrack(track: TreeTrack, work: WorkDetail, fallbackCoverUrl = ""): PlayerTrack {
-  const playerTrack = toPlayerTrack(track, work, fallbackCoverUrl);
-  const preferredLocation = preferredTrackLocation(playerTrack);
-  return preferredLocation ? applyTrackLocation(playerTrack, preferredLocation) : playerTrack;
-}
-
-export type WorkResumeQueue = {
-  tracks: PlayerTrack[];
-  locationId: number;
-  positionSeconds: number;
-};
-
-export function buildWorkResumeQueue(
-  tracks: TreeTrack[],
-  work: WorkDetail,
-  cursor: WorkProgressSummary | null,
-  fallbackCoverUrl = "",
-): WorkResumeQueue | null {
-  if (
-    !cursor?.mediaItemId ||
-    cursor.completed ||
-    !Number.isFinite(cursor.positionSeconds) ||
-    cursor.positionSeconds <= 0 ||
-    (cursor.mediaWorkId !== null && cursor.mediaWorkId !== work.id)
-  ) {
-    return null;
-  }
-  const queue = tracks.map((track) => toPreferredPlayerTrack(track, work, fallbackCoverUrl));
-  const startIndex = queue.findIndex((track) => track.mediaItemId === cursor.mediaItemId);
-  if (startIndex < 0) return null;
-
-  const startTrack = queue[startIndex];
-  const usableLocations =
-    startTrack.locations?.filter(
-      (location) => Boolean(location.streamUrl) && ["available", "remote"].includes(location.availability),
-    ) ?? [];
-  const cursorLocation =
-    usableLocations.find((location) => location.locationId === cursor.locationId) ??
-    usableLocations.find(
-      (location) => location.sourceId === cursor.fileSourceId && location.locationType === cursor.locationType,
-    ) ??
-    usableLocations.find((location) => location.sourceId === cursor.fileSourceId) ??
-    preferredTrackLocation(startTrack);
-  if (!cursorLocation) return null;
-
-  queue[startIndex] = applyTrackLocation(startTrack, cursorLocation);
-  return {
-    tracks: queue,
-    locationId: cursorLocation.locationId,
-    positionSeconds: cursor.positionSeconds,
-  };
-}
-
-export function toRemotePreviewPlayerTrack(
-  track: TreeTrack,
-  detail: RemoteWorkDetail,
-  files: TreeTrack[] = [],
-): PlayerTrack {
+export function toRemotePreviewPlayerTrack(track: TreeTrack, detail: RemoteWorkDetail): PlayerTrack {
   const remoteWorkCode = detail.remoteCode || detail.primaryCode || detail.remoteId;
-  const remoteLyrics =
-    track.lyricsChoices ?? findRemoteLyricsMatches(track.sourcePath || track.title, files.map(remoteLyricsCandidate));
+  const remoteLyrics = track.lyricsChoices ?? [];
   const automaticLyrics = remoteLyrics[0] ?? null;
   return {
     ...track,
@@ -579,6 +493,7 @@ export function toRemotePreviewPlayerTrack(
     workTitle: detail.title,
     coverUrl: detail.coverUrl,
     circle: detail.circle,
+    voiceActors: detail.voiceActors,
     progress: null,
     progressRecordable: false,
     lyricsLocationId: automaticLyrics?.locationId ?? null,
@@ -593,21 +508,17 @@ export function toRemotePreviewPlayerTrack(
   };
 }
 
-function attachLocalLyricsChoices(
-  root: TreeNode,
-  items: MediaItem[],
-  lyricsMatchPathsByLocationID: ReadonlyMap<number, string>,
-) {
+function attachLocalLyricsChoices(root: TreeNode, items: MediaItem[]) {
   const files = flattenTreeFiles(root);
   const itemsByID = new Map(items.map((item) => [item.id, item]));
+  const lyricsFiles = localLyricsFiles(items);
   const displayFilesByLocationID = new Map(files.map((file) => [file.locationId, file]));
   for (const file of files) {
     if (file.kind !== "audio" && file.kind !== "video") continue;
     const item = itemsByID.get(file.mediaItemId);
-    const choices = findLocalLyricsChoices(
-      lyricsMatchPathsByLocationID.get(file.locationId) || file.sourcePath || file.title,
-      items,
-      mediaItemLyricsAssignments(item),
+    const choices = localLyricsChoices(
+      item?.locations.find((location) => location.id === file.locationId),
+      lyricsFiles,
     ).map((choice) => ({
       ...choice,
       displayPath: displayFilesByLocationID.get(choice.locationId)?.sourcePath,
@@ -620,16 +531,32 @@ function attachLocalLyricsChoices(
   }
 }
 
-function attachRemoteLyricsChoices(root: TreeNode) {
+/**
+ * Turns the lyrics choices the server ranks for each remote audio and video
+ * file into the files of the tree they name. A file the tree cannot read is
+ * left out.
+ */
+function attachRemoteLyricsChoices(root: TreeNode, serverChoices: ReadonlyMap<TreeTrack, RemoteLyricsChoice[]>) {
   const files = flattenTreeFiles(root);
-  const displayFilesByLocationID = new Map(files.map((file) => [file.locationId, file]));
-  const candidates = files.map(remoteLyricsCandidate);
+  const filesByPath = new Map<string, TreeTrack>();
+  for (const file of files) if (!filesByPath.has(file.sourcePath)) filesByPath.set(file.sourcePath, file);
   for (const file of files) {
     if (file.kind !== "audio" && file.kind !== "video") continue;
-    const choices = findRemoteLyricsMatches(file.sourcePath || file.title, candidates).map((choice) => ({
-      ...choice,
-      displayPath: displayFilesByLocationID.get(choice.locationId)?.sourcePath,
-    }));
+    const choices: LyricsChoice[] = [];
+    for (const choice of serverChoices.get(file) ?? []) {
+      const lyrics = filesByPath.get(choice.path);
+      const url = lyrics ? lyrics.textPreviewUrl || lyrics.streamUrl || lyrics.downloadUrl : "";
+      if (!lyrics || !url || choices.some((existing) => existing.locationId === lyrics.locationId)) continue;
+      choices.push({
+        mediaItemId: lyrics.mediaItemId,
+        locationId: lyrics.locationId,
+        title: lyrics.title,
+        path: lyrics.sourcePath,
+        displayPath: lyrics.sourcePath,
+        reason: choice.reason,
+        url,
+      });
+    }
     file.lyricsChoices = choices;
     file.autoLyricsLocationId = choices[0]?.locationId ?? null;
     file.preferredLyricsMediaItemId = null;
@@ -637,32 +564,29 @@ function attachRemoteLyricsChoices(root: TreeNode) {
   }
 }
 
-function remoteLyricsCandidate(file: TreeTrack) {
-  return {
-    mediaItemId: file.mediaItemId,
-    locationId: file.locationId,
-    title: file.title,
-    path: file.sourcePath,
-    url: file.textPreviewUrl || file.streamUrl || file.downloadUrl,
-  };
-}
-
+/**
+ * The segments the tree shows for a location: a local file's path below the
+ * work folder the server says holds it, behind that folder's label when the
+ * work's files lie in several folders, and any other path whole.
+ */
 function displayPathParts(
-  path: string,
-  locationType: string,
-  workCode: string,
-  folderLabels: ReadonlyMap<string, string> = noFolderLabels,
+  location: MediaItem["locations"][number],
+  folderLabels: ReadonlyMap<number, string> = noFolderLabels,
 ) {
-  const parts = path.split("/").filter(Boolean);
-  if (locationType !== "local" || !workCode) return parts;
-  const workRootIndex = localWorkRootIndex(parts, workCode);
-  if (workRootIndex < 0 || workRootIndex >= parts.length - 1) return parts;
-  const inside = parts.slice(workRootIndex + 1);
-  const label = folderLabels.get(parts.slice(0, workRootIndex + 1).join("/"));
-  return label ? [label, ...inside] : inside;
+  const place = localFolderPlace(location);
+  if (!place) return location.path.split("/").filter(Boolean);
+  const label = folderLabels.get(place.folderId);
+  return label ? [label, ...place.parts] : place.parts;
 }
 
-const noFolderLabels: ReadonlyMap<string, string> = new Map();
+/** The work folder the server says holds a local location and the path segments below it, if any does. */
+function localFolderPlace(location: MediaItem["locations"][number]) {
+  if (location.locationType !== "local" || location.folderId === undefined) return null;
+  const parts = (location.relativePath ?? "").split("/").filter(Boolean);
+  return parts.length > 0 ? { folderId: location.folderId, parts } : null;
+}
+
+const noFolderLabels: ReadonlyMap<number, string> = new Map();
 
 /**
  * The display names of the last `count` segments of a location's path, one per
@@ -682,46 +606,40 @@ function displayPathNames(location: { path: string; displayPath?: string }, coun
   return names;
 }
 
-/** The index of the path segment that is the work's folder, or -1 when no segment names the work. */
-function localWorkRootIndex(parts: string[], workCode: string) {
-  const code = workCode.toUpperCase();
-  return parts.findIndex((part) => {
-    const normalized = part.toUpperCase();
-    return normalized.includes(code) || /\b(RJ|BJ|VJ)[0-9]{5,8}\b/i.test(part);
-  });
-}
-
 /**
  * Names each work folder when the work's local files lie in several, so the
  * tree shows one folder per copy instead of mixing their files. A work in a
  * single folder needs no labels. A label is the folder's name, extended by its
  * parent folders while two folders share a name.
  */
-function localWorkFolderLabels(items: MediaItem[], fileSourceId: number | null, workCode: string) {
-  const roots = new Set<string>();
-  if (!workCode) return noFolderLabels;
+function localWorkFolderLabels(items: MediaItem[], fileSourceId: number | null) {
+  const roots = new Map<number, string>();
   for (const item of items) {
     for (const location of item.locations) {
-      if (location.locationType !== "local" || location.availability !== "available") continue;
+      if (location.availability !== "available") continue;
       if (fileSourceId !== null && location.fileSourceId !== fileSourceId) continue;
+      const place = localFolderPlace(location);
+      if (!place || roots.has(place.folderId)) continue;
+      // The server gives the path below the folder, so the rest is the folder's root.
       const parts = location.path.split("/").filter(Boolean);
-      const index = localWorkRootIndex(parts, workCode);
-      if (index >= 0 && index < parts.length - 1) roots.add(parts.slice(0, index + 1).join("/"));
+      roots.set(place.folderId, parts.slice(0, parts.length - place.parts.length).join("/"));
     }
   }
   if (roots.size < 2) return noFolderLabels;
-  const labels = new Map<string, string>();
-  for (const root of roots) {
+  const labels = new Map<number, string>();
+  for (const [folderId, root] of roots) {
     const segments = root.split("/");
     let depth = 1;
     const label = () => segments.slice(-depth).join(" / ");
     while (
       depth < segments.length &&
-      [...roots].some((other) => other !== root && other.split("/").slice(-depth).join(" / ") === label())
+      [...roots].some(
+        ([other, otherRoot]) => other !== folderId && otherRoot.split("/").slice(-depth).join(" / ") === label(),
+      )
     ) {
       depth += 1;
     }
-    labels.set(root, label());
+    labels.set(folderId, label());
   }
   return labels;
 }

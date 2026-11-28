@@ -11,12 +11,12 @@ import { segmentedItemClassName, segmentedListClassName } from "@/components/ui/
 import { toastFromError, useToast } from "@/components/ui/toast";
 import {
   DisplayNameGroupSection,
-  DisplayNameLanguageTabs,
   DisplayNamePanel,
   type DisplayNameRowProps,
   displayNameFieldAttribute,
 } from "@/features/work-detail/dialogs/FileDisplayNamesList";
 import { DisplayNamesTextView } from "@/features/work-detail/dialogs/FileDisplayNamesText";
+import { LanguageCountTabs } from "@/features/work-detail/LanguageCountTabs";
 import {
   type DisplayNameDrafts,
   type DisplayNameRow,
@@ -37,6 +37,7 @@ import { formatList } from "@/i18n/format";
 import { useLocale } from "@/i18n/LocaleProvider";
 import { api, type FileDisplayNames } from "@/lib/api";
 import { FILE_DISPLAY_NAMES_CHANGED_EVENT } from "@/lib/appEvents";
+import { startLoad } from "@/lib/effectScope";
 import { metadataTagNameLanguages } from "@/lib/metadataTagModel";
 import { interfaceLyricsLanguage } from "@/lib/translationTargets";
 import { cn } from "@/lib/tailwindClassNames";
@@ -81,31 +82,26 @@ export function FileDisplayNamesDialog({
   const wide = useMediaQuery(panelQuery);
 
   useEffect(() => {
-    const controller = new AbortController();
     setLoadFailed(false);
-    api
-      .getWorkFileDisplayNames(workId, controller.signal)
-      .then(setEntries)
-      .catch(() => {
-        if (!controller.signal.aborted) setLoadFailed(true);
-      });
-    return () => controller.abort();
+    return startLoad((signal) => api.getWorkFileDisplayNames(workId, signal), {
+      onSuccess: setEntries,
+      onError: () => setLoadFailed(true),
+    });
   }, [workId, loadAttempt]);
 
   // The editor starts on the editor's own metadata language, else the interface language.
-  useEffect(() => {
-    const controller = new AbortController();
-    api
-      .getUserPreferences(controller.signal)
-      .then((preferences) => {
-        const preferred = (preferences.metadataLanguages ?? []).find((candidate) =>
-          metadataTagNameLanguages.some(([supported]) => supported === candidate),
-        );
-        if (preferred && !languageChosen.current) setLanguage(preferred);
-      })
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, []);
+  useEffect(
+    () =>
+      startLoad((signal) => api.getUserPreferences(signal), {
+        onSuccess: (preferences) => {
+          const preferred = (preferences.metadataLanguages ?? []).find((candidate) =>
+            metadataTagNameLanguages.some(([supported]) => supported === candidate),
+          );
+          if (preferred && !languageChosen.current) setLanguage(preferred);
+        },
+      }),
+    [],
+  );
 
   const rows = useMemo(() => (entries ? displayNameRows(entries) : []), [entries]);
 
@@ -337,7 +333,6 @@ export function FileDisplayNamesDialog({
       <DialogHeader
         icon={<Languages className="h-4 w-4" />}
         title={t("fileDisplayNames.title")}
-        description={t("fileDisplayNames.description")}
         onClose={saving ? undefined : onClose}
         closeLabel={t("content.close")}
       />
@@ -349,11 +344,14 @@ export function FileDisplayNamesDialog({
       {rows.length > 0 && (
         <div className="shrink-0 space-y-2.5 border-b bg-muted/20 px-4 py-3 sm:px-5">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <DisplayNameLanguageTabs
+            <LanguageCountTabs
+              label={t("fileDisplayNames.language")}
+              languages={metadataTagNameLanguages}
               selected={language}
               counts={languageCounts}
-              total={rows.length}
               pending={pendingLanguages}
+              changedLabel={t("fileDisplayNames.changed")}
+              countTitle={(count) => t("fileDisplayNames.coverage", { count, total: rows.length })}
               onSelect={chooseLanguage}
             />
             <div className="flex min-w-0 flex-1 basis-64 items-center justify-end gap-1.5">
@@ -392,14 +390,9 @@ export function FileDisplayNamesDialog({
           </div>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
             <p className="min-w-0 flex-1 basis-80 text-xs text-muted-foreground">
-              {view === "text" ? (
-                t("fileDisplayNames.textHint", { language: languageLabel })
-              ) : (
-                <>
-                  {t("fileDisplayNames.languageHint", { language: languageLabel })}
-                  <span className="hidden pointer-fine:inline"> {t("fileDisplayNames.keyboardHint")}</span>
-                </>
-              )}
+              {view === "text"
+                ? t("fileDisplayNames.textHint", { language: languageLabel })
+                : t("fileDisplayNames.languageHint", { language: languageLabel })}
             </p>
             <p className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
               <CoverageBar count={named} total={rows.length} className="w-24" />
@@ -448,18 +441,18 @@ export function FileDisplayNamesDialog({
         <span
           className={cn(
             "mr-auto flex min-w-0 items-center gap-2 text-xs",
-            anyInvalid ? "text-error" : changedNames > 0 ? "font-medium text-foreground" : "text-muted-foreground",
+            anyInvalid ? "text-error" : "font-medium text-foreground",
           )}
           role="status"
         >
-          {!anyInvalid && changedNames > 0 && (
-            <span className="h-2 w-2 shrink-0 rounded-full bg-info" aria-hidden="true" />
-          )}
-          {anyInvalid
-            ? t("fileDisplayNames.invalidName")
-            : changedNames > 0
-              ? t("fileDisplayNames.pending", { count: changedNames })
-              : t("fileDisplayNames.noChanges")}
+          {anyInvalid ? (
+            t("fileDisplayNames.invalidName")
+          ) : changedNames > 0 ? (
+            <>
+              <span className="h-2 w-2 shrink-0 rounded-full bg-info" aria-hidden="true" />
+              {t("fileDisplayNames.pending", { count: changedNames })}
+            </>
+          ) : null}
         </span>
         <Button variant="ghost" onClick={onClose} disabled={saving}>
           {t("content.cancel")}

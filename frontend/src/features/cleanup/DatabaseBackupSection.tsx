@@ -2,14 +2,14 @@ import { ArchiveRestore, Loader2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { SettingsRow, SettingsSection } from "@/components/settings/SettingsSection";
+import { SettingsSection } from "@/components/settings/SettingsSection";
 import { Button } from "@/components/ui/button";
 import { toastFromError, useToast } from "@/components/ui/toast";
 import { isActiveWorkflowStatus, useWorkflowRunWatcher } from "@/hooks/useWorkflowRunWatcher";
 import { formatDateTime } from "@/i18n/format";
 import { useLocale } from "@/i18n/LocaleProvider";
 import { api, type DatabaseBackupList } from "@/lib/api";
-import { NAVIGATION_EVENT } from "@/lib/browserHistory";
+import { openWorkflowRun } from "@/lib/workflowLinks";
 
 import { formatByteSize } from "./cacheCleanupModel";
 
@@ -46,7 +46,7 @@ export function DatabaseBackupSection({ readOnly }: { readOnly: boolean }) {
         kind: "error",
         message: t("cleanup.backup.runFailed"),
         actionLabel: t("notifications.openActivity"),
-        onAction: () => openActivityRun(run.id),
+        onAction: () => openWorkflowRun(run.id),
       });
       return;
     }
@@ -63,7 +63,7 @@ export function DatabaseBackupSection({ readOnly }: { readOnly: boolean }) {
         kind: queued.existing ? "info" : "success",
         message: t(queued.existing ? "cleanup.backup.alreadyQueued" : "cleanup.backup.queued", { runId: queued.runId }),
         actionLabel: t("notifications.openActivity"),
-        onAction: () => openActivityRun(queued.runId),
+        onAction: () => openWorkflowRun(queued.runId),
       });
     } catch (error) {
       toast.notify(toastFromError(error, t("cleanup.backup.failed")));
@@ -87,8 +87,15 @@ export function DatabaseBackupSection({ readOnly }: { readOnly: boolean }) {
     });
 
   return (
-    <SettingsSection title={t("cleanup.backup.title")}>
-      <SettingsRow title={t("cleanup.backup.backUp")} description={description}>
+    <SettingsSection
+      title={t("cleanup.backup.backUp")}
+      description={
+        <>
+          <span>{description}</span>
+          <span className="mt-1 block">{t("cleanup.backup.policy")}</span>
+        </>
+      }
+      action={
         <Button
           variant="outline"
           size="sm"
@@ -98,13 +105,7 @@ export function DatabaseBackupSection({ readOnly }: { readOnly: boolean }) {
           {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArchiveRestore className="h-4 w-4" />}
           {running ? t("cleanup.backup.running") : t("cleanup.backup.run")}
         </Button>
-      </SettingsRow>
-      <p className="px-4 pb-3 text-xs text-muted-foreground">{t("cleanup.backup.policy")}</p>
-    </SettingsSection>
+      }
+    />
   );
-}
-
-function openActivityRun(runId: number) {
-  window.history.pushState({}, "", `/workflows?activity=1&run=${runId}`);
-  window.dispatchEvent(new Event(NAVIGATION_EVENT));
 }

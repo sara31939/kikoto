@@ -4,6 +4,7 @@ import type { TreeNode, TreeTrack } from "@/features/work-detail/media/mediaTree
 import {
   activeTrackFolderPath,
   cursorInTree,
+  firstTrackPlaysFolder,
   folderNavigatorRows,
   folderSections,
   initialFolderNavigatorExpansion,
@@ -34,6 +35,7 @@ function file(id: number, title: string, kind = "audio", overrides: Partial<Tree
     cacheStreamUrl: "",
     localLocationId: id,
     localPath: title,
+    localFolderId: 1,
     localAvailable: true,
     progress: null,
     locations: [],
@@ -128,6 +130,16 @@ describe("folder contents", () => {
     expect(sections.images.map((track) => track.title)).toEqual(["cover.jpg"]);
     expect(sections.documents.map((track) => track.title)).toEqual(["notes.txt"]);
     expect(sections.others.map((track) => track.title)).toEqual(["archive.zip", "missing.mp3"]);
+  });
+
+  it("knows when opening the first track plays the folder", () => {
+    const audio = file(1, "01.mp3");
+    const video = file(2, "00 pv.mp4", "video");
+
+    expect(firstTrackPlaysFolder([audio, video])).toBe(true);
+    // A video opens in the viewer, so the folder behind it needs its own way to play.
+    expect(firstTrackPlaysFolder([video, audio])).toBe(false);
+    expect(firstTrackPlaysFolder([])).toBe(false);
   });
 
   it("finds the folder of the playing file the same way rows mark it active", () => {

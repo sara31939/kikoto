@@ -11,6 +11,7 @@ import { CollectionPagination } from "@/components/collection/CollectionPaginati
 import { api, type VoiceAlias, type VoiceSummary, type VoiceSummaryPage } from "@/lib/api";
 import { creatorCoverUrl } from "@/lib/creatorApi";
 import { NAVIGATION_EVENT } from "@/lib/browserHistory";
+import { startLoad } from "@/lib/effectScope";
 import { voiceDetailPath } from "@/lib/voiceRoute";
 import { MaintenanceToolbar, useMaintenanceSearch, type MaintenanceToolbarSlots } from "./MaintenanceControls";
 import { MetadataEntryCover } from "./MetadataEntryCover";
@@ -68,12 +69,9 @@ export function VoiceAliasMaintenance({
   const [managedId, setManagedId] = useState<number | null>(requestedVoiceId);
 
   useEffect(() => {
-    const controller = new AbortController();
     setLoading(true);
-    void (async () => {
-      try {
-        const next = await api.listVoices({ page, pageSize, query, sort: "id", signal: controller.signal });
-        if (controller.signal.aborted) return;
+    return startLoad((signal) => api.listVoices({ page, pageSize, query, sort: "id", signal }), {
+      onSuccess: (next) => {
         if (next.voices.length === 0 && page > 1 && next.total <= (page - 1) * pageSize) {
           setPage(Math.max(1, Math.ceil(next.total / pageSize)));
           return;
@@ -81,13 +79,10 @@ export function VoiceAliasMaintenance({
         setResult(next);
         setHasLoaded(true);
         setLoadError("");
-      } catch {
-        if (!controller.signal.aborted) setLoadError(t("errors.unavailable"));
-      } finally {
-        if (!controller.signal.aborted) setLoading(false);
-      }
-    })();
-    return () => controller.abort();
+      },
+      onError: () => setLoadError(t("errors.unavailable")),
+      onSettled: () => setLoading(false),
+    });
   }, [page, pageSize, query, refreshKey, t]);
 
   const totalPages = Math.max(1, Math.ceil(result.total / pageSize));
@@ -149,21 +144,14 @@ export function VoiceAliasMaintenance({
           setPage(1);
         }}
       />
-      {(hasLoaded || !loadError) && (
+      {(hasLoaded || !loadError) && totalPages > 1 && (
         <CollectionPagination {...paginationProps} placement="top" compactMobile compactTop />
       )}
-      <section
-        id="metadata-aliases"
-        aria-label={t("workManagement.voiceAliasesTitle")}
-        className="overflow-hidden rounded-lg border bg-card"
-      >
-        <p className="border-b bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
-          {t("workManagement.voiceAliasesDescription")}
-        </p>
+      <section id="metadata-aliases" aria-label={t("workManagement.voiceAliasesTitle")} className="min-w-0 border-b">
         <div className="min-h-64">
           {loadError && hasLoaded && (
             <div
-              className="flex min-h-12 flex-wrap items-center justify-between gap-3 border-b border-error-border bg-error-surface px-4 py-2"
+              className="mb-2 flex min-h-12 flex-wrap items-center justify-between gap-3 rounded-md border border-error-border bg-error-surface px-4 py-2"
               role="alert"
             >
               <span className="text-sm text-error-foreground">
@@ -322,21 +310,18 @@ function VoiceAliasDialog({
   const [error, setError] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        const detail = await api.getVoiceSummary(personId, controller.signal);
-        if (controller.signal.aborted) return;
-        setName(detail.displayName);
-        setAliases(detail.aliasRecords ?? []);
-        setError("");
-      } catch {
-        if (!controller.signal.aborted) setError(t("errors.unavailable"));
-      }
-    })();
-    return () => controller.abort();
-  }, [personId, reloadKey, t]);
+  useEffect(
+    () =>
+      startLoad((signal) => api.getVoiceSummary(personId, signal), {
+        onSuccess: (detail) => {
+          setName(detail.displayName);
+          setAliases(detail.aliasRecords ?? []);
+          setError("");
+        },
+        onError: () => setError(t("errors.unavailable")),
+      }),
+    [personId, reloadKey, t],
+  );
 
   return (
     <Dialog onClose={onClose} size="lg" ariaLabel={name || t("workManagement.manageAliases")}>

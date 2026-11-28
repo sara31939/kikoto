@@ -10,6 +10,7 @@ import type { WorkCollectionColumnSetting } from "@/components/work-collection/W
 import type { ShownWorksActions } from "@/hooks/useShownWorksActions";
 import { useLocale } from "@/i18n/LocaleProvider";
 import { api, type RankingOrder, type RankingPage, type Work } from "@/lib/api";
+import { startLoad } from "@/lib/effectScope";
 
 import { RankingEntryList } from "./RankingEntryList";
 import { RankingHistoryPopover } from "./RankingHistoryPopover";
@@ -37,6 +38,7 @@ import {
   type RankingFilter,
 } from "./rankingModel";
 import type { RankingOverviewState } from "./useRankingOverview";
+import { useRankingQueuedNotice } from "./useRankingQueuedNotice";
 
 /** The recorded order whose works the page's actions may sync or check. */
 export type RankingActionTarget = { listId: number; snapshotId: number };
@@ -62,6 +64,7 @@ export function RankingsView({
   orderPreferences,
   readOnly,
   canManage,
+  canOpenRuns,
   canMarkSeen,
   canMark,
   canWatch,
@@ -93,6 +96,8 @@ export function RankingsView({
   readOnly: boolean;
   /** `metadata:sync`: rankings may be configured and refreshed. */
   canManage: boolean;
+  /** `workflows:run`: a run may be opened in Activity. */
+  canOpenRuns: boolean;
   /** Opening the latest order records it as seen; Demo keeps its sample state. */
   canMarkSeen: boolean;
   /** The account may add library works to lists, rate, and mark them. */
@@ -120,6 +125,7 @@ export function RankingsView({
 }) {
   const { t } = useTranslation();
   const toast = useToast();
+  const queuedNotice = useRankingQueuedNotice(canOpenRuns);
   const { resolvedLocale } = useLocale();
   const { overview, error: overviewError, reload, markSeen } = rankings;
   const lists = (overview?.lists ?? []).filter((list) => list.enabled);
@@ -171,9 +177,7 @@ export function RankingsView({
   );
 
   useEffect(() => {
-    const controller = new AbortController();
-    void load(controller.signal);
-    return () => controller.abort();
+    return startLoad((signal) => load(signal));
     // A new reloadKey reads the ranking again.
   }, [load, reloadKey]);
 
@@ -201,8 +205,8 @@ export function RankingsView({
   const refresh = async () => {
     setRefreshing(true);
     try {
-      await api.runRankingRefresh(selectedId === null ? undefined : [selectedId]);
-      toast.success(t("subscriptions.rankings.refreshQueued"));
+      const { runs } = await api.runRankingRefresh(selectedId === null ? undefined : [selectedId]);
+      queuedNotice(runs);
     } catch (refreshError) {
       toast.notify(toastFromError(refreshError, t("subscriptions.rankings.refreshFailed")));
     } finally {
@@ -235,7 +239,7 @@ export function RankingsView({
   }
   if (!selected) {
     return (
-      <EmptyState
+      <RankingsEmptyState
         title={t("subscriptions.rankings.empty")}
         description={
           canManage && !readOnly ? t("subscriptions.rankings.emptyOperator") : t("subscriptions.rankings.emptyViewer")
@@ -287,7 +291,7 @@ export function RankingsView({
     );
   } else if (!current.snapshot && !current.at) {
     body = (
-      <EmptyState
+      <RankingsEmptyState
         title={t("subscriptions.rankings.waiting")}
         description={t("subscriptions.rankings.waitingDescription")}
         action={canRefresh ? refreshButton(true) : null}
@@ -407,7 +411,7 @@ export function RankingsView({
           role="status"
         >
           <span>{t(`subscriptions.rankings.stale.${stale}`, { time: time(recorded.snapshot.pulledAt) })}</span>
-          {canManage && latestRunId && (
+          {canOpenRuns && latestRunId && (
             <button
               type="button"
               className="font-medium underline-offset-2 hover:underline"
@@ -445,7 +449,7 @@ function LoadFailure({ message, onRetry }: { message: string; onRetry: () => voi
   );
 }
 
-function EmptyState({ title, description, action }: { title: string; description: string; action: ReactNode }) {
+function RankingsEmptyState({ title, description, action }: { title: string; description: string; action: ReactNode }) {
   return (
     <div className="flex flex-col items-center gap-2 py-16 text-center">
       <ListOrdered className="h-8 w-8 text-muted-foreground" aria-hidden="true" />

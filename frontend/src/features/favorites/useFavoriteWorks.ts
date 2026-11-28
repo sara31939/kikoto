@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from "react";
 
 import type { FavoritesBrowseState } from "@/features/favorites/favoritesBrowseState";
 import { api, type CurrentUser, type FavoriteWorksPage, type Work } from "@/lib/api";
+import { startLoad } from "@/lib/effectScope";
 
 /**
  * The favorite works page that the browse state asks for, with the shelf,
- * list, and status counts that arrive with it. A creator shelf opened first
- * still reads the works shelf counts so the navigation can label them.
+ * list, and status counts that arrive with it.
  */
 export function useFavoriteWorks({
   active,
@@ -27,7 +27,6 @@ export function useFavoriteWorks({
 }) {
   const principalID = user?.id ?? null;
   const {
-    entity: favoriteEntity,
     query,
     status: statusFilter,
     availability: availabilityFilter,
@@ -49,8 +48,6 @@ export function useFavoriteWorks({
   const [snapshotUserID, setSnapshotUserID] = useState<number | null>(null);
   const [loadError, setLoadError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
-  const [shelfCountsUserID, setShelfCountsUserID] = useState<number | null>(null);
-  const requestSeq = useRef(0);
   const loadedRequestKey = useRef("");
   const requestKey = JSON.stringify([
     newOnly,
@@ -93,60 +90,50 @@ export function useFavoriteWorks({
       setIsLoading(false);
       return;
     }
-    if (favoriteEntity !== "works") {
-      setIsLoading(false);
-      return;
-    }
     if (!active || hasPendingRestoration()) return;
     const currentRequestKey = requestKey;
     if (loadedRequestKey.current === currentRequestKey) {
       setIsLoading(false);
       return;
     }
-    const controller = new AbortController();
-    const seq = ++requestSeq.current;
     setIsLoading(true);
     setLoadError("");
-    api
-      .listFavoriteWorksPage(
-        page,
-        pageSize,
-        query,
-        activeList,
-        statusFilter,
-        availabilityFilter,
-        sort,
-        sortDirection,
-        randomSeed,
-        controller.signal,
-        newOnly,
-      )
-      .then((result) => {
-        if (controller.signal.aborted || seq !== requestSeq.current) return;
-        loadedRequestKey.current = currentRequestKey;
-        setWorks(result.works);
-        setTotalWorks(result.total);
-        setFavoriteTotal(result.shelfTotal);
-        setListCounts(result.listCounts);
-        setNewCounts(result.newCounts ?? {});
-        setNewWorkIDs(new Set(result.newWorkIds ?? []));
-        setStatusCounts(result.statusCounts);
-        setSnapshotUserID(principalID);
-      })
-      .catch((error) => {
-        if (controller.signal.aborted || seq !== requestSeq.current) return;
-        notifyUnavailable(error, setLoadError);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted && seq === requestSeq.current) setIsLoading(false);
-      });
-    return () => controller.abort();
+    return startLoad(
+      (signal) =>
+        api.listFavoriteWorksPage(
+          page,
+          pageSize,
+          query,
+          activeList,
+          statusFilter,
+          availabilityFilter,
+          sort,
+          sortDirection,
+          randomSeed,
+          signal,
+          newOnly,
+        ),
+      {
+        onSuccess: (result) => {
+          loadedRequestKey.current = currentRequestKey;
+          setWorks(result.works);
+          setTotalWorks(result.total);
+          setFavoriteTotal(result.shelfTotal);
+          setListCounts(result.listCounts);
+          setNewCounts(result.newCounts ?? {});
+          setNewWorkIDs(new Set(result.newWorkIds ?? []));
+          setStatusCounts(result.statusCounts);
+          setSnapshotUserID(principalID);
+        },
+        onError: (error) => notifyUnavailable(error, setLoadError),
+        onSettled: () => setIsLoading(false),
+      },
+    );
   }, [
     active,
     activeList,
     availabilityFilter,
     user,
-    favoriteEntity,
     hasPendingRestoration,
     newOnly,
     notifyUnavailable,
@@ -162,26 +149,6 @@ export function useFavoriteWorks({
     requestKey,
   ]);
 
-  // A creator shelf opened first still labels the works shelves, from a one-item request.
-  useEffect(() => {
-    if (!active || !user || favoriteEntity === "works" || hasSnapshot) return;
-    if (shelfCountsUserID === principalID) return;
-    const controller = new AbortController();
-    api
-      .listFavoriteWorksPage(1, 1, "", "all", "all", "all", "added", "desc", 1, controller.signal)
-      .then((result) => {
-        if (controller.signal.aborted) return;
-        setFavoriteTotal(result.shelfTotal);
-        setListCounts(result.listCounts);
-        setNewCounts(result.newCounts ?? {});
-        setShelfCountsUserID(principalID);
-      })
-      .catch(() => {
-        // The shelves stay usable; their counts appear once works load.
-      });
-    return () => controller.abort();
-  }, [active, user, favoriteEntity, hasSnapshot, principalID, shelfCountsUserID]);
-
   return {
     works,
     setWorks,
@@ -193,10 +160,7 @@ export function useFavoriteWorks({
     statusCounts,
     isLoading,
     hasSnapshot,
-    /** The shelf counts are known, from the works page or the creator-shelf request. */
-    shelfCountsKnown: hasSnapshot || shelfCountsUserID === principalID,
     loadError,
-    reloadToken,
     reload: () => setReloadToken((value) => value + 1),
     // Read during render: the shown works answer the current request.
     isCurrent: loadedRequestKey.current === requestKey,

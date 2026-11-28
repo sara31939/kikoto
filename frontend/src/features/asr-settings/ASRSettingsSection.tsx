@@ -1,7 +1,8 @@
 import { AudioLines, Cloud, Loader2, Plus, RefreshCw, Server, Settings2, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { SettingsEmptyState } from "@/components/settings/SettingsEmptyState";
 import { SettingsSection } from "@/components/settings/SettingsSection";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
@@ -141,7 +142,6 @@ export function ASRSettingsSection({ readOnly = false }: { readOnly?: boolean })
     <div className="space-y-6">
       <SettingsSection
         title={t("maintenance.asr.title")}
-        description={t("maintenance.asr.description")}
         action={
           <>
             <Button
@@ -167,9 +167,11 @@ export function ASRSettingsSection({ readOnly = false }: { readOnly?: boolean })
         }
       >
         {loadState === "loading" ? (
-          <EmptyState icon={<Loader2 className="h-5 w-5 animate-spin" />}>{t("maintenance.asr.loading")}</EmptyState>
+          <SettingsEmptyState icon={<Loader2 className="h-5 w-5 animate-spin" />}>
+            {t("maintenance.asr.loading")}
+          </SettingsEmptyState>
         ) : loadState === "failed" ? (
-          <div role="alert" className="flex flex-col items-center gap-3 px-4 py-8 text-center">
+          <div role="alert" className="flex flex-col items-center gap-3 py-8 text-center">
             <p className="max-w-sm text-sm text-error-foreground">{t("maintenance.asr.loadFailed")}</p>
             <Button variant="outline" size="sm" onClick={() => void load()}>
               <RefreshCw className="h-4 w-4" />
@@ -177,10 +179,12 @@ export function ASRSettingsSection({ readOnly = false }: { readOnly?: boolean })
             </Button>
           </div>
         ) : providers.length === 0 ? (
-          <EmptyState icon={<AudioLines className="h-5 w-5" />}>{t("maintenance.asr.empty")}</EmptyState>
+          <SettingsEmptyState icon={<AudioLines className="h-5 w-5" />}>
+            {t("maintenance.asr.empty")}
+          </SettingsEmptyState>
         ) : (
           providers.map((provider) => (
-            <div key={provider.id} className="flex min-w-0 items-center gap-3 px-4 py-3">
+            <div key={provider.id} className="flex min-w-0 items-center gap-3 py-3">
               <span
                 className={cn(
                   "hidden h-9 w-9 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground sm:grid",
@@ -280,15 +284,6 @@ export function ASRSettingsSection({ readOnly = false }: { readOnly?: boolean })
           </DialogFooter>
         </Dialog>
       )}
-    </div>
-  );
-}
-
-function EmptyState({ icon, children }: { icon: ReactNode; children: ReactNode }) {
-  return (
-    <div className="flex flex-col items-center gap-3 px-4 py-8 text-center">
-      <span className="grid h-10 w-10 place-items-center rounded-full bg-muted text-muted-foreground">{icon}</span>
-      <p className="max-w-sm text-sm text-muted-foreground">{children}</p>
     </div>
   );
 }

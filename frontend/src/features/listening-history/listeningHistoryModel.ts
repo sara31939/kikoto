@@ -5,7 +5,6 @@ import type {
   ListeningPeriodStatistic,
   ListeningProfile,
   ListeningProfileTrait,
-  ListeningStatisticsRange,
 } from "@/lib/listeningApi";
 
 export const LISTENING_HISTORY_PAGE_SIZE = 30;
@@ -13,19 +12,19 @@ export const LISTENING_HISTORY_PAGE_SIZE = 30;
 /** Named report ranges in switcher order; the first is the default. */
 export const LISTENING_REPORT_RANGES: readonly ListeningNamedRange[] = ["30d", "12m", "all"];
 
-/** The calendar year a range names, or null for a named range. */
-export function listeningRangeYear(range: ListeningStatisticsRange) {
-  return /^[0-9]{4}$/.test(range) ? range : null;
-}
-
 export type ListeningDurationParts =
   | { key: "hoursMinutes"; values: { hours: number; minutes: number } }
   | { key: "minutes"; values: { minutes: number } }
-  | { key: "seconds"; values: { seconds: number } };
+  | { key: "seconds"; values: { seconds: number } }
+  | { key: "underSecond"; values: Record<string, never> };
 
-/** Whole hours and minutes for totals; seconds only below one minute. */
+/**
+ * Whole hours and minutes for totals; seconds only below one minute, and an
+ * average below one second stays distinct from none.
+ */
 export function listeningDurationParts(totalSeconds: number): ListeningDurationParts {
   const seconds = Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0;
+  if (seconds === 0 && totalSeconds > 0 && Number.isFinite(totalSeconds)) return { key: "underSecond", values: {} };
   if (seconds < 60) return { key: "seconds", values: { seconds } };
   const totalMinutes = Math.floor(seconds / 60);
   if (totalMinutes < 60) return { key: "minutes", values: { minutes: totalMinutes } };
@@ -49,7 +48,8 @@ export function barPercent(value: number, maxValue: number) {
 
 /**
  * Totals for the charted periods: periods with listening, their mean, and the
- * busiest period (the latest one on a tie).
+ * busiest period (the latest one on a tie). The mean stays unrounded, so it
+ * reads the same as the report's time per active day once formatted.
  */
 export function listeningPeriodInsights(series: readonly ListeningPeriodStatistic[]) {
   const listened = series.filter((entry) => entry.listenedSeconds > 0);
@@ -61,7 +61,7 @@ export function listeningPeriodInsights(series: readonly ListeningPeriodStatisti
   return {
     totalSeconds,
     activePeriods: listened.length,
-    averageSeconds: listened.length > 0 ? Math.round(totalSeconds / listened.length) : 0,
+    averageSeconds: listened.length > 0 ? totalSeconds / listened.length : 0,
     peak,
   };
 }
@@ -98,7 +98,7 @@ export function weekdayAverages(series: readonly ListeningPeriodStatistic[]) {
   }
   return totals.map((total, weekday) => ({
     weekday,
-    averageSeconds: total.days > 0 ? Math.round(total.seconds / total.days) : 0,
+    averageSeconds: total.days > 0 ? total.seconds / total.days : 0,
   }));
 }
 
@@ -115,8 +115,8 @@ export function weekPartAverages(series: readonly ListeningPeriodStatistic[]) {
     part.days += 1;
   }
   return {
-    workdaySeconds: workdays.days > 0 ? Math.round(workdays.seconds / workdays.days) : 0,
-    weekendSeconds: weekend.days > 0 ? Math.round(weekend.seconds / weekend.days) : 0,
+    workdaySeconds: workdays.days > 0 ? workdays.seconds / workdays.days : 0,
+    weekendSeconds: weekend.days > 0 ? weekend.seconds / weekend.days : 0,
   };
 }
 
@@ -227,6 +227,9 @@ const PROFILE_LEAN: Record<ListeningProfileTraitKind, number> = {
 
 /** The fewest marked works a profile reads completion from. */
 export const PROFILE_MARKS_MINIMUM = 3;
+
+/** The fewest listened works the server reads preferred tags and traits from. */
+export const PROFILE_WORK_MINIMUM = 3;
 
 export type ListeningProfileStatement =
   | { kind: "tags"; names: string[] }

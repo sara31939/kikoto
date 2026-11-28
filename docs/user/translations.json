@@ -5,6 +5,7 @@
     { "id": "index", "source": "en/index.md" },
     { "id": "getting-started", "source": "en/getting-started.md" },
     { "id": "library", "source": "en/library.md" },
+    { "id": "record-library", "source": "en/record-library.md" },
     { "id": "sources", "source": "en/sources.md" },
     { "id": "playback", "source": "en/playback.md" },
     { "id": "personal-data", "source": "en/personal-data.md" },
@@ -14,6 +15,7 @@
     { "id": "circles", "source": "en/circles.md" },
     { "id": "voices", "source": "en/voices.md" },
     { "id": "discover", "source": "en/discover.md" },
+    { "id": "for-you", "source": "en/for-you.md" },
     { "id": "translation", "source": "en/translation.md" }
   ],
   "locales": ["en", "zh-Hans", "zh-Hant", "ja", "ko"]

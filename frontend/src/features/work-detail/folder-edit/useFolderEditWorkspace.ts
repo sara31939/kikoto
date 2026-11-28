@@ -29,14 +29,13 @@ import {
   type FolderEditTarget,
 } from "@/features/work-detail/folder-edit/folderEditModel";
 import { folderEditPendingDeletions } from "@/features/work-detail/folder-edit/fileWorkspaceModel";
-import { folderEditAssignments } from "@/features/work-detail/folder-edit/folderEditLyrics";
 import {
   createFolderWorkspaceRequestId,
   folderWorkspaceArrange,
   useFolderWorkspaceFiles,
   type FolderWorkspace,
 } from "@/features/work-detail/folder-edit/folderWorkspace";
-import { folderAudio } from "@/features/work-detail/lyrics/lyricsEditModel";
+import { useDebouncedRequest } from "@/hooks/useDebouncedRequest";
 import {
   ApiError,
   api,
@@ -46,6 +45,7 @@ import {
   type WorkFolderEditRequest,
   type WorkFolderEditResult,
 } from "@/lib/api";
+import { startLoad } from "@/lib/effectScope";
 
 export type { FolderEditFilesState } from "@/features/work-detail/folder-edit/folderWorkspace";
 
@@ -60,14 +60,12 @@ const noSelection: ReadonlySet<string> = new Set();
 
 /**
  * The state of one folder edit: where files can come from, what is selected in
- * each place and which files are added as lyrics, the server's preview of the
- * additions, and the submission.
+ * each place, the server's preview of the additions, and the submission.
  */
 export function useFolderEditWorkspace({
   target,
   currentItems,
   initialRemote,
-  canAssign,
   localOnly = false,
   demo = false,
   onApplied,
@@ -76,8 +74,6 @@ export function useFolderEditWorkspace({
   /** The media of the edited work, which the page has already loaded. */
   currentItems: MediaItem[];
   initialRemote?: FolderEditInitialRemote | null;
-  /** Whether the viewer may assign added lyrics to tracks. */
-  canAssign: boolean;
   /** Lists only local places, for a custom work that no remote source has. */
   localOnly?: boolean;
   /** Demo previews the edit with a sample plan, asks no remote source, and applies nothing. */
@@ -86,7 +82,7 @@ export function useFolderEditWorkspace({
 }) {
   const { t } = useTranslation();
   const toast = useToast();
-  const currentFiles = useMemo(() => localFolderFiles(currentItems, target.rootPath), [currentItems, target.rootPath]);
+  const currentFiles = useMemo(() => localFolderFiles(currentItems, target.folderId), [currentItems, target.folderId]);
   const currentResource = useMemo<FolderEditResource>(
     () => folderEditResources({ workId: target.workId, primaryCode: "", editions: [], warnings: [] }, target)[0],
     [target],
@@ -94,25 +90,9 @@ export function useFolderEditWorkspace({
   const [resources, setResources] = useState<FolderEditResource[]>([currentResource]);
   const [sourcesStatus, setSourcesStatus] = useState<"loading" | "ready" | "error">("loading");
   const [sourcesAttempt, setSourcesAttempt] = useState(0);
-  const {
-    files,
-    setFiles,
-    selection,
-    setSelection,
-    setSelected,
-    lyrics,
-    setLyrics,
-    setLyricsRole,
-    loadResource,
-    readyFiles,
-  } = useFolderWorkspaceFiles();
+  const { files, setFiles, selection, setSelection, setSelected, loadResource, readyFiles } = useFolderWorkspaceFiles();
   const [activeId, setActiveId] = useState(CURRENT_FOLDER_RESOURCE);
   const [decisions, setDecisions] = useState<Record<string, RemoteFetchFileDecision>>({});
-  const [plan, setPlan] = useState<WorkFolderEditPlan | null>(null);
-  const [plannedRevision, setPlannedRevision] = useState("");
-  const [planFailed, setPlanFailed] = useState(false);
-  const [planAttempt, setPlanAttempt] = useState(0);
-  const [assign, setAssign] = useState(true);
   const [applying, setApplying] = useState(false);
   const [layout, setLayout] = useState<FolderEditLayout>(emptyFolderEditLayout);
   const [merged, setMerged] = useState<ReadonlySet<number>>(new Set());
@@ -149,10 +129,9 @@ export function useFolderEditWorkspace({
   );
 
   useEffect(() => {
-    const controller = new AbortController();
     setSourcesStatus("loading");
-    api.getWorkFolderEditSources(target.workId, controller.signal).then(
-      (sources) => {
+    return startLoad((signal) => api.getWorkFolderEditSources(target.workId, signal), {
+      onSuccess: (sources) => {
         const next = folderEditResources(sources, target);
         setResources(next);
         setSourcesStatus("ready");
@@ -164,11 +143,8 @@ export function useFolderEditWorkspace({
         setActiveId(remote.id);
         void loadResource(remote);
       },
-      () => {
-        if (!controller.signal.aborted) setSourcesStatus("error");
-      },
-    );
-    return () => controller.abort();
+      onError: () => setSourcesStatus("error"),
+    });
   }, [loadResource, sourcesAttempt, target]);
 
   // A check asks the remote sources again; until then the list shows the
@@ -203,17 +179,16 @@ export function useFolderEditWorkspace({
   }, [demo, t, target, toast]);
 
   const merges = useMemo(() => folderEditMerges(resources, merged), [merged, resources]);
-  // A file that is cleared, or becomes lyrics, gives up its place, so selecting
-  // it again cannot land it where another file has gone since.
+  // A file that is cleared gives up its place, so selecting it again cannot
+  // land it where another file has gone since.
   const placementKeys = useMemo(
-    () =>
-      folderEditPlacementKeys({ resources, files: readyFiles, selection, lyrics, keyFor: folderEditResourceItemKey }),
-    [lyrics, readyFiles, resources, selection],
+    () => folderEditPlacementKeys({ resources, files: readyFiles, selection, keyFor: folderEditResourceItemKey }),
+    [readyFiles, resources, selection],
   );
   useEffect(() => setLayout((current) => prunedLayout(current, placementKeys)), [placementKeys]);
   const request = useMemo(
-    () => folderEditRequest({ target, resources, files: readyFiles, selection, lyrics, decisions, layout, merges }),
-    [decisions, layout, lyrics, merges, readyFiles, resources, selection, target],
+    () => folderEditRequest({ target, resources, files: readyFiles, selection, decisions, layout, merges }),
+    [decisions, layout, merges, readyFiles, resources, selection, target],
   );
   const revision = useMemo(() => JSON.stringify(request), [request]);
   const needsPlan = folderEditNeedsPlan(request);
@@ -223,11 +198,9 @@ export function useFolderEditWorkspace({
   // undo itself can be taken back.
   const [undone, setUndone] = useState<{
     selection: typeof selection;
-    lyrics: typeof lyrics;
     decisions: typeof decisions;
     layout: FolderEditLayout;
     merged: ReadonlySet<number>;
-    assign: boolean;
   } | null>(null);
   useEffect(() => {
     if (changed) setUndone(null);
@@ -236,48 +209,28 @@ export function useFolderEditWorkspace({
   useEffect(() => setUndone(null), [currentFiles]);
   const undoAll = () => {
     if (!changed || applying) return;
-    setUndone({ selection, lyrics, decisions, layout, merged, assign });
+    setUndone({ selection, decisions, layout, merged });
     setSelection({ [CURRENT_FOLDER_RESOURCE]: new Set(currentFiles.map((file) => file.path)) });
-    setLyrics({});
     setDecisions({});
     setLayout(emptyFolderEditLayout);
     setMerged(new Set());
-    setAssign(true);
   };
   const restore = () => {
     if (!undone || applying) return;
     setSelection(undone.selection);
-    setLyrics(undone.lyrics);
     setDecisions(undone.decisions);
     setLayout(undone.layout);
     setMerged(undone.merged);
-    setAssign(undone.assign);
     setUndone(null);
   };
 
-  useEffect(() => {
-    if (demo || !needsPlan || applying) return;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      api.planWorkFolderEdit(target.workId, request).then(
-        (next) => {
-          if (cancelled) return;
-          setPlan(next);
-          setPlannedRevision(revision);
-          setPlanFailed(false);
-        },
-        () => {
-          if (!cancelled) setPlanFailed(true);
-        },
-      );
-    }, PLAN_DELAY_MS);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-    // The request is identified by its revision.
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [applying, demo, needsPlan, planAttempt, revision, target.workId]);
+  const planRequest = useDebouncedRequest<WorkFolderEditPlan>({
+    key: `${target.workId}:${revision}`,
+    enabled: !demo && needsPlan && !applying,
+    delayMs: PLAN_DELAY_MS,
+    send: (signal) => api.planWorkFolderEdit(target.workId, request, signal),
+  });
+  const plan = planRequest.result;
 
   const pending = useMemo(() => {
     const additions: FolderEditPendingAddition[] = [];
@@ -285,19 +238,19 @@ export function useFolderEditWorkspace({
       if (resource.kind === "current") continue;
       const selected = selection[resource.id];
       for (const file of readyFiles[resource.id] ?? []) {
-        if (!selected?.has(file.path) || lyrics[resource.id]?.[file.path] !== undefined) continue;
+        if (!selected?.has(file.path)) continue;
         const key = folderEditResourceItemKey(resource, file.path);
         additions.push({ key, path: file.path, kind: file.kind, sizeBytes: file.sizeBytes });
       }
     }
     return additions;
-  }, [lyrics, readyFiles, resources, selection]);
+  }, [readyFiles, resources, selection]);
   const demoPlan = useMemo(
     () => (demo && needsPlan ? createDemoFolderEditPlan(target, request, pending) : null),
     [demo, needsPlan, pending, request, target],
   );
   const currentPlan = demo ? demoPlan : needsPlan ? plan : null;
-  const planCurrent = needsPlan && (demo || plannedRevision === revision);
+  const planCurrent = needsPlan && (demo || planRequest.current);
   const readiness = folderEditReadiness({ request, plan: currentPlan, planCurrent });
   const currentSelection = selection[CURRENT_FOLDER_RESOURCE] ?? noSelection;
   // Until the preview catches up, the final folder shows only what is still
@@ -327,27 +280,6 @@ export function useFolderEditWorkspace({
       }),
     [currentFiles, currentSelection, merges, readyFiles, resources, result],
   );
-  const lyricsAdditionCount = request.additions.filter((addition) => addition.language !== undefined).length;
-  const assignments = useMemo(() => {
-    if (!canAssign || !assign || !planCurrent || !currentPlan || lyricsAdditionCount === 0) return [];
-    const kept = folderAudio(currentItems, target.rootPath).filter((audio) => currentSelection.has(audio.path));
-    const addedAudio = result
-      .filter((entry) => entry.kind === "audio" && (entry.state === "add_local" || entry.state === "add_remote"))
-      .map((entry) => entry.path);
-    return folderEditAssignments({ audio: kept, addedAudio, additions: request.additions, items: currentPlan.items });
-  }, [
-    assign,
-    canAssign,
-    currentItems,
-    currentPlan,
-    currentSelection,
-    lyricsAdditionCount,
-    planCurrent,
-    request.additions,
-    result,
-    target.rootPath,
-  ]);
-
   /**
    * Applies the edit. An edit that merges folders passes the merge check it was reviewed with: the
    * request the check compared, which must still be the edit, and the check's review.
@@ -363,20 +295,17 @@ export function useFolderEditWorkspace({
       onApplied(
         await api.applyWorkFolderEdit(target.workId, {
           ...request,
-          ...(assignments.length > 0 ? { assignments } : {}),
           ...(mergeReview ? { mergeReview: mergeReview.review } : {}),
           requestId: requestId.current,
         }),
       );
     } catch (error) {
       if (error instanceof ApiError && error.status === 409 && error.code === "folder_edit_merge_changed") {
-        setPlannedRevision("");
-        setPlanAttempt((value) => value + 1);
+        planRequest.invalidate();
         toast.notify({ kind: "warning", message: t("folderEdit.mergeChanged") });
       } else if (error instanceof ApiError && error.status === 409 && error.code === "folder_edit_conflict") {
         // The folder changed since the preview; show what it holds now.
-        setPlannedRevision("");
-        setPlanAttempt((value) => value + 1);
+        planRequest.invalidate();
         toast.notify({ kind: "warning", message: t("folderEdit.folderChanged") });
       } else {
         toast.notify(toastFromError(error, t("folderEdit.applyFailed")));
@@ -395,33 +324,23 @@ export function useFolderEditWorkspace({
     localOnly,
     files,
     selection,
-    lyrics,
     activeResource: resources.find((resource) => resource.id === activeId) ?? resources[0] ?? currentResource,
     selectResource,
     openResource,
     retryResource: (resource: FolderEditResource) => void loadResource(resource),
     setSelected,
-    setLyricsRole,
     decisions,
     setDecision: (decision: RemoteFetchFileDecision) =>
       setDecisions((current) => ({ ...current, [decision.itemKey]: decision })),
     additionCount: request.additions.length,
-    lyricsAdditionCount,
     rootPath: target.rootPath,
     result,
     readiness,
     addCount: currentPlan?.summary.add ?? 0,
     removeCount: request.removeLocationIds.length,
     conflictCount: currentPlan?.summary.conflict ?? 0,
-    planFailed: needsPlan && planFailed && !planCurrent,
-    retryPlan: () => {
-      setPlanFailed(false);
-      setPlanAttempt((value) => value + 1);
-    },
-    canAssign,
-    assign,
-    setAssign,
-    assignmentCount: assignments.length,
+    planFailed: needsPlan && planRequest.failed && !planCurrent,
+    retryPlan: planRequest.retry,
     applying,
     arrange: folderWorkspaceArrange({
       layout,
@@ -432,7 +351,6 @@ export function useFolderEditWorkspace({
           ...current,
           [resource.id]: withFolderEditPaths(current[resource.id] ?? new Set(), paths, true),
         }));
-        if (resource.kind !== "current") setLyricsRole(resource.id, paths, null);
       },
       forget: (keys) =>
         setDecisions((current) => {

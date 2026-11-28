@@ -1,8 +1,6 @@
 // Pure derivations for the persisted work detail: which source context is
 // active, what the directory shows, and the page presentation props.
 
-import type { ReactNode } from "react";
-
 import {
   type RemoteSourceAvailability,
   remoteSourceCanBrowse,
@@ -23,6 +21,7 @@ import { buildRemoteTree, buildTree, emptyTree, type TreeStats } from "@/feature
 import i18n from "@/i18n";
 import { type ActiveSourceInfoModel, trackedPresenceForRemoteSource } from "@/features/work-detail/workDetailHelpers";
 import type { DetailActionMode } from "@/features/work-detail/WorkDetailActionBars";
+import type { HeroPlaybackBlock } from "@/features/work-detail/heroPlaybackModel";
 import type { detailHeroModel, UnifiedWorkDetailPresentation } from "@/features/work-detail/WorkDetailLayout";
 import { mergeRemoteWorkVersions } from "@/features/work-detail/workVersionModel";
 import type { resolveMetadataVariant } from "@/features/work-detail/metadataPresentationModel";
@@ -64,13 +63,10 @@ export function activeLocalFolders(work: WorkDetail | null, fileSourceId: number
  * that folder's local locations. Files at the same path in two folders of a
  * work are one media item, so its locations in the other folders are dropped.
  */
-export function mediaItemsInLocalFolder(items: MediaItem[], rootPath: string) {
-  const root = rootPath.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-  if (!root) return items;
-  const insideRoot = (path: string) => path.replace(/\\/g, "/").replace(/^\/+/, "").startsWith(`${root}/`);
+export function mediaItemsInLocalFolder(items: MediaItem[], folderId: number) {
   return items.flatMap((item) => {
     const locations = item.locations.filter(
-      (location) => location.locationType !== "local" || insideRoot(location.path),
+      (location) => location.locationType !== "local" || location.folderId === folderId,
     );
     return locations.some((location) => location.locationType === "local") ? [{ ...item, locations }] : [];
   });
@@ -102,7 +98,6 @@ export function persistedMediaTreeInput({
   return {
     mediaLoading,
     localItems: localDirectoryWork?.mediaItems ?? [],
-    localCode: localDirectoryWork?.primaryCode ?? work?.primaryCode ?? "",
     fileSourceId: selectedTrackedForked ? selectedTrackedSourceID : (selectedSource?.fileSourceId ?? null),
     selectionKey: `${selectedSource?.key ?? ""}:${selectedTrackedSourceID ?? selectedRemoteSourceID ?? 0}`,
     remoteSelected: Boolean(selectedRemoteSource),
@@ -219,6 +214,31 @@ export function persistedDirectoryLoadState({
   };
 }
 
+/** Why the shown source of a persisted work has nothing to play, matching what its Directory shows. */
+export function persistedHeroPlaybackBlock({
+  mediaLoadError,
+  showNoSourceDirectory,
+  selectedSource,
+  selectedRemoteSource,
+  selectedRemoteDetail,
+}: {
+  mediaLoadError: string;
+  showNoSourceDirectory: boolean;
+  selectedSource: SourceTabInfo | null | undefined;
+  selectedRemoteSource: RemoteSourceAvailability | null | undefined;
+  selectedRemoteDetail: RemoteWorkDetail | null;
+}): HeroPlaybackBlock | null {
+  if (mediaLoadError) return "unavailable";
+  if (selectedSource?.kind === "local" && selectedSource.status !== "available") {
+    return selectedSource.offline ? "offline" : "unavailable";
+  }
+  if (selectedRemoteSource && (!remoteSourceCanBrowse(selectedRemoteSource.summary) || !selectedRemoteDetail)) {
+    return "unavailable";
+  }
+  if (showNoSourceDirectory) return "no_source";
+  return null;
+}
+
 export function persistedActiveSourceLabel(
   selectedTrackedPresence: SourcePresenceItem | null,
   selectedSource: SourceTabInfo | null | undefined,
@@ -254,6 +274,7 @@ export function persistedSourceInfo({
     : { kind: "no_source" as const, status: "degraded" as const, statusLabel: i18n.t("libraryDetail.loadingSource") };
   return {
     label,
+    tabLabel: selectedSource?.label ?? label,
     ...source,
     stats: directoryStats,
     loading: isDirectoryLoading || selectedSourceDetailsLoading,
@@ -342,13 +363,14 @@ export function persistedWorkDetailPresentation({
   displayTranslations: WorkDetail["translations"];
   activeEditionCode: string;
   selectedRemoteDetail: RemoteWorkDetail | null;
-  personalTags: ReactNode;
+  personalTags: UnifiedWorkDetailPresentation["personalTags"];
   loading: boolean;
   metadataSync?: WorkMetadataSyncStatus;
   canSyncMetadata: boolean;
   metadataSyncBusy: boolean;
   onSyncMetadata: () => void;
-  onLinkMetadata: () => void;
+  /** Absent for a viewer who may not edit the work's metadata. */
+  onLinkMetadata?: () => void;
   onMetadataVariantSelect: (key: string) => void;
   onVersionSelect: (translation: WorkDetail["translations"][number]) => void;
 }): UnifiedWorkDetailPresentation {

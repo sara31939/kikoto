@@ -1,8 +1,9 @@
-import { Activity, Clock3, Play, RotateCcw, ScanLine } from "lucide-react";
+import { ArchiveRestore, Clock3, Play, RotateCcw, ScanLine, TriangleAlert } from "lucide-react";
 
 import { type NavigationItem, type PageID } from "@/app/navigation";
+import { workflowRunPath, workflowsPath } from "@/lib/workflowLinks";
 import { api } from "@/lib/api";
-import { PERSONAL_TAB_PERMISSION, personalTabPath, personalTabs } from "@/pages/personalTabs";
+import { PERSONAL_DATA_PERMISSION, YOUR_DATA_SETTINGS_PATH } from "@/pages/settingsPaths";
 
 export type CommandAction = {
   id: string;
@@ -38,6 +39,7 @@ export function commandActions({
     const translated = translate?.(key);
     return !translated || translated === key ? fallback : translated;
   };
+  const recordsItem = visibleNavItems.find((item) => item.id === "records");
   const maintenanceActions: CommandAction[] = [
     ...(canView("workflows:run") && canView("metadata:sync")
       ? [
@@ -48,8 +50,26 @@ export function commandActions({
             icon: <ScanLine className="h-4 w-4" />,
             closeOnRun: false,
             run: async () => {
-              const result = await api.runLocalScan({ followUpRun: false });
-              onOpenPath(`/workflows?activity=1&workflow=local_library_scan&run=${result.runId}`);
+              const result = await api.runLocalScan();
+              onOpenPath(workflowRunPath(result.runId));
+            },
+          },
+        ]
+      : []),
+    // Record scans on its own workflow; the command follows the Record page,
+    // which is listed only while Record is on.
+    ...(canView("library:write") && recordsItem
+      ? [
+          {
+            id: "action:record_scan",
+            label: text("commands.scanRecordLibrary", "Scan Record library"),
+            description: text("commands.scanRecordLibraryDescription", "Find new and removed files in Record"),
+            icon: <ScanLine className="h-4 w-4" />,
+            closeOnRun: false,
+            run: async () => {
+              const result = await api.queueRecordScan();
+              if (canView("workflows:run")) onOpenPath(workflowRunPath(result.runId));
+              else onOpenPage("records");
             },
           },
         ]
@@ -64,7 +84,7 @@ export function commandActions({
             closeOnRun: false,
             run: async () => {
               const result = await api.runDLsiteSync();
-              onOpenPath(`/workflows?activity=1&workflow=metadata_sync&run=${result.runId}`);
+              onOpenPath(workflowRunPath(result.runId));
             },
           },
         ]
@@ -81,7 +101,7 @@ export function commandActions({
             closeOnRun: false,
             run: async () => {
               await api.recoverStaleWorkflowRuns();
-              onOpenPath("/workflows?activity=1");
+              onOpenPath(workflowsPath());
             },
           },
         ]
@@ -91,18 +111,18 @@ export function commandActions({
   const activityActions: CommandAction[] = canView("workflows:run")
     ? [
         {
-          id: "activity:open",
-          label: text("commands.openActivity", "Activity"),
-          description: text("commands.openActivityDescription", "Running jobs and runs needing attention"),
-          icon: <Activity className="h-4 w-4" />,
-          run: () => onOpenPath("/workflows?activity=1"),
+          id: "activity:attention",
+          label: text("commands.activityAttention", "Runs needing attention"),
+          description: text("commands.activityAttentionDescription", "Failed runs and items waiting for review"),
+          icon: <TriangleAlert className="h-4 w-4" />,
+          run: () => onOpenPath(workflowsPath({ tab: "attention" })),
         },
         {
           id: "activity:history",
           label: text("commands.activityHistory", "Workflow history"),
           description: text("commands.activityHistoryDescription", "Finished and acknowledged workflow runs"),
           icon: <Clock3 className="h-4 w-4" />,
-          run: () => onOpenPath("/workflows?activity=1&view=history"),
+          run: () => onOpenPath(workflowsPath({ tab: "history" })),
         },
       ]
     : [];
@@ -117,15 +137,17 @@ export function commandActions({
         icon: <item.icon className="h-4 w-4" />,
         run: () => onOpenPage(item.id),
       },
-      // Personal Settings tabs stay direct Quick actions destinations.
-      ...(item.id === "settings" && canView(PERSONAL_TAB_PERMISSION)
-        ? personalTabs.map((tab) => ({
-            id: `settings:${tab.id}`,
-            label: text(tab.labelKey, tab.label),
-            description: personalTabPath(tab.id),
-            icon: <tab.icon className="h-4 w-4" />,
-            run: () => onOpenPath(personalTabPath(tab.id)),
-          }))
+      // Your data is a section of Settings and stays a direct Quick actions destination.
+      ...(item.id === "settings" && canView(PERSONAL_DATA_PERMISSION)
+        ? [
+            {
+              id: "settings:data",
+              label: text("nav.userData", "Your data"),
+              description: YOUR_DATA_SETTINGS_PATH,
+              icon: <ArchiveRestore className="h-4 w-4" />,
+              run: () => onOpenPath(YOUR_DATA_SETTINGS_PATH),
+            },
+          ]
         : []),
     ]),
     ...activityActions,

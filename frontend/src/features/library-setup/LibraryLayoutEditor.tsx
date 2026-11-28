@@ -1,5 +1,5 @@
 import { ArrowRight, HardDrive, Layers, Loader2, PlugZap, Save } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
@@ -29,20 +29,33 @@ function draftFromLayout(layout: LibraryLayout): Draft {
 
 /**
  * Library mode, storage pools, and the Fetch pool. Shared by Settings and
- * onboarding; changes that move files require a confirmed migration.
+ * onboarding; changes that move files require a confirmed migration. Settings
+ * adds the local library's other fields as `children`, saved by the same Save
+ * before the layout.
  */
 export function LibraryLayoutEditor({
   layout,
   readOnly,
   saveLabel,
   onSaved,
+  onDone,
+  onCancel,
   onContinue,
+  children,
+  childrenDirty = false,
+  onSaveChildren,
 }: {
   layout: LibraryLayout;
   readOnly: boolean;
   saveLabel?: string;
   onSaved: (layout: LibraryLayout) => void;
+  onDone?: () => void;
+  onCancel?: () => void;
   onContinue?: () => void;
+  children?: ReactNode;
+  childrenDirty?: boolean;
+  /** Saves the fields in `children`; false stops the save. */
+  onSaveChildren?: () => Promise<boolean>;
 }) {
   const { t } = useTranslation();
   const toast = useToast();
@@ -57,11 +70,12 @@ export function LibraryLayoutEditor({
     const registered = layout.mode === "pools" ? layout.pools : [];
     return [...new Set([...registered.map((pool) => pool.path), ...layout.candidates])].sort();
   }, [layout]);
-  const dirty =
+  const layoutDirty =
     !layout.configured ||
     draft.mode !== saved.mode ||
     draft.fetchPool !== saved.fetchPool ||
     draft.pools.join("\n") !== saved.pools.join("\n");
+  const dirty = layoutDirty || childrenDirty;
   const poolsInvalid = draft.mode === "pools" && draft.pools.length === 0;
 
   const setMode = (mode: LibraryMode) => setDraft((current) => ({ ...current, mode }));
@@ -82,6 +96,12 @@ export function LibraryLayoutEditor({
     setSaving(true);
     setSaveError("");
     try {
+      if (childrenDirty && onSaveChildren && !(await onSaveChildren())) return;
+      if (!layoutDirty) {
+        toast.success(t("librarySetup.saved"));
+        onDone?.();
+        return;
+      }
       if (
         layout.configured &&
         (draft.mode !== layout.mode || (draft.mode === "pools" && draft.fetchPool !== layout.fetchPool))
@@ -103,6 +123,7 @@ export function LibraryLayoutEditor({
       setDraft(draftFromLayout(next));
       onSaved(next);
       toast.success(t("librarySetup.saved"));
+      onDone?.();
     } catch (error) {
       reportSaveError(error);
     } finally {
@@ -123,6 +144,7 @@ export function LibraryLayoutEditor({
       );
       window.dispatchEvent(new Event(SITE_MAINTENANCE_EVENT));
       setMigrationPreview(null);
+      onDone?.();
     } catch (error) {
       reportSaveError(error);
     } finally {
@@ -194,7 +216,7 @@ export function LibraryLayoutEditor({
         </div>
 
         {draft.mode === "standard" && layout.mode === "standard" && (
-          <div className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium">{t("librarySetup.dataFolder")}</span>
             {statusBadge("")}
             {reconnectButton("")}
@@ -211,12 +233,12 @@ export function LibraryLayoutEditor({
               {folders.length === 0 ? (
                 <p className="text-sm text-muted-foreground">{t("librarySetup.noFolders")}</p>
               ) : (
-                <ul className="divide-y rounded-md border">
+                <ul className="divide-y border-y">
                   {folders.map((path) => {
                     const checked = draft.pools.includes(path);
                     const id = `library-pool-${path}`;
                     return (
-                      <li key={path} className="flex min-w-0 flex-wrap items-center gap-2 px-3 py-2">
+                      <li key={path} className="flex min-w-0 flex-wrap items-center gap-2 py-2">
                         <Checkbox
                           id={id}
                           checked={checked}
@@ -253,12 +275,19 @@ export function LibraryLayoutEditor({
           </div>
         )}
 
+        {children}
+
         {saveError && !migrationPreview && (
           <p role="alert" className="text-sm text-error-foreground">
             {saveError}
           </p>
         )}
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          {onCancel && (
+            <Button variant="outline" size="sm" disabled={saving} onClick={onCancel}>
+              {t("maintenance.cancel")}
+            </Button>
+          )}
           <Button
             size="sm"
             disabled={readOnly || saving || (!dirty && !onContinue) || poolsInvalid}
@@ -278,6 +307,7 @@ export function LibraryLayoutEditor({
       {migrationPreview && (
         <Dialog
           onClose={() => setMigrationPreview(null)}
+          layer="overlay-nested"
           size="sm"
           ariaLabel={t("librarySetup.migration.confirmTitle")}
         >

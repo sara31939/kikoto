@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { NotFoundPage } from "@/app/NotFoundPage";
 import { announceRemoteTrackCreated } from "@/app/remoteTrackWorkflows";
+import { useAuth } from "@/auth/AuthProvider";
 import { REMOTE_TRACK_PERMISSIONS, usePermissionGate } from "@/auth/usePermissionGate";
 import { toastFromError, useToast } from "@/components/ui/toast";
 import { DirectoryManagerDialog } from "@/features/work-detail/dialogs/DirectoryManagerDialog";
@@ -12,7 +13,6 @@ import {
   buildRemoteTree,
   buildTree,
   emptyTree,
-  flattenTreeFiles,
   toPlayerTrack,
   toRemotePreviewPlayerTrack,
   type TreeNode,
@@ -24,9 +24,10 @@ import { queuePlayerTrack } from "@/features/work-detail/media/queuePlayerTrack"
 import { usePlaybackAutoRouting, usePlaybackRoutePath } from "@/features/work-detail/media/usePlaybackAutoRouting";
 import {
   type RemoteOnlyDetailActionsProps,
-  RemoteOnlyIdentityActions,
+  RemoteOnlyHeroActions,
   RemoteOnlySourceActions,
 } from "@/features/work-detail/RemoteOnlyDetailActions";
+import { heroPlayback as heroPlaybackFor } from "@/features/work-detail/heroPlaybackModel";
 import { RemoteOnlyDirectoryPanel } from "@/features/work-detail/RemoteOnlyDirectoryPanel";
 import {
   remoteOnlyActiveSourceState,
@@ -41,7 +42,6 @@ import {
   type SourceTabInfo,
 } from "@/features/work-detail/source/sourceContextModel";
 import { useRemoteOnlyWorkDetailData } from "@/features/work-detail/useRemoteOnlyWorkDetailData";
-import type { SourceActionLayout } from "@/features/work-detail/WorkDetailActionBars";
 import {
   listeningStatusLabel,
   remoteDetailActionCode,
@@ -98,6 +98,7 @@ export function RemoteOnlyWorkDetailController({
   onWorksChanged: () => Promise<void>;
 }) {
   const toast = useToast();
+  const auth = useAuth();
   const requireTrack = usePermissionGate(REMOTE_TRACK_PERMISSIONS, { deferDemo: true });
   const { t } = useTranslation();
   const fetchWorkspace = useRemoteFetchWorkspace({ onWorksChanged });
@@ -139,7 +140,6 @@ export function RemoteOnlyWorkDetailController({
     [detail],
   );
   const directoryStats = useMemo(() => treeStats(tree), [tree]);
-  const remoteFiles = useMemo(() => flattenTreeFiles(tree), [tree]);
   const remoteTabs = useMemo<SourceTabInfo[]>(
     () =>
       buildSourceTabs(
@@ -179,14 +179,14 @@ export function RemoteOnlyWorkDetailController({
   const materializedTree = useMemo(() => {
     if (!trackedWork) return emptyTree();
     if (activeRemoteTabInfo?.kind === "tracked" && activeTrackedForked) {
-      return buildTree(trackedWork.mediaItems, activeTrackedPresence?.fileSourceId ?? null, trackedWork.primaryCode);
+      return buildTree(trackedWork.mediaItems, activeTrackedPresence?.fileSourceId ?? null);
     }
     if (
       activeRemoteTabInfo?.kind === "local" &&
       activeRemoteTabInfo.status === "available" &&
       activeRemoteTabInfo.fileSourceId
     ) {
-      return buildTree(trackedWork.mediaItems, activeRemoteTabInfo.fileSourceId, trackedWork.primaryCode);
+      return buildTree(trackedWork.mediaItems, activeRemoteTabInfo.fileSourceId);
     }
     return emptyTree();
   }, [activeRemoteTabInfo, activeTrackedForked, activeTrackedPresence?.fileSourceId, trackedWork]);
@@ -231,13 +231,16 @@ export function RemoteOnlyWorkDetailController({
     }
   };
 
-  /** A mark or list adds a work that is not yet in the Library, which is tracking. */
-  const syncForUserState = async (reason: string) => {
+  /**
+   * A mark or list adds a work that is not yet in the Library, which is
+   * tracking; a mark is set in the same request.
+   */
+  const syncForUserState = async (reason: string, status?: ListeningStatus) => {
     if (!detail?.primaryCode || !requireTrack()) return null;
     setIsFetching(true);
     setMessage("");
     try {
-      const result = await api.syncRemoteSourceWork(source.id, remoteDetailActionCode(detail), reason);
+      const result = await api.syncRemoteSourceWork(source.id, remoteDetailActionCode(detail), reason, status);
       await onWorksChanged();
       setDetail((current) => (current ? { ...current, workId: result.workId, importStatus: "synced" } : current));
       return result.workId;
@@ -251,16 +254,15 @@ export function RemoteOnlyWorkDetailController({
 
   const updateRemoteMark = async (status: ListeningStatus) => {
     if (!detail?.primaryCode) return;
-    const workID = detail.workId ?? (await syncForUserState("detail_mark_interest"));
-    if (!workID) return;
+    const markedAs = (marked: ListeningStatus) =>
+      toast.success(t("library.markedAs", { code: detail.primaryCode, status: listeningStatusLabel(marked, t) }));
+    if (!detail.workId) {
+      if (await syncForUserState("detail_mark_interest", status)) markedAs(status);
+      return;
+    }
     try {
-      const result = await api.updateWorkUserState(workID, { listeningStatus: status });
-      toast.success(
-        t("library.markedAs", {
-          code: detail.primaryCode,
-          status: listeningStatusLabel(result.listeningStatus, t),
-        }),
-      );
+      const result = await api.updateWorkUserState(detail.workId, { listeningStatus: status });
+      markedAs(result.listeningStatus);
       await onWorksChanged();
     } catch (error) {
       toast.notify(toastFromError(error, t("errors.unavailable")));
@@ -307,14 +309,14 @@ export function RemoteOnlyWorkDetailController({
   const playRemoteTracks = (tracks: TreeTrack[], locationId: number) => {
     if (!detail || tracks.length === 0) return;
     player.playQueue(
-      tracks.map((track) => toRemotePreviewPlayerTrack(track, detail, remoteFiles)),
+      tracks.map((track) => toRemotePreviewPlayerTrack(track, detail)),
       locationId,
     );
   };
 
   const queueRemoteTrack = (track: TreeTrack, next: boolean) => {
     if (!detail) return;
-    queuePlayerTrack(player, toast, toRemotePreviewPlayerTrack(track, detail, remoteFiles), next);
+    queuePlayerTrack(player, toast, toRemotePreviewPlayerTrack(track, detail), next);
   };
 
   const playMaterializedTracks = (tracks: TreeTrack[], locationId: number) => {
@@ -360,10 +362,23 @@ export function RemoteOnlyWorkDetailController({
     playbackRouting.disable();
     setActiveRemoteTab(key);
   };
+  const heroPlayback = heroPlaybackFor({
+    root: visibleTree,
+    routingRules: directoryRoutingRules,
+    loading: isDetailLoading || treeLoading,
+    resumable: false,
+    blocked: message || treeError ? "unavailable" : null,
+  });
   const detailActionProps: RemoteOnlyDetailActionsProps = {
     detail,
     source,
     busy: isFetching || fetchWorkspace.isBusy,
+    heroPlayback,
+    canTrack: auth.demoMode || auth.hasPermission("remote:track"),
+    canFetch: auth.demoMode || (auth.hasPermission("remote:fetch") && auth.hasPermission("metadata:sync")),
+    // The Hero plays the folder the Directory opens on in the selected tab.
+    onPlay: ({ tracks, locationId }) =>
+      primaryRemoteSelected ? playRemoteTracks(tracks, locationId) : playMaterializedTracks(tracks, locationId),
     primaryRemoteSelected,
     availabilityLoading,
     hasTrackedSource,
@@ -377,10 +392,8 @@ export function RemoteOnlyWorkDetailController({
     canUntrack: requireTrack,
     onFetch: openSaveWorkspace,
   };
-  const heroActions = <RemoteOnlyIdentityActions {...detailActionProps} />;
-  const renderSourceActions = (layout: SourceActionLayout) => (
-    <RemoteOnlySourceActions {...detailActionProps} layout={layout} />
-  );
+  const heroActions = <RemoteOnlyHeroActions {...detailActionProps} />;
+  const sourceActions = <RemoteOnlySourceActions {...detailActionProps} />;
   const directoryPanel = (
     <RemoteOnlyDirectoryPanel
       detail={detail}
@@ -398,7 +411,6 @@ export function RemoteOnlyWorkDetailController({
       isDetailLoading={isDetailLoading}
       treeLoading={treeLoading}
       root={visibleTree}
-      directoryStats={visibleDirectoryStats}
       directoryRoutingRules={directoryRoutingRules}
       currentLocationId={player.currentLocationId}
       currentPlaybackKey={player.currentPlaybackKey}
@@ -464,7 +476,7 @@ export function RemoteOnlyWorkDetailController({
       mobileTab={mobileDetailTab}
       onMobileTabChange={setMobileDetailTab}
       actions={heroActions}
-      renderSourceActions={renderSourceActions}
+      sourceActions={sourceActions}
       directory={directoryPanel}
       onBack={onBack}
     >

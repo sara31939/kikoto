@@ -23,6 +23,7 @@ import { segmentedItemClassName, segmentedListClassName } from "@/components/ui/
 import { toastFromError, useToast } from "@/components/ui/toast";
 import { dateTimeFormat, formatNumber } from "@/i18n/format";
 import { useLocale } from "@/i18n/LocaleProvider";
+import { createEffectScope, startLoad } from "@/lib/effectScope";
 import { announceListeningHistoryCleared } from "@/lib/listeningHistoryEvents";
 import {
   listeningApi,
@@ -30,6 +31,7 @@ import {
   type ListeningBreakdownRank,
   type ListeningCalendar as ListeningCalendarData,
   type ListeningHistoryPage as ListeningHistoryResult,
+  type ListeningNamedRange,
   type ListeningProfile,
   type ListeningStatistics,
   type ListeningStatisticsRange,
@@ -45,8 +47,8 @@ import {
   LISTENING_REPORT_RANGES,
   listeningCalendarWeeks,
   listeningDurationParts,
-  listeningRangeYear,
   listeningStreaks,
+  periodStart,
   reportDayCount,
   rhythmDays,
   sharePercent,
@@ -77,6 +79,16 @@ const BREAKDOWN_KINDS = ["tags", "voices", "circles"] as const;
 /** Breakdown rankings in switcher order; the first is the default. */
 const BREAKDOWN_RANKS: readonly ListeningBreakdownRank[] = ["preference", "time"];
 
+// The calendar year choice that stands for the past year.
+const PAST_YEAR = "past";
+
+// How a report names the first period it counts from, by its granularity.
+const reportStartFormat: Record<ListeningStatistics["granularity"], Intl.DateTimeFormatOptions> = {
+  day: { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" },
+  month: { year: "numeric", month: "short", timeZone: "UTC" },
+  year: { year: "numeric", timeZone: "UTC" },
+};
+
 function useDurationFormatter() {
   const { t } = useTranslation();
   return useCallback(
@@ -89,12 +101,12 @@ function useDurationFormatter() {
 }
 
 /**
- * Listening as a dashboard for a range the page's switcher picks: a named
- * range ending today, or a calendar year, which opens with its highlights.
- * The past year, or the chosen one, as a calendar, then the report for
- * a chosen range with totals, activity over time, the most listened works,
- * listening rhythm, and the leading tags, voices, and circles, with the full
- * per-work history collapsed below it. The history is a record rather than a
+ * Listening as a dashboard. The calendar shows the past year or a calendar
+ * year its own switcher picks, and a calendar year adds its highlights below
+ * it. The report's switcher picks a named range ending today for the totals,
+ * activity over time, the most listened works, listening rhythm, the taste
+ * profile, and the leading tags, voices, and circles, with the full per-work
+ * history collapsed below it. The history is a record rather than a
  * summary, so it loads only once opened, and the actions on the account's
  * listening data sit beside it. Works are the library's canonical works
  * throughout.
@@ -121,10 +133,16 @@ export function ListeningHistoryPage({
   const toast = useToast();
   const { resolvedLocale } = useLocale();
   const formatDuration = useDurationFormatter();
-  const [range, setRange] = useState<ListeningStatisticsRange>(LISTENING_REPORT_RANGES[0]);
-  const year = listeningRangeYear(range);
+  const [range, setRange] = useState<ListeningNamedRange>(LISTENING_REPORT_RANGES[0]);
+  // The calendar's own year; null for the past year.
+  const [year, setYear] = useState<string | null>(null);
   const [statistics, setStatistics] = useState<LoadState<ListeningStatistics>>({ status: "loading", data: null });
-  const [calendar, setCalendar] = useState<LoadState<ListeningCalendarData>>({ status: "loading", data: null });
+  const [yearStatistics, setYearStatistics] = useState<LoadState<ListeningStatistics>>({
+    status: "loading",
+    data: null,
+  });
+  const [pastCalendar, setPastCalendar] = useState<LoadState<ListeningCalendarData>>({ status: "loading", data: null });
+  const [yearCalendar, setYearCalendar] = useState<LoadState<ListeningCalendarData>>({ status: "loading", data: null });
   const [breakdown, setBreakdown] = useState<LoadState<ListeningBreakdown>>({ status: "loading", data: null });
   const [profile, setProfile] = useState<LoadState<ListeningProfile>>({ status: "loading", data: null });
   const [rank, setRank] = useState<ListeningBreakdownRank>(BREAKDOWN_RANKS[0]);
@@ -150,64 +168,64 @@ export function ListeningHistoryPage({
   }, [debouncedQuery, query]);
 
   useEffect(() => {
-    const controller = new AbortController();
     setStatistics((current) => ({ status: "loading", data: current.data }));
-    listeningApi
-      .statistics(range, controller.signal)
-      .then((data) => setStatistics({ status: "ready", data }))
-      .catch(() => {
-        if (!controller.signal.aborted) setStatistics((current) => ({ status: "error", data: current.data }));
-      });
-    return () => controller.abort();
+    return startLoad((signal) => listeningApi.statistics(range, signal), {
+      onSuccess: (data) => setStatistics({ status: "ready", data }),
+      onError: () => setStatistics((current) => ({ status: "error", data: current.data })),
+    });
   }, [range, statisticsToken]);
 
+  // The past year's calendar also feeds the rhythm of a monthly or yearly report, so it loads whatever year is shown.
   useEffect(() => {
-    const controller = new AbortController();
-    setCalendar((current) => ({ status: "loading", data: current.data }));
-    listeningApi
-      .calendar(year, controller.signal)
-      .then((data) => setCalendar({ status: "ready", data }))
-      .catch(() => {
-        if (!controller.signal.aborted) setCalendar((current) => ({ status: "error", data: current.data }));
-      });
-    return () => controller.abort();
+    setPastCalendar((current) => ({ status: "loading", data: current.data }));
+    return startLoad((signal) => listeningApi.calendar(null, signal), {
+      onSuccess: (data) => setPastCalendar({ status: "ready", data }),
+      onError: () => setPastCalendar((current) => ({ status: "error", data: current.data })),
+    });
+  }, [statisticsToken]);
+
+  useEffect(() => {
+    if (!year) return;
+    const scope = createEffectScope();
+    setYearCalendar((current) => ({ status: "loading", data: current.data }));
+    setYearStatistics((current) => ({ status: "loading", data: current.data }));
+    scope.load((signal) => listeningApi.calendar(year, signal), {
+      onSuccess: (data) => setYearCalendar({ status: "ready", data }),
+      onError: () => setYearCalendar((current) => ({ status: "error", data: current.data })),
+    });
+    scope.load((signal) => listeningApi.statistics(year as ListeningStatisticsRange, signal), {
+      onSuccess: (data) => setYearStatistics({ status: "ready", data }),
+      onError: () => setYearStatistics((current) => ({ status: "error", data: current.data })),
+    });
+    return scope.cancel;
   }, [statisticsToken, year]);
 
   useEffect(() => {
-    const controller = new AbortController();
     setProfile((current) => ({ status: "loading", data: current.data }));
-    listeningApi
-      .profile(range, controller.signal)
-      .then((data) => setProfile({ status: "ready", data }))
-      .catch(() => {
-        if (!controller.signal.aborted) setProfile((current) => ({ status: "error", data: current.data }));
-      });
-    return () => controller.abort();
+    return startLoad((signal) => listeningApi.profile(range, signal), {
+      onSuccess: (data) => setProfile({ status: "ready", data }),
+      onError: () => setProfile((current) => ({ status: "error", data: current.data })),
+    });
   }, [range, statisticsToken]);
 
   useEffect(() => {
-    const controller = new AbortController();
     setBreakdown((current) => ({ status: "loading", data: current.data }));
-    listeningApi
-      .breakdown(range, rank, controller.signal)
-      .then((data) => setBreakdown({ status: "ready", data }))
-      .catch(() => {
-        if (!controller.signal.aborted) setBreakdown((current) => ({ status: "error", data: current.data }));
-      });
-    return () => controller.abort();
+    return startLoad((signal) => listeningApi.breakdown(range, rank, signal), {
+      onSuccess: (data) => setBreakdown({ status: "ready", data }),
+      onError: () => setBreakdown((current) => ({ status: "error", data: current.data })),
+    });
   }, [range, rank, statisticsToken]);
 
   useEffect(() => {
     if (!recordsOpen) return;
-    const controller = new AbortController();
     setHistory((current) => ({ status: "loading", data: current.data }));
-    listeningApi
-      .history({ page, pageSize: LISTENING_HISTORY_PAGE_SIZE, query: debouncedQuery }, controller.signal)
-      .then((data) => setHistory({ status: "ready", data }))
-      .catch(() => {
-        if (!controller.signal.aborted) setHistory((current) => ({ status: "error", data: current.data }));
-      });
-    return () => controller.abort();
+    return startLoad(
+      (signal) => listeningApi.history({ page, pageSize: LISTENING_HISTORY_PAGE_SIZE, query: debouncedQuery }, signal),
+      {
+        onSuccess: (data) => setHistory({ status: "ready", data }),
+        onError: () => setHistory((current) => ({ status: "error", data: current.data })),
+      },
+    );
   }, [debouncedQuery, historyToken, page, recordsOpen]);
 
   const clearHistory = async () => {
@@ -241,6 +259,18 @@ export function ListeningHistoryPage({
   const leaderSeconds = rankedWorks[0]?.listenedSeconds ?? 0;
   const rangeDays = stats ? reportDayCount(stats.series, stats.today) : 0;
   const activeDayPercent = stats && rangeDays > 0 ? sharePercent(stats.activeDays, rangeDays) : null;
+  // A month-long range counts its days; a longer one names the day its count starts from.
+  const activeDayDetail =
+    activeDayPercent === null || !stats
+      ? null
+      : stats.range === "30d" || !stats.series[0]
+        ? t("personal.history.activeDayShare", { percent: activeDayPercent, count: rangeDays })
+        : t("personal.history.activeDayShareSince", {
+            percent: activeDayPercent,
+            date: dateTimeFormat(resolvedLocale, reportStartFormat[stats.granularity]).format(
+              periodStart(stats.series[0].period),
+            ),
+          });
   const perActiveDay = stats && stats.activeDays > 0 ? stats.listenedSeconds / stats.activeDays : 0;
   const perPlay = stats && stats.listenCount > 0 ? stats.listenedSeconds / stats.listenCount : 0;
   const recordDetail = (listenCount: number, lastPlayedAt: string) => {
@@ -251,77 +281,57 @@ export function ListeningHistoryPage({
     return t("personal.history.recordDetail", { plays, date });
   };
 
-  // While a year's calendar loads, the one on screen still belongs to the previous range.
-  const shownCalendar = calendar.data && (!year || calendar.data.from === `${year}-01-01`) ? calendar.data : null;
-  const calendarDays = useMemo(
-    () => (shownCalendar ? listeningCalendarWeeks(shownCalendar).days : null),
-    [shownCalendar],
+  // A monthly or yearly report reads its rhythm from the past year's days.
+  const pastCalendarDays = useMemo(
+    () => (pastCalendar.data ? listeningCalendarWeeks(pastCalendar.data).days : null),
+    [pastCalendar.data],
   );
-  const rhythm = stats ? rhythmDays(stats.series, stats.granularity, calendarDays) : null;
-  const longestStreak = useMemo(() => (calendarDays ? listeningStreaks(calendarDays).longest : null), [calendarDays]);
-  // A year stays selectable while it is the range, even once its listening is gone.
+  const rhythm = stats ? rhythmDays(stats.series, stats.granularity, pastCalendarDays) : null;
+  // While a year's calendar loads, the one on screen still belongs to the previous choice.
+  const calendar = year ? yearCalendar : pastCalendar;
+  const calendarData = year ? (yearCalendar.data ?? pastCalendar.data) : pastCalendar.data;
+  const calendarDataYear = year && yearCalendar.data ? yearCalendar.data.from.slice(0, 4) : null;
+  const shownYearCalendar = year && calendarDataYear === year ? yearCalendar.data : null;
+  const yearCalendarDays = useMemo(
+    () => (shownYearCalendar ? listeningCalendarWeeks(shownYearCalendar).days : null),
+    [shownYearCalendar],
+  );
+  const longestStreak = useMemo(
+    () => (yearCalendarDays ? listeningStreaks(yearCalendarDays).longest : null),
+    [yearCalendarDays],
+  );
+  const yearStats = year && yearStatistics.data?.range === year ? yearStatistics.data : null;
+  // A year stays selectable while the calendar shows it, even once its listening is gone.
   const years = [...new Set([...(year ? [year] : []), ...(stats?.years ?? [])])].sort().reverse();
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-5">
-      <div className="flex flex-wrap items-center justify-end gap-2" data-toast-avoid>
-        <div className={segmentedListClassName()} role="group" aria-label={t("personal.history.rangeLabel")}>
-          {LISTENING_REPORT_RANGES.map((option) => (
-            <button
-              key={option}
-              type="button"
-              className={segmentedItemClassName(range === option)}
-              aria-pressed={range === option}
-              onClick={() => setRange(option)}
-            >
-              {t(`personal.history.ranges.${option}`)}
-            </button>
-          ))}
-          {years.length > 0 && (
-            // The last segment opens the years with dated listening and names the chosen one.
-            <span className="shrink-0">
-              <FloatingSelect
-                value={year ?? ""}
-                options={years.map((option) => ({ value: option, label: option }))}
-                onValueChange={(value) => setRange(value as ListeningStatisticsRange)}
-                ariaLabel={t("personal.history.yearLabel")}
-                triggerLabel={year ? t("personal.history.yearValue", { year }) : t("personal.history.yearLabel")}
-                className={cn(
-                  segmentedItemClassName(year !== null),
-                  "w-auto justify-start gap-1 border-0 py-0 focus-visible:ring-offset-0",
-                  year === null && "bg-transparent",
-                )}
-                contentClassName="min-w-24"
-              />
-            </span>
-          )}
-        </div>
-      </div>
-
-      {year && stats && stats.range === year && (
-        <ListeningYearHighlights
-          year={year}
-          statistics={stats}
-          longestStreak={longestStreak}
-          formatDuration={formatDuration}
-          workLink={workLink}
-          entityLink={entityLink}
-        />
-      )}
-
+    <div className="space-y-5">
       <section
         aria-label={t("personal.history.calendar.title")}
         aria-busy={calendar.status === "loading"}
         className={cn(
           "theme-card-surface rounded-xl border bg-card p-4 transition-opacity",
-          calendar.status === "loading" && calendar.data !== null && "opacity-60",
+          calendar.status === "loading" && calendarData !== null && "opacity-60",
         )}
       >
-        {calendar.data ? (
+        {calendarData ? (
           <ListeningCalendar
-            calendar={calendar.data}
-            year={shownCalendar ? year : null}
+            calendar={calendarData}
+            year={calendarDataYear}
             formatDuration={formatDuration}
+            action={
+              <FloatingSelect
+                value={year ?? PAST_YEAR}
+                options={[
+                  { value: PAST_YEAR, label: t("personal.history.calendar.basis") },
+                  ...years.map((option) => ({ value: option, label: option })),
+                ]}
+                onValueChange={(value) => setYear(value === PAST_YEAR ? null : value)}
+                ariaLabel={t("personal.history.yearLabel")}
+                className="h-8 w-auto gap-1.5 px-3 text-xs"
+                contentClassName="min-w-28"
+              />
+            }
           />
         ) : calendar.status === "error" ? (
           <InlineRetry
@@ -331,12 +341,46 @@ export function ListeningHistoryPage({
         ) : (
           <div className="h-48 animate-pulse rounded-lg bg-muted" />
         )}
+        {calendarData && year && yearCalendar.status === "error" && (
+          <div className="mt-3">
+            <InlineRetry
+              message={t("personal.history.calendar.failed")}
+              onRetry={() => setStatisticsToken((value) => value + 1)}
+            />
+          </div>
+        )}
       </section>
 
+      {year && yearStats && (
+        <ListeningYearHighlights
+          year={year}
+          statistics={yearStats}
+          longestStreak={longestStreak}
+          formatDuration={formatDuration}
+          workLink={workLink}
+          entityLink={entityLink}
+        />
+      )}
+
       <section aria-labelledby="listening-summary-heading" className="space-y-4">
-        <h2 id="listening-summary-heading" className="min-w-0 px-1 text-base font-semibold">
-          {t("personal.history.summary")}
-        </h2>
+        <div className="flex flex-wrap items-end justify-between gap-3" data-toast-avoid>
+          <h2 id="listening-summary-heading" className="min-w-0 px-1 text-base font-semibold">
+            {t("personal.history.summary")}
+          </h2>
+          <div className={segmentedListClassName()} role="group" aria-label={t("personal.history.rangeLabel")}>
+            {LISTENING_REPORT_RANGES.map((option) => (
+              <button
+                key={option}
+                type="button"
+                className={segmentedItemClassName(range === option)}
+                aria-pressed={range === option}
+                onClick={() => setRange(option)}
+              >
+                {t(`personal.history.ranges.${option}`)}
+              </button>
+            ))}
+          </div>
+        </div>
         {statistics.status === "error" && (
           <InlineRetry
             message={t("personal.history.statisticsFailed")}
@@ -376,11 +420,7 @@ export function ListeningHistoryPage({
               icon={<CalendarDays />}
               label={t("personal.history.activeDays")}
               value={stats ? formatNumber(stats.activeDays, resolvedLocale) : null}
-              detail={
-                activeDayPercent === null
-                  ? null
-                  : t("personal.history.activeDayShare", { percent: activeDayPercent, count: rangeDays })
-              }
+              detail={activeDayDetail}
               meter={activeDayPercent ?? undefined}
             />
           </dl>
@@ -395,7 +435,7 @@ export function ListeningHistoryPage({
             </div>
           )}
           {stats && (
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-start">
               <section
                 aria-labelledby="listening-top-works-heading"
                 className="theme-card-surface min-w-0 rounded-xl border bg-card p-4"
@@ -474,14 +514,9 @@ export function ListeningHistoryPage({
       </section>
 
       <section aria-labelledby="listening-profile-heading" className="space-y-3">
-        <div className="min-w-0 px-1">
-          <h2 id="listening-profile-heading" className="text-base font-semibold">
-            {t("personal.history.profile.heading")}
-          </h2>
-          <p className="mt-0.5 max-w-3xl text-xs leading-5 text-muted-foreground">
-            {t("personal.history.profile.basis")}
-          </p>
-        </div>
+        <ReportSectionHeading id="listening-profile-heading" range={range}>
+          {t("personal.history.profile.heading")}
+        </ReportSectionHeading>
         {profile.status === "error" && (
           <InlineRetry
             message={t("personal.history.profile.failed")}
@@ -502,14 +537,9 @@ export function ListeningHistoryPage({
 
       <section aria-labelledby="listening-breakdown-heading" className="space-y-3">
         <div className="flex flex-wrap items-end justify-between gap-3">
-          <div className="min-w-0 px-1">
-            <h2 id="listening-breakdown-heading" className="text-base font-semibold">
-              {t("personal.history.breakdown.heading")}
-            </h2>
-            <p className="mt-0.5 max-w-3xl text-xs leading-5 text-muted-foreground">
-              {t(`personal.history.breakdown.basis.${rank}`)}
-            </p>
-          </div>
+          <ReportSectionHeading id="listening-breakdown-heading" range={range}>
+            {t("personal.history.breakdown.heading")}
+          </ReportSectionHeading>
           <div className={segmentedListClassName()} role="group" aria-label={t("personal.history.breakdown.rankLabel")}>
             {BREAKDOWN_RANKS.map((option) => (
               <button
@@ -688,11 +718,11 @@ export function ListeningHistoryPage({
       </section>
 
       <div className="space-y-0.5 px-1 text-2xs leading-5 text-muted-foreground">
-        {(calendar.data?.timeZone || timeZoneLink) && (
+        {(pastCalendar.data?.timeZone || timeZoneLink) && (
           <p>
-            {calendar.data?.timeZone &&
-              t(calendar.data.followsDevice ? "personal.history.timeZoneAuto" : "personal.history.timeZone", {
-                zone: calendar.data.timeZone,
+            {pastCalendar.data?.timeZone &&
+              t(pastCalendar.data.followsDevice ? "personal.history.timeZoneAuto" : "personal.history.timeZone", {
+                zone: pastCalendar.data.timeZone,
               })}{" "}
             {timeZoneLink && (
               <a
@@ -727,6 +757,30 @@ export function ListeningHistoryPage({
           </DialogFooter>
         </Dialog>
       )}
+    </div>
+  );
+}
+
+/**
+ * The heading of a section further down that the report's range switcher also
+ * drives, naming that range so the switcher's reach stays visible.
+ */
+function ReportSectionHeading({
+  id,
+  range,
+  children,
+}: {
+  id: string;
+  range: ListeningNamedRange;
+  children: ReactNode;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex min-w-0 items-baseline gap-2 px-1">
+      <h2 id={id} className="text-base font-semibold">
+        {children}
+      </h2>
+      <span className="text-xs text-muted-foreground">{t(`personal.history.ranges.${range}`)}</span>
     </div>
   );
 }

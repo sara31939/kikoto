@@ -11,9 +11,7 @@ import {
 import {
   FOLDER_LYRICS_RESOURCE,
   MANAGED_LYRICS_RESOURCE,
-  folderAudio,
   folderLyrics,
-  lyricsEditAssignments,
   lyricsEditLanguage,
   lyricsEditReadiness,
   lyricsEditRequest,
@@ -22,6 +20,7 @@ import {
   lyricsFilesOf,
   type LyricsEditResource,
 } from "@/features/work-detail/lyrics/lyricsEditModel";
+import { useDebouncedRequest } from "@/hooks/useDebouncedRequest";
 import {
   ApiError,
   api,
@@ -31,6 +30,7 @@ import {
   type MediaItem,
   type RemoteFetchFileDecision,
 } from "@/lib/api";
+import { startLoad } from "@/lib/effectScope";
 
 type LyricsEditFilesState = {
   status: "loading" | "ready" | "error";
@@ -67,8 +67,7 @@ export function useLyricsEditWorkspace({
 }) {
   const { t } = useTranslation();
   const toast = useToast();
-  const lyrics = useMemo(() => folderLyrics(items, target.rootPath), [items, target.rootPath]);
-  const audio = useMemo(() => folderAudio(items, target.rootPath), [items, target.rootPath]);
+  const lyrics = useMemo(() => folderLyrics(items, target.folderId), [items, target.folderId]);
   const ownResources = useMemo(
     () => lyricsEditResources({ workId: target.workId, primaryCode: "", editions: [], warnings: [] }, target),
     [target],
@@ -89,10 +88,6 @@ export function useLyricsEditWorkspace({
   const folderMode = chosenFolderMode ?? defaultFolderMode;
   const [activeId, setActiveId] = useState(startInFolderLyrics ? FOLDER_LYRICS_RESOURCE : MANAGED_LYRICS_RESOURCE);
   const [decisions, setDecisions] = useState<Record<string, RemoteFetchFileDecision>>({});
-  const [plan, setPlan] = useState<LyricsEditPlan | null>(null);
-  const [plannedRevision, setPlannedRevision] = useState("");
-  const [planFailed, setPlanFailed] = useState(false);
-  const [planAttempt, setPlanAttempt] = useState(0);
   const [assign, setAssign] = useState(true);
   const [applying, setApplying] = useState(false);
   const loading = useRef(new Set<string>());
@@ -125,7 +120,7 @@ export function useLyricsEditWorkspace({
     try {
       const found =
         resource.kind === "local"
-          ? localFolderFiles((await api.getWork(resource.workId)).mediaItems, resource.rootPath)
+          ? localFolderFiles((await api.getWork(resource.workId)).mediaItems, resource.folderId)
           : remoteEditionFiles((await api.getRemoteSourceWork(resource.sourceId, resource.editionCode)).tracks);
       setLoaded((current) => ({ ...current, [resource.id]: { status: "ready", files: lyricsFilesOf(found) } }));
     } catch {
@@ -144,32 +139,27 @@ export function useLyricsEditWorkspace({
   );
 
   useEffect(() => {
-    const controller = new AbortController();
     setSourcesStatus("loading");
     setResources(ownResources);
-    api.getWorkFolderEditSources(target.workId, controller.signal).then(
-      (sources) => {
+    return startLoad((signal) => api.getWorkFolderEditSources(target.workId, signal), {
+      onSuccess: (sources) => {
         setResources(lyricsEditResources(sources, target));
         setSourcesStatus("ready");
       },
-      () => {
-        if (!controller.signal.aborted) setSourcesStatus("error");
-      },
-    );
-    return () => controller.abort();
+      onError: () => setSourcesStatus("error"),
+    });
   }, [ownResources, sourcesAttempt, target]);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    api.getRuntimeSettings(controller.signal).then(
-      (settings) => {
-        if (settings.folderLyricsMode) setDefaultFolderMode(settings.folderLyricsMode);
-      },
-      // Without the default the edit copies, which never changes the work's own files.
-      () => undefined,
-    );
-    return () => controller.abort();
-  }, []);
+  // Without the default the edit copies, which never changes the work's own files.
+  useEffect(
+    () =>
+      startLoad((signal) => api.getRuntimeSettings(signal), {
+        onSuccess: (settings) => {
+          if (settings.folderLyricsMode) setDefaultFolderMode(settings.folderLyricsMode);
+        },
+      }),
+    [],
+  );
 
   const readyFiles = useMemo(() => {
     const ready: Record<string, FolderEditFile[]> = {};
@@ -183,32 +173,16 @@ export function useLyricsEditWorkspace({
   const revision = useMemo(() => JSON.stringify(request), [request]);
   const needsPlan = request.additions.length > 0;
 
-  useEffect(() => {
-    if (!needsPlan || applying) return;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      api.planWorkLyricsEdit(target.workId, request).then(
-        (next) => {
-          if (cancelled) return;
-          setPlan(next);
-          setPlannedRevision(revision);
-          setPlanFailed(false);
-        },
-        () => {
-          if (!cancelled) setPlanFailed(true);
-        },
-      );
-    }, PLAN_DELAY_MS);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-    // The request is identified by its revision.
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [applying, needsPlan, planAttempt, revision, target.workId]);
+  const planRequest = useDebouncedRequest<LyricsEditPlan>({
+    key: `${target.workId}:${canAssign}:${revision}`,
+    enabled: needsPlan && !applying,
+    delayMs: PLAN_DELAY_MS,
+    // A viewer who may assign sees the pairs the server would make.
+    send: (signal) => api.planWorkLyricsEdit(target.workId, canAssign ? { ...request, assign: true } : request, signal),
+  });
 
-  const currentPlan = needsPlan ? plan : null;
-  const planCurrent = needsPlan && plannedRevision === revision;
+  const currentPlan = needsPlan ? planRequest.result : null;
+  const planCurrent = needsPlan && planRequest.current;
   const readiness = lyricsEditReadiness({ request, undeclared, plan: currentPlan, planCurrent });
   const kept = selection[MANAGED_LYRICS_RESOURCE] ?? noSelection;
   const result = useMemo(
@@ -216,19 +190,14 @@ export function useLyricsEditWorkspace({
     [currentPlan, kept, lyrics.managed],
   );
   const removedFiles = useMemo(() => lyrics.managed.filter((file) => !kept.has(file.path)), [kept, lyrics.managed]);
-  const assignments = useMemo(
-    () =>
-      canAssign && assign && planCurrent
-        ? lyricsEditAssignments({ audio, additions: request.additions, plan: currentPlan })
-        : [],
-    [assign, audio, canAssign, currentPlan, planCurrent, request.additions],
-  );
+  const assignments = canAssign && assign && planCurrent ? (currentPlan?.assignments ?? []) : [];
 
   const apply = async () => {
     if (readiness !== "ready" || applying) return;
     setApplying(true);
     try {
-      const applied = await api.applyWorkLyricsEdit(target.workId, { ...request, assignments });
+      // The server pairs the files again as the folder is when the edit applies.
+      const applied = await api.applyWorkLyricsEdit(target.workId, { ...request, assign: canAssign && assign });
       toast.success(
         t("lyricsFiles.applied", {
           added: applied.moved + applied.copied + applied.downloaded,
@@ -238,15 +207,13 @@ export function useLyricsEditWorkspace({
       // The edit is done; what was selected for it is no longer waiting.
       setSelection((current) => ({ [MANAGED_LYRICS_RESOURCE]: current[MANAGED_LYRICS_RESOURCE] ?? noSelection }));
       setDecisions({});
-      setPlan(null);
-      setPlannedRevision("");
+      planRequest.clear();
       setActiveId(MANAGED_LYRICS_RESOURCE);
       await onApplied(applied);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409 && error.code === "lyrics_edit_conflict") {
         // The folder changed since the preview; show what it holds now.
-        setPlannedRevision("");
-        setPlanAttempt((value) => value + 1);
+        planRequest.invalidate();
         toast.notify({ kind: "warning", message: t("folderEdit.folderChanged") });
       } else {
         toast.notify(toastFromError(error, t("lyricsFiles.applyFailed")));
@@ -293,11 +260,8 @@ export function useLyricsEditWorkspace({
     request,
     undeclared,
     plan: currentPlan,
-    planFailed: needsPlan && planFailed && !planCurrent,
-    retryPlan: () => {
-      setPlanFailed(false);
-      setPlanAttempt((value) => value + 1);
-    },
+    planFailed: needsPlan && planRequest.failed && !planCurrent,
+    retryPlan: planRequest.retry,
     readiness,
     result,
     removedFiles,

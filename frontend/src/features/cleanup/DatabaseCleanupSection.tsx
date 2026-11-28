@@ -12,8 +12,8 @@ import { formatNumber } from "@/i18n/format";
 import { isActiveWorkflowStatus, useWorkflowRunWatcher } from "@/hooks/useWorkflowRunWatcher";
 import { useLocale } from "@/i18n/LocaleProvider";
 import { api, type DatabaseCleanupTaskKey, type DatabaseMaintenanceOverview } from "@/lib/api";
-import { NAVIGATION_EVENT } from "@/lib/browserHistory";
 import { cn } from "@/lib/tailwindClassNames";
+import { openWorkflowRun } from "@/lib/workflowLinks";
 
 import { formatByteSize } from "./cacheCleanupModel";
 
@@ -131,7 +131,7 @@ export function DatabaseCleanupSection({
       {overview && !overview.dataRootAvailable && (
         <div
           role="status"
-          className="flex items-start gap-2 bg-warning-surface px-4 py-3 text-xs text-warning-foreground"
+          className="flex items-start gap-2 rounded-md bg-warning-surface px-3 py-2.5 text-xs text-warning-foreground"
         >
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>{t("cleanup.database.dataRootUnavailable")}</span>
@@ -146,7 +146,7 @@ export function DatabaseCleanupSection({
         const panelId = `${groupIdPrefix}-${group.key}`;
         return (
           <div key={group.key}>
-            <div className="flex items-center gap-3 bg-muted/30 px-4 py-2">
+            <div className="flex items-center gap-3 py-2">
               <Checkbox
                 checked={groupCleanable.length > 0 && groupSelected === groupCleanable.length}
                 indeterminate={groupSelected > 0 && groupSelected < groupCleanable.length}
@@ -186,7 +186,7 @@ export function DatabaseCleanupSection({
                   <label
                     key={key}
                     className={cn(
-                      "flex min-w-0 items-start gap-3 px-4 py-3",
+                      "flex min-w-0 items-start gap-3 py-3",
                       enabled && !readOnly ? "cursor-pointer hover:bg-muted/30" : "opacity-80",
                     )}
                   >
@@ -227,7 +227,7 @@ export function DatabaseCleanupSection({
           <ArrowRight className="h-4 w-4" />
         </Button>
       </SettingsRow>
-      <div className="flex flex-wrap items-center justify-end gap-2 bg-muted/25 px-4 py-2.5">
+      <div className="flex flex-wrap items-center justify-end gap-2 py-3">
         <span className="mr-auto text-xs text-muted-foreground">
           {cleanableTasks.length === 0 && overview
             ? t("cleanup.database.nothingToClean")
@@ -341,7 +341,7 @@ export function DatabaseOptimizeSection({
         kind: "error",
         message: t("cleanup.optimize.runFailed"),
         actionLabel: t("notifications.openActivity"),
-        onAction: () => openActivityRun(run.id),
+        onAction: () => openWorkflowRun(run.id),
       });
       return;
     }
@@ -371,7 +371,7 @@ export function DatabaseOptimizeSection({
           runId: queued.runId,
         }),
         actionLabel: t("notifications.openActivity"),
-        onAction: () => openActivityRun(queued.runId),
+        onAction: () => openWorkflowRun(queued.runId),
       });
     } catch (error) {
       toast.notify(toastFromError(error, t("cleanup.optimize.failed")));
@@ -381,8 +381,8 @@ export function DatabaseOptimizeSection({
   };
 
   return (
-    <SettingsSection title={t("cleanup.optimize.title")}>
-      <SettingsRow
+    <>
+      <SettingsSection
         title={t("cleanup.optimize.compact")}
         description={
           result ||
@@ -393,17 +393,18 @@ export function DatabaseOptimizeSection({
               })
             : t("maintenance.cache.scanning"))
         }
-      >
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={readOnly || running || !overview}
-          onClick={() => setConfirming(true)}
-        >
-          {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-          {running ? t("cleanup.optimize.running") : t("cleanup.optimize.run")}
-        </Button>
-      </SettingsRow>
+        action={
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={readOnly || running || !overview}
+            onClick={() => setConfirming(true)}
+          >
+            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+            {running ? t("cleanup.optimize.running") : t("cleanup.optimize.run")}
+          </Button>
+        }
+      />
       {confirming && (
         <Dialog onClose={() => setConfirming(false)} size="md" role="alertdialog" dismissible={!running}>
           <DialogHeader
@@ -421,7 +422,7 @@ export function DatabaseOptimizeSection({
           </DialogFooter>
         </Dialog>
       )}
-    </SettingsSection>
+    </>
   );
 }
 
@@ -434,9 +435,4 @@ function parseOptimizeSummary(raw: string): { beforeBytes: number; afterBytes: n
   } catch {
     return null;
   }
-}
-
-function openActivityRun(runId: number) {
-  window.history.pushState({}, "", `/workflows?activity=1&run=${runId}`);
-  window.dispatchEvent(new Event(NAVIGATION_EVENT));
 }

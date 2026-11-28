@@ -14,11 +14,8 @@ import { voiceDetailPath } from "@/lib/voiceRoute";
 export const SUBSCRIPTION_PANELS = ["subscriptions", "rankings", "watch"] as const;
 export type SubscriptionPanel = (typeof SUBSCRIPTION_PANELS)[number];
 
-/**
- * The page shows For you draws from the local library, new releases from
- * subscriptions, the tracked rankings, or the Availability Watch pool.
- */
-export const SUBSCRIPTION_VIEWS = ["for-you", "releases", "rankings", "watch"] as const;
+/** The page shows new releases from subscriptions, the tracked rankings, or the Availability Watch pool. */
+export const SUBSCRIPTION_VIEWS = ["releases", "rankings", "watch"] as const;
 export type SubscriptionView = (typeof SUBSCRIPTION_VIEWS)[number];
 
 /**
@@ -28,13 +25,13 @@ export type SubscriptionView = (typeof SUBSCRIPTION_VIEWS)[number];
 export function subscriptionViewFromSearch(search: string): SubscriptionView {
   const params = new URLSearchParams(search);
   const view = params.get("view");
-  if (view === "for-you" || view === "rankings" || view === "watch") return view;
+  if (view === "rankings" || view === "watch") return view;
   return view === null && params.get("panel") === "watch" ? "watch" : "releases";
 }
 
 /** The settings tab that belongs to a view, which the settings button opens. */
 export function subscriptionPanelForView(view: SubscriptionView): SubscriptionPanel {
-  return view === "releases" || view === "for-you" ? "subscriptions" : view;
+  return view === "releases" ? "subscriptions" : view;
 }
 
 /**
@@ -88,6 +85,9 @@ export function newlyAvailableCodes(summaryJson: string): string[] {
     return [];
   }
 }
+
+/** The workflow that refreshes the subscribed catalogs; its runs are the schedule's latest runs. */
+export const SUBSCRIPTION_REFRESH_CODE = "creator_subscription_refresh";
 
 export const SUBSCRIPTION_INTERVAL_HOURS = [1, 6, 12, 24, 48, 168] as const;
 
@@ -201,10 +201,24 @@ export function primaryReleaseEvent(family: ReleaseFeedFamily): ReleaseFeedEvent
   return family.events[0] ?? null;
 }
 
-/** One label per distinct subscription the family's events came through. */
-export function releaseFeedSources(family: ReleaseFeedFamily, t: TFunction): string[] {
+/** The names a family's card states itself: its circle and the voices on its credit line. */
+export type ReleaseFeedCardCredits = { circle: string; voices: readonly string[] };
+
+/**
+ * One label per distinct subscription the family's events came through. Given
+ * the card's credits, it leaves out what the card already says: a subscribed
+ * circle or voice the credit line names, and Availability Watch beside the
+ * "Now available" event that only the watch reports.
+ */
+export function releaseFeedSources(
+  family: ReleaseFeedFamily,
+  t: TFunction,
+  credits?: ReleaseFeedCardCredits,
+): string[] {
   const labels: string[] = [];
+  const primary = primaryReleaseEvent(family);
   for (const event of family.events) {
+    if (credits && namedOnCard(event.subject, primary, credits)) continue;
     const name = subscriptionSubjectName(event.subject);
     const label =
       event.subject.kind === "watch"
@@ -213,6 +227,28 @@ export function releaseFeedSources(family: ReleaseFeedFamily, t: TFunction): str
     if (!labels.includes(label)) labels.push(label);
   }
   return labels;
+}
+
+function namedOnCard(
+  subject: ReleaseFeedSubject,
+  primary: ReleaseFeedEvent | null,
+  credits: ReleaseFeedCardCredits,
+): boolean {
+  switch (subject.kind) {
+    case "circle":
+      return Boolean(subject.circleName) && subject.circleName === credits.circle;
+    case "voice":
+      return Boolean(subject.voiceName) && credits.voices.includes(subject.voiceName ?? "");
+    case "watch":
+      return primary?.type === "available";
+    default:
+      return false;
+  }
+}
+
+/** A new release is what the feed is made of, so only the other events carry a label above the card. */
+export function releaseEventLabelled(event: ReleaseFeedEvent | null): event is ReleaseFeedEvent {
+  return event !== null && event.type !== "released";
 }
 
 export function editionLanguageName(language: string, t: TFunction) {

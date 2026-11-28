@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import { AlertTriangle, CalendarPlus, ChevronDown, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { useId, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -22,23 +23,21 @@ import {
   type RankingSettingRow,
 } from "./rankingModel";
 
-type Translate = (key: string, options?: Record<string, unknown>) => string;
-
 const DAY = 24 * 60;
 
-function intervalLabel(minutes: number, t: Translate) {
+function intervalLabel(minutes: number, t: TFunction) {
   if (minutes % DAY === 0) return t("subscriptions.schedule.days", { count: minutes / DAY });
   if (minutes % 60 === 0) return t("subscriptions.schedule.hours", { count: minutes / 60 });
   return t("subscriptions.rankings.settings.minutes", { count: minutes });
 }
 
-function intervalSummary(minutes: number, t: Translate) {
+function intervalSummary(minutes: number, t: TFunction) {
   if (minutes % DAY === 0) return t("subscriptions.rankings.settings.everyDays", { count: minutes / DAY });
   if (minutes % 60 === 0) return t("subscriptions.rankings.settings.everyHours", { count: minutes / 60 });
   return t("subscriptions.rankings.settings.everyMinutes", { count: minutes });
 }
 
-function depthOptions(current: number, t: Translate) {
+function depthOptions(current: number, t: TFunction) {
   const values: number[] = [...RANKING_DEPTHS];
   if (!values.includes(current)) values.push(current);
   return values
@@ -351,10 +350,9 @@ function AddYearsPicker({
       <AnchoredPopover
         open={open}
         anchorRef={anchorRef}
-        align="end"
         onOpenChange={setOpen}
         ariaLabel={t("subscriptions.rankings.settings.addYears")}
-        className="w-[min(14rem,calc(100vw-1.5rem))] p-2 text-sm"
+        className="w-max min-w-40 max-w-[min(14rem,calc(100vw-1.5rem))] p-2 text-sm"
       >
         <div className="app-scroll max-h-64 overflow-y-auto">
           {years.map((year) => (

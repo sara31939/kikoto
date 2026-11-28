@@ -1,15 +1,15 @@
 import type { FavoriteSort, ListeningStatus, SortDirection } from "@/lib/api";
 import { currentScopedStorageKey, type ClientPrincipalID } from "@/lib/clientStorageScope";
 
-export type FavoriteEntity = "works" | "circles" | "voices";
 export type FavoriteAvailability = "all" | "available" | "local" | "remote" | "missing";
+/** A listening status, every work, or any Quick mark (`marked`), which the Marked system list also holds. */
+export type FavoriteStatusFilter = ListeningStatus | "all" | "marked";
 export const favoritePageSizeOptions = [24, 48, 96] as const;
 export type FavoritePageSize = (typeof favoritePageSizeOptions)[number];
 
 export type FavoritesBrowseState = {
-  entity: FavoriteEntity;
   query: string;
-  status: ListeningStatus | "all";
+  status: FavoriteStatusFilter;
   availability: FavoriteAvailability;
   list: "all" | number;
   page: number;
@@ -20,7 +20,6 @@ export type FavoritesBrowseState = {
 };
 
 export const defaultFavoritesBrowseState: FavoritesBrowseState = {
-  entity: "works",
   query: "",
   status: "all",
   availability: "all",
@@ -32,11 +31,11 @@ export const defaultFavoritesBrowseState: FavoritesBrowseState = {
   randomSeed: 1,
 };
 
-const storageKey = "kikoto:favorites-browse:v3";
+const favoritesBrowseStorageKey = "kikoto:favorites-browse:v3";
 
-const entities: FavoriteEntity[] = ["works", "circles", "voices"];
-const statuses: Array<ListeningStatus | "all"> = [
+const statuses: FavoriteStatusFilter[] = [
   "all",
+  "marked",
   "none",
   "want_to_listen",
   "listening",
@@ -45,14 +44,23 @@ const statuses: Array<ListeningStatus | "all"> = [
   "paused",
 ];
 const availabilities: FavoriteAvailability[] = ["all", "available", "local", "remote", "missing"];
-const sorts: FavoriteSort[] = ["activity", "added", "release", "code", "title", "rating", "sales", "random"];
+const sorts: FavoriteSort[] = [
+  "activity",
+  "added",
+  "release",
+  "code",
+  "title",
+  "rating",
+  "user_rating",
+  "sales",
+  "random",
+];
 
 export function favoritesBrowseStateFromSearch(
   search: string,
   fallback = defaultFavoritesBrowseState,
 ): FavoritesBrowseState {
   const params = new URLSearchParams(search);
-  const entity = params.get("entity");
   const status = params.get("status");
   const availability = params.get("availability");
   const rawList = params.get("list");
@@ -62,11 +70,8 @@ export function favoritesBrowseStateFromSearch(
   const sort = params.get("sort");
   const randomSeed = Number(params.get("seed"));
   return {
-    entity: entities.includes(entity as FavoriteEntity) ? (entity as FavoriteEntity) : fallback.entity,
     query: params.has("q") ? (params.get("q") ?? "") : fallback.query,
-    status: statuses.includes(status as ListeningStatus | "all")
-      ? (status as ListeningStatus | "all")
-      : fallback.status,
+    status: statuses.includes(status as FavoriteStatusFilter) ? (status as FavoriteStatusFilter) : fallback.status,
     availability: availabilities.includes(availability as FavoriteAvailability)
       ? (availability as FavoriteAvailability)
       : fallback.availability,
@@ -94,7 +99,6 @@ export function favoritesBrowseStateFromValue(
 ): FavoritesBrowseState {
   if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
   const state = value as Partial<Record<keyof FavoritesBrowseState, unknown>>;
-  const entity = typeof state.entity === "string" ? state.entity : null;
   const status = typeof state.status === "string" ? state.status : null;
   const availability = typeof state.availability === "string" ? state.availability : null;
   const listID = Number(state.list);
@@ -103,11 +107,8 @@ export function favoritesBrowseStateFromValue(
   const sort = typeof state.sort === "string" ? state.sort : null;
   const randomSeed = Number(state.randomSeed);
   return {
-    entity: entities.includes(entity as FavoriteEntity) ? (entity as FavoriteEntity) : fallback.entity,
     query: typeof state.query === "string" ? state.query : fallback.query,
-    status: statuses.includes(status as ListeningStatus | "all")
-      ? (status as ListeningStatus | "all")
-      : fallback.status,
+    status: statuses.includes(status as FavoriteStatusFilter) ? (status as FavoriteStatusFilter) : fallback.status,
     availability: availabilities.includes(availability as FavoriteAvailability)
       ? (availability as FavoriteAvailability)
       : fallback.availability,
@@ -123,7 +124,7 @@ export function favoritesBrowseStateFromValue(
 
 export function readFavoritesBrowseState(principalID: ClientPrincipalID) {
   try {
-    const raw = window.sessionStorage.getItem(currentScopedStorageKey(storageKey, principalID));
+    const raw = window.sessionStorage.getItem(currentScopedStorageKey(favoritesBrowseStorageKey, principalID));
     return raw ? favoritesBrowseStateFromValue(JSON.parse(raw)) : null;
   } catch {
     return null;
@@ -132,7 +133,10 @@ export function readFavoritesBrowseState(principalID: ClientPrincipalID) {
 
 export function writeFavoritesBrowseState(principalID: ClientPrincipalID, state: FavoritesBrowseState) {
   try {
-    window.sessionStorage.setItem(currentScopedStorageKey(storageKey, principalID), JSON.stringify(state));
+    window.sessionStorage.setItem(
+      currentScopedStorageKey(favoritesBrowseStorageKey, principalID),
+      JSON.stringify(state),
+    );
   } catch {
     // Favorites remains usable when session storage is unavailable.
   }
@@ -140,7 +144,6 @@ export function writeFavoritesBrowseState(principalID: ClientPrincipalID, state:
 
 export function favoritesBrowseSearch(state: FavoritesBrowseState) {
   const params = new URLSearchParams();
-  if (state.entity !== defaultFavoritesBrowseState.entity) params.set("entity", state.entity);
   if (state.query.trim()) params.set("q", state.query);
   const value = params.toString();
   return value ? `?${value}` : "";

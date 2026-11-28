@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { TokenInput } from "@/components/ui/token-input";
 import type { DirectoryRoutingRule } from "@/lib/api";
 import i18n from "@/i18n";
-const maintenanceCopy = (key: string, options?: Record<string, unknown>) => i18n.t(`maintenance.${key}`, options);
+const maintenanceCopy = (key: string, options: Record<string, unknown> = {}) => i18n.t(`maintenance.${key}`, options);
 
 export function FolderPreferences({
   rules,
@@ -82,7 +82,7 @@ export function FolderPreferences({
         </Button>
       }
     >
-      <div className="p-4">
+      <div className="py-4">
         <div className="relative space-y-2 before:absolute before:bottom-5 before:left-5 before:top-5 before:w-px before:bg-border">
           {rules.map((rule, index) => (
             <DirectoryRuleEditor
@@ -114,9 +114,7 @@ export function FolderPreferences({
             />
           ))}
           {rules.length === 0 && (
-            <div className="rounded-lg border bg-background p-4 text-sm text-muted-foreground">
-              {i18n.t("settings.folderEmpty")}
-            </div>
+            <div className="py-4 text-sm text-muted-foreground">{i18n.t("settings.folderEmpty")}</div>
           )}
         </div>
       </div>

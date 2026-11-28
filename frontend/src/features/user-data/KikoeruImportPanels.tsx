@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { Input, NativeSelect } from "@/components/ui/input";
+import { startLoad } from "@/lib/effectScope";
 import { cn } from "@/lib/tailwindClassNames";
 
 import { userDataApi, type KikoeruAuth, type KikoeruImportOptions, type KikoeruImportResponse } from "./userDataApi";
@@ -50,20 +51,16 @@ export function KikoeruAccountPanel({ disabled, onLoaded }: PanelProps) {
   const locked = disabled || running;
 
   useEffect(() => {
-    const controller = new AbortController();
-    userDataApi
-      .kikoeruOptions(controller.signal)
-      .then((next) => {
+    return startLoad((signal) => userDataApi.kikoeruOptions(signal), {
+      onSuccess: (next) => {
         setOptions(next);
         setServer((current) => current || (next.sources[0] ? String(next.sources[0].id) : manualServer));
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) {
-          setOptionsFailed(true);
-          setServer(manualServer);
-        }
-      });
-    return () => controller.abort();
+      },
+      onError: () => {
+        setOptionsFailed(true);
+        setServer(manualServer);
+      },
+    });
   }, []);
 
   /** Runs a change that needs consent now, or after the user confirms the notice. */
@@ -156,7 +153,7 @@ export function KikoeruAccountPanel({ disabled, onLoaded }: PanelProps) {
           </div>
         </SettingsRow>
       )}
-      <fieldset className="px-4 py-3" disabled={locked}>
+      <fieldset className="py-3" disabled={locked}>
         <legend className="float-left mb-2 w-full text-sm font-medium">{t("personal.userData.kikoeru.auth")}</legend>
         <div className="clear-both grid gap-2 sm:grid-cols-3">
           {authModes.map(([option, labelKey]) => (
@@ -400,7 +397,7 @@ function ReadRow({
   const { t } = useTranslation();
   const message = errorText ?? (error ? t(`personal.userData.kikoeru.readErrors.${error}`) : null);
   return (
-    <div className="space-y-2 px-4 py-3">
+    <div className="space-y-2 py-3">
       <Button variant="outline" disabled={disabled} onClick={onRead}>
         {busy ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : icon}
         {label}

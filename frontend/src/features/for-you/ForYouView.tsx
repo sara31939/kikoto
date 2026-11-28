@@ -1,5 +1,20 @@
-import { Compass, Repeat, Shuffle, Sparkles, type LucideIcon } from "lucide-react";
-import { useState } from "react";
+import {
+  Bookmark,
+  CirclePause,
+  Compass,
+  Headphones,
+  History,
+  MicVocal,
+  Repeat,
+  Shuffle,
+  Sparkles,
+  Star,
+  Tag,
+  TrendingUp,
+  Users,
+  type LucideIcon,
+} from "lucide-react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useAuth } from "@/auth/AuthProvider";
@@ -28,18 +43,36 @@ import {
 import { WorkSectionHeading } from "@/components/work-collection/WorkSectionHeading";
 import { useLocale } from "@/i18n/LocaleProvider";
 import { api, type Work } from "@/lib/api";
-import { FOR_YOU_COLUMNS, FOR_YOU_TEMPERATURES, type ForYouColumn, type ForYouItem } from "@/lib/forYouApi";
+import { FOR_YOU_COLUMNS, type ForYouColumn, type ForYouItem, type ForYouReason } from "@/lib/forYouApi";
 import { openCircleRoute } from "@/lib/circleNavigationState";
 import { currentClientStorageScope } from "@/lib/clientStorageScope";
 import { cn } from "@/lib/tailwindClassNames";
 
+import { readForYouColumnPreference, writeForYouColumnPreference } from "./forYouColumnPreference";
 import { forYouReasonText, type ForYouColumnState } from "./forYouModel";
+import { ForYouTemperaturePicker } from "./ForYouTemperaturePicker";
 import { useForYou } from "./useForYou";
 
 const COLUMN_ICONS: Record<ForYouColumn, LucideIcon> = {
   maybe_like: Sparkles,
   try_new: Compass,
   listen_again: Repeat,
+};
+
+// What a reason rests on: the circle, voice, or tag it names, a rating, or a past play.
+const REASON_ICONS: Record<ForYouReason["kind"], LucideIcon> = {
+  liked_circle: Users,
+  new_circle: Users,
+  liked_voice: MicVocal,
+  new_voice: MicVocal,
+  liked_tag: Tag,
+  rare_tag: Tag,
+  want: Bookmark,
+  dlsite_rating: Star,
+  popular: TrendingUp,
+  unexplored: Headphones,
+  since_played: History,
+  unfinished: CirclePause,
 };
 
 // Side by side, each column is a single track of row cards.
@@ -50,8 +83,9 @@ const sideBySideListClassName =
  * For you: three small draws from the local library, Maybe like, Try new,
  * and Listen again, under one temperature. Narrow views switch between the
  * columns. Wide views put row cards in three columns side by side; a third of
- * the width is too narrow for full cards and too short a run for mini covers,
- * so those modes stack the three columns as sections in Discover's card grid.
+ * the width is too narrow for full or simple cards and too short a run for
+ * mini covers, so those modes stack the three columns as sections in
+ * the card grid.
  * Cards offer the Library's own actions, and opening one records an open so
  * later draws rotate. The draw stays as drawn for the browser session.
  */
@@ -64,7 +98,9 @@ export function ForYouView(props: ForYouViewProps) {
 
 type ForYouViewProps = {
   canMark: boolean;
-  /** Discover's card layout, or null for the regular card. */
+  /** The page's controls, at the end of the temperature row. */
+  toolbar?: ReactNode;
+  /** The card layout, or null for the regular card. */
   cardLayout: CompactWorkCardLayout | null;
   mobileColumns: WorkCollectionColumnSetting;
   desktopColumns: WorkCollectionColumnSetting;
@@ -74,6 +110,7 @@ type ForYouViewProps = {
 function ForYouDraws({
   storageScope,
   canMark,
+  toolbar,
   cardLayout,
   mobileColumns,
   desktopColumns,
@@ -82,8 +119,11 @@ function ForYouDraws({
   const { t } = useTranslation();
   const { demoMode } = useAuth();
   const forYou = useForYou(storageScope);
-  const [shown, setShown] = useState<ForYouColumn>("maybe_like");
-  const coldStart = FOR_YOU_COLUMNS.some((column) => forYou.columns[column].coldStart);
+  const [shown, setShown] = useState<ForYouColumn>(() => readForYouColumnPreference(storageScope));
+  const show = (column: ForYouColumn) => {
+    setShown(column);
+    writeForYouColumnPreference(storageScope, column);
+  };
   const sideBySide = cardLayout === "row";
 
   const open = (column: ForYouColumn, item: ForYouItem, rank: number) => {
@@ -111,31 +151,9 @@ function ForYouDraws({
   return (
     <section className="@container min-w-0 space-y-4" aria-label={t("subscriptions.forYou.label")}>
       {demoMode && <DemoPreviewNotice surface="forYou" />}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <div
-          role="radiogroup"
-          aria-label={t("subscriptions.forYou.temperature.label")}
-          className={segmentedListClassName()}
-        >
-          {FOR_YOU_TEMPERATURES.map((item) => (
-            <button
-              key={item}
-              type="button"
-              role="radio"
-              aria-checked={forYou.temperature === item}
-              className={segmentedItemClassName(forYou.temperature === item)}
-              disabled={forYou.temperature === null}
-              onClick={() => forYou.temperature !== item && void forYou.changeTemperature(item)}
-            >
-              {t(`subscriptions.forYou.temperature.${item}`)}
-            </button>
-          ))}
-        </div>
-        {forYou.temperature && (
-          <p className="min-w-0 text-xs text-muted-foreground">
-            {t(`subscriptions.forYou.temperature.hints.${forYou.temperature}`)}
-          </p>
-        )}
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2" data-toast-avoid>
+        <ForYouTemperaturePicker value={forYou.temperature} onChange={(item) => void forYou.changeTemperature(item)} />
+        {toolbar && <div className="ml-auto flex shrink-0 items-center gap-1">{toolbar}</div>}
       </div>
       {forYou.status === "failed" || forYou.status === "preparing" ? (
         <div className="flex flex-col items-center gap-3 rounded-lg border bg-card px-4 py-10 text-center text-sm">
@@ -148,34 +166,38 @@ function ForYouDraws({
         </div>
       ) : (
         <>
-          {coldStart && (
-            <p className="rounded-lg border border-info-border bg-info-surface px-3 py-2 text-xs text-info-foreground">
-              {t("subscriptions.forYou.coldStart")}
-            </p>
-          )}
-          {/* Below the three-column width one column shows at a time. */}
-          <div
-            role="tablist"
-            aria-label={t("subscriptions.forYou.columnsLabel")}
-            className={segmentedListClassName("@5xl:hidden")}
-          >
-            {FOR_YOU_COLUMNS.map((column) => {
-              const Icon = COLUMN_ICONS[column];
-              return (
-                <button
-                  key={column}
-                  type="button"
-                  role="tab"
-                  aria-selected={shown === column}
-                  aria-controls={`for-you-${column}`}
-                  className={segmentedItemClassName(shown === column)}
-                  onClick={() => setShown(column)}
-                >
-                  <Icon className="h-4 w-4" aria-hidden="true" />
-                  {t(`subscriptions.forYou.columns.${column}`)}
-                </button>
-              );
-            })}
+          {/* Below the three-column width one column shows at a time; its tab
+              names it, so the column heading gives way to this row. */}
+          <div className="flex min-w-0 items-center gap-2 @5xl:hidden">
+            <div
+              role="tablist"
+              aria-label={t("subscriptions.forYou.columnsLabel")}
+              className={segmentedListClassName("scrollbar-hidden")}
+            >
+              {FOR_YOU_COLUMNS.map((column) => {
+                const Icon = COLUMN_ICONS[column];
+                return (
+                  <button
+                    key={column}
+                    type="button"
+                    role="tab"
+                    aria-selected={shown === column}
+                    aria-controls={`for-you-${column}`}
+                    className={segmentedItemClassName(shown === column)}
+                    onClick={() => show(column)}
+                  >
+                    <Icon className="h-4 w-4" aria-hidden="true" />
+                    {t(`subscriptions.forYou.columns.${column}`)}
+                  </button>
+                );
+              })}
+            </div>
+            <DrawAgainButton
+              className="ml-auto"
+              column={shown}
+              drawing={forYou.columns[shown].drawing}
+              onClick={() => void forYou.drawColumn(shown)}
+            />
           </div>
           <div
             className={sideBySide ? "grid items-start gap-4 @5xl:grid-cols-3 @5xl:gap-5" : "flex flex-col gap-6"}
@@ -230,27 +252,13 @@ function ForYouColumnSection({
   const loading = state.drawing && state.items.length === 0;
   return (
     <section id={`for-you-${column}`} aria-labelledby={headingId} className={cn("min-w-0", className)}>
+      {/* Hidden while the tabs name the column; it still names the section. */}
       <WorkSectionHeading
         id={headingId}
+        className="hidden @5xl:block"
         icon={<Icon className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />}
         title={title}
-        count={loading ? undefined : state.items.length}
-        countLabel={t("subscriptions.feed.dayCount", { count: state.items.length })}
-        description={t(`subscriptions.forYou.descriptions.${column}`)}
-        action={
-          <Button
-            variant="toolbar"
-            size="sm"
-            className="gap-1.5"
-            disabled={state.drawing}
-            aria-label={t("subscriptions.forYou.drawAgainColumn", { column: title })}
-            title={t("subscriptions.forYou.drawAgainColumn", { column: title })}
-            onClick={onDrawAgain}
-          >
-            <Shuffle className={cn("h-3.5 w-3.5", state.drawing && "animate-pulse")} aria-hidden="true" />
-            {t("subscriptions.forYou.drawAgain")}
-          </Button>
-        }
+        action={<DrawAgainButton column={column} drawing={state.drawing} onClick={onDrawAgain} />}
       />
       {loading ? (
         <div className={cn(workCollectionClassName(), listClassName)} aria-hidden="true">
@@ -295,6 +303,35 @@ function ForYouColumnSection({
   );
 }
 
+/** Draws one column anew; an icon, since every column offers it. */
+function DrawAgainButton({
+  column,
+  drawing,
+  className,
+  onClick,
+}: {
+  column: ForYouColumn;
+  drawing: boolean;
+  className?: string;
+  onClick: () => void;
+}) {
+  const { t } = useTranslation();
+  const label = t("subscriptions.forYou.drawAgainColumn", { column: t(`subscriptions.forYou.columns.${column}`) });
+  return (
+    <Button
+      variant="toolbar"
+      size="icon-sm"
+      className={cn("shrink-0", className)}
+      disabled={drawing}
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+    >
+      <Shuffle className={cn("h-4 w-4", drawing && "animate-pulse")} aria-hidden="true" />
+    </Button>
+  );
+}
+
 function ForYouCard({
   item,
   cardLayout,
@@ -312,8 +349,21 @@ function ForYouCard({
   const { resolvedLocale } = useLocale();
   const work = item.work;
   const reason = forYouReasonText(item.reason, t, (value) => formatRating(value, resolvedLocale));
+  // An unknown kind from a newer server still shows its sentence, under the column's own mark.
+  const ReasonIcon = REASON_ICONS[item.reason.kind] ?? Sparkles;
   return (
-    <WorkCardContextItem label={work.title} context={<WorkCardContextStrip detail={reason} />}>
+    <WorkCardContextItem
+      label={work.title}
+      context={
+        <WorkCardContextStrip>
+          {/* The reason is what the card is here for, so it reads at body weight with its mark in the accent. */}
+          <span className="flex min-w-0 items-center gap-1.5 font-medium text-foreground/85" title={reason}>
+            <ReasonIcon className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+            <span className="truncate">{reason}</span>
+          </span>
+        </WorkCardContextStrip>
+      }
+    >
       <LayoutWorkCard
         layout={cardLayout}
         work={forYouCardView(work, t("workCard.unknownCircle"))}

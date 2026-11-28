@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { commandActions } from "@/app/commandActions";
-import { navItems } from "@/app/navigation";
+import { type NavigationItem, navItems } from "@/app/navigation";
 import { api } from "@/lib/api";
 
 vi.mock("@/lib/api", () => ({
   api: {
+    queueRecordScan: vi.fn(),
     recoverStaleWorkflowRuns: vi.fn(),
     runDLsiteSync: vi.fn(),
     runLocalScan: vi.fn(),
@@ -40,12 +41,12 @@ describe("commandActions", () => {
       "action:dlsite_sync",
       "action:recover_stale",
       "page:library",
-      "activity:open",
+      "activity:attention",
       "activity:history",
     ]);
   });
 
-  it("offers each personal Settings tab as its own destination to library readers", () => {
+  it("offers Your data beside Settings as its own destination to library readers", () => {
     const onOpenPath = vi.fn();
     const settings = navItems.filter((item) => item.id === "settings");
     const actions = commandActions({
@@ -55,9 +56,9 @@ describe("commandActions", () => {
       onOpenPath,
     });
 
-    expect(actions.map((action) => action.label)).toEqual(["Settings", "Tags", "Your data"]);
+    expect(actions.map((action) => action.label)).toEqual(["Settings", "Your data"]);
     actions[1].run();
-    expect(onOpenPath).toHaveBeenCalledWith("/settings?tab=tags");
+    expect(onOpenPath).toHaveBeenCalledWith("/settings?tab=data");
     expect(
       commandActions({ hasPermission: () => false, visibleNavItems: settings, onOpenPage: vi.fn(), onOpenPath }),
     ).toHaveLength(1);
@@ -74,7 +75,6 @@ describe("commandActions", () => {
       scannedFiles: 0,
       updatedLocations: 0,
       skippedLocations: 0,
-      followUpRun: false,
       newWorkCodes: [],
       failures: [],
     });
@@ -98,7 +98,37 @@ describe("commandActions", () => {
 
     await actions[0].run();
 
-    expect(api.runLocalScan).toHaveBeenCalledWith({ followUpRun: false });
-    expect(onOpenPath).toHaveBeenCalledWith("/workflows?activity=1&workflow=local_library_scan&run=1");
+    expect(api.runLocalScan).toHaveBeenCalledWith();
+    expect(onOpenPath).toHaveBeenCalledWith("/workflows?run=1");
+  });
+
+  it("offers a Record scan only while Record is listed, opening the run when workflows are visible", async () => {
+    vi.mocked(api.queueRecordScan).mockResolvedValue({ runId: 7, jobId: 8, status: "queued" });
+    const records = navItems.filter((item) => item.id === "records");
+    const writer = (extra: string[]) => {
+      const granted = new Set(["library:read", "library:write", ...extra]);
+      return (permission: string) => granted.has(permission);
+    };
+    const build = (
+      hasPermission: (permission: string) => boolean,
+      visibleNavItems: readonly NavigationItem[] = records,
+    ) => {
+      const onOpenPage = vi.fn();
+      const onOpenPath = vi.fn();
+      const actions = commandActions({ hasPermission, visibleNavItems, onOpenPage, onOpenPath });
+      return { action: actions.find((item) => item.id === "action:record_scan"), onOpenPage, onOpenPath };
+    };
+
+    expect(build(writer([]), navigation).action).toBeUndefined();
+    expect(build(() => false).action).toBeUndefined();
+
+    const withRuns = build(writer(["workflows:run"]));
+    await withRuns.action?.run();
+    expect(withRuns.onOpenPath).toHaveBeenCalledWith("/workflows?run=7");
+
+    const withoutRuns = build(writer([]));
+    await withoutRuns.action?.run();
+    expect(withoutRuns.onOpenPage).toHaveBeenCalledWith("records");
+    expect(api.queueRecordScan).toHaveBeenCalledTimes(2);
   });
 });

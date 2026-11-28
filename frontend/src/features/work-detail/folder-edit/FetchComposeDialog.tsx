@@ -1,19 +1,19 @@
 import { AlertTriangle, CloudDownload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { useAuth } from "@/auth/AuthProvider";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import type { FetchComposeTarget, FolderEditResource } from "@/features/work-detail/folder-edit/folderEditModel";
 import { FolderWorkspaceView } from "@/features/work-detail/folder-edit/FolderWorkspaceView";
 import { useFetchComposeWorkspace } from "@/features/work-detail/folder-edit/useFetchComposeWorkspace";
 import type { RemoteWorkSaveResult } from "@/lib/api";
+import { openWorkflowRun } from "@/lib/workflowLinks";
 
 /**
  * Fetches an edition into a new folder and builds the folder from several
- * places at once: the edition's own files, the files of other editions,
- * sources, and local folders, and lyrics of a declared language. The edition's
- * files are one Fetch; everything else is added to the folder once it exists.
+ * places at once: the edition's own files and the files of other editions,
+ * sources, and local folders. The edition's files are one Fetch; everything
+ * else is added to the folder once it exists.
  */
 export function FetchComposeDialog({
   fetch,
@@ -28,11 +28,9 @@ export function FetchComposeDialog({
   onOpenStandardFetch: () => void;
 }) {
   const { t } = useTranslation();
-  const auth = useAuth();
   const toast = useToast();
   const workspace = useFetchComposeWorkspace({
     fetch,
-    canAssign: !auth.demoMode && auth.hasPermission("library:write"),
     onApplied: async (result, followUp) => {
       toast.notify({
         kind: "success",
@@ -41,10 +39,7 @@ export function FetchComposeDialog({
           runId: result.runId,
         }),
         actionLabel: t("remoteFetch.activity"),
-        onAction: () => {
-          window.history.pushState({}, "", `/workflows?activity=1&run=${result.runId}`);
-          window.dispatchEvent(new Event("kikoto:navigation"));
-        },
+        onAction: () => openWorkflowRun(result.runId),
       });
       await onApplied(result);
     },

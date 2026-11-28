@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { dateTimeFormat } from "@/i18n/format";
@@ -26,24 +26,28 @@ const MONTH_LABEL_WEEKS = 3;
 /**
  * A year of listening as a calendar, the past year or one calendar year: one
  * cell per UTC day in week columns, shaded by listening time, with a readout
- * for the pointed day and the year's active days and streaks. A narrow container scrolls the weeks
- * and opens on the latest one.
+ * for the pointed day and, for the past year, the current and longest streaks.
+ * A narrow container scrolls the weeks and opens on the latest one.
  */
 export function ListeningCalendar({
   calendar,
   year,
   formatDuration,
+  action,
 }: {
   calendar: ListeningCalendarData;
   /** The calendar year shown; null for the weeks up to today. */
   year?: string | null;
   formatDuration: (seconds: number) => string;
+  /** The control that chooses the year, at the calendar's top end. */
+  action?: ReactNode;
 }) {
   const { t } = useTranslation();
   const { resolvedLocale } = useLocale();
   const { weeks, days } = useMemo(() => listeningCalendarWeeks(calendar), [calendar]);
   const streaks = useMemo(() => listeningStreaks(days), [days]);
   const [active, setActive] = useState<ListeningCalendarCell | null>(null);
+  const titleId = useId();
   const scroller = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const element = scroller.current;
@@ -79,20 +83,23 @@ export function ListeningCalendar({
       : t("personal.history.calendar.noListening", { date: dayLabel(active.period) });
 
   return (
-    <figure className="min-w-0 space-y-3">
-      <figcaption className="flex min-h-5 flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        <span className="flex items-baseline gap-2">
-          <span className="text-sm font-semibold text-foreground">{t("personal.history.calendar.title")}</span>
-          <span>{year ?? t("personal.history.calendar.basis")}</span>
-        </span>
-        <span aria-live="polite" className="tabular-nums">
-          {readout}
-        </span>
-      </figcaption>
+    <figure className="min-w-0 space-y-3" aria-labelledby={titleId}>
+      <div className="flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <span id={titleId} className="text-sm font-semibold text-foreground">
+            {t("personal.history.calendar.title")}
+          </span>
+          <span aria-live="polite" className="tabular-nums">
+            {readout}
+          </span>
+        </div>
+        {action}
+      </div>
       <p className="sr-only">
         {t("personal.history.calendar.summary", { count: activeDays, duration: formatDuration(totalSeconds) })}
       </p>
-      <div ref={scroller} className="overflow-x-auto pb-1" aria-hidden="true">
+      {/* Only a narrow container scrolls the weeks, by swipe or wheel, so no scrollbar runs under them. */}
+      <div ref={scroller} className="scrollbar-hidden overflow-x-auto pb-1" aria-hidden="true">
         <div
           className="grid min-w-[40rem] gap-[3px]"
           style={{ gridTemplateColumns: `auto repeat(${weeks.length}, minmax(0, 1fr))` }}
@@ -141,24 +148,20 @@ export function ListeningCalendar({
         </div>
       </div>
       <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
-        <dl className="flex flex-wrap gap-x-6 gap-y-2">
-          <CalendarFigure
-            label={t("personal.history.activeDays")}
-            value={t("personal.history.periodCount.day", { count: activeDays })}
-          />
-          <CalendarFigure label={t("personal.history.totalTime")} value={formatDuration(totalSeconds)} />
-          {!year && (
+        {/* The report and a year's highlights carry the totals and a year's longest streak. */}
+        {!year && (
+          <dl className="flex flex-wrap gap-x-6 gap-y-2">
             <CalendarFigure
               label={t("personal.history.currentStreak")}
               value={t("personal.history.periodCount.day", { count: streaks.current })}
             />
-          )}
-          <CalendarFigure
-            label={t("personal.history.longestStreak")}
-            value={t("personal.history.periodCount.day", { count: streaks.longest })}
-          />
-        </dl>
-        <div className="flex items-center gap-1.5 text-2xs text-muted-foreground" aria-hidden="true">
+            <CalendarFigure
+              label={t("personal.history.longestStreak")}
+              value={t("personal.history.periodCount.day", { count: streaks.longest })}
+            />
+          </dl>
+        )}
+        <div className="ml-auto flex items-center gap-1.5 text-2xs text-muted-foreground" aria-hidden="true">
           <span>{t("personal.history.calendar.less")}</span>
           {levelClassNames.map((className) => (
             <span key={className} className={cn("h-3 w-3 rounded-[3px]", className)} />

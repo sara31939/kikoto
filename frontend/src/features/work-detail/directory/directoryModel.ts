@@ -9,7 +9,7 @@ import {
   treeStats,
   type TreeTrack,
 } from "@/features/work-detail/media/mediaTreeModel";
-import { videoSubtitlesFor } from "@/features/work-detail/media/videoSubtitles";
+import { videoSubtitlesFor } from "@/player/video/videoSubtitles";
 import { formatFolderStats } from "@/features/work-detail/dialogs/mediaFilePresentation";
 import i18n from "@/i18n";
 import type { FilePreviewState } from "@/features/work-detail/dialogs/FilePreviewDialog";
@@ -469,20 +469,11 @@ export function fileKindLabel(kind: string) {
 }
 
 /** Whether the download endpoint can serve this file: a local or cached copy that is available. */
-export function fileDownloadable(file: TreeTrack) {
-  return (
-    file.locationId > 0 &&
-    file.availability === "available" &&
-    (file.locationType === "local" || file.locationType === "cache")
-  );
-}
-
 export function previewForFile(file: TreeTrack): FilePreviewState | null {
   const base = {
     title: file.title,
     locationId: file.locationId,
     sizeBytes: file.sizeBytes,
-    downloadable: fileDownloadable(file),
   };
   if (file.kind === "image" && file.assetUrl) {
     return {
@@ -511,6 +502,16 @@ export function previewForFile(file: TreeTrack): FilePreviewState | null {
     };
   }
   return null;
+}
+
+/**
+ * Whether opening a folder's first track plays the folder. A video opens in
+ * the viewer instead, so a folder led by one offers its own way to play its
+ * tracks in order.
+ */
+export function firstTrackPlaysFolder(tracks: TreeTrack[]) {
+  const first = tracks[0];
+  return Boolean(first) && !(first.kind === "video" && previewForFile(first));
 }
 
 /** Previews for the files a viewer can step through, in folder order. */

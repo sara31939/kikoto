@@ -11,8 +11,7 @@ const APP_SHELL = [
 ];
 
 self.addEventListener("install", (event) => {
-  // Sara fork: activate new builds immediately instead of waiting for all clients to close.
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
 });
 
 self.addEventListener("activate", (event) => {
@@ -53,15 +52,14 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Sara fork: network-first so replaced assets (icons, cover art) show up on the
-  // next load; the cache only serves as an offline fallback.
   event.respondWith(
-    fetch(request)
-      .then((response) => {
+    caches.match(request).then((cached) => {
+      const network = fetch(request).then((response) => {
         if (response.ok && response.type === "basic")
           void caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone()));
         return response;
-      })
-      .catch(() => caches.match(request)),
+      });
+      return cached ?? network;
+    }),
   );
 });

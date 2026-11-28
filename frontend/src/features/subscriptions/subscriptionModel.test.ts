@@ -1,10 +1,16 @@
 import type { TFunction } from "i18next";
 import { describe, expect, it } from "vitest";
 
-import type { CreatorSubscription, CreatorSubscriptionLookup, ReleaseFeedFamily } from "@/lib/api";
+import type {
+  CreatorSubscription,
+  CreatorSubscriptionLookup,
+  ReleaseFeedEventType,
+  ReleaseFeedFamily,
+} from "@/lib/api";
 
 import {
   canonicalSubscriptionSearch,
+  releaseEventLabelled,
   releaseFeedSources,
   subscribeButtonState,
   subscribeConfirmation,
@@ -60,7 +66,6 @@ describe("subscription model", () => {
     expect(canonicalSubscriptionSearch("?panel=watch&target=4")).toBe("?target=4&view=watch");
     expect(canonicalSubscriptionSearch("?view=rankings&panel=watch")).toBeNull();
     expect(subscriptionViewFromSearch("?view=rankings&panel=watch")).toBe("rankings");
-    expect(subscriptionViewFromSearch("?view=for-you")).toBe("for-you");
     expect(subscriptionViewFromSearch("")).toBe("releases");
     // A query the page writes with the watch settings open keeps its view.
     expect(String(withExplicitSubscriptionView(new URLSearchParams("panel=watch")))).toBe("panel=watch&view=releases");
@@ -133,5 +138,56 @@ describe("subscription model", () => {
       ],
     } as ReleaseFeedFamily;
     expect(releaseFeedSources(family, t)).toEqual(["subscriptions.feed.via.circle:A", "subscriptions.feed.via.watch:"]);
+  });
+
+  it("leaves out the subscriptions a card's credit line already names", () => {
+    const t = ((key: string, values?: Record<string, string>) =>
+      `${key}:${values?.name ?? ""}`) as unknown as TFunction;
+    const credits = { circle: "A", voices: ["Voice A"] };
+    const family = {
+      events: [
+        { type: "released", code: "RJ00000001", language: "", at: "", subject: { kind: "circle", circleName: "A" } },
+        {
+          type: "released",
+          code: "RJ00000001",
+          language: "",
+          at: "",
+          subject: { kind: "voice", voiceName: "Voice A" },
+        },
+        {
+          type: "released",
+          code: "RJ00000001",
+          language: "",
+          at: "",
+          subject: { kind: "voice", voiceName: "Voice B" },
+        },
+        { type: "released", code: "RJ00000001", language: "", at: "", subject: { kind: "series", seriesName: "S" } },
+        { type: "released", code: "RJ00000001", language: "", at: "", subject: { kind: "watch" } },
+      ],
+    } as ReleaseFeedFamily;
+    expect(releaseFeedSources(family, t, credits)).toEqual([
+      "subscriptions.feed.via.voice:Voice B",
+      "subscriptions.feed.via.series:S",
+      "subscriptions.feed.via.watch:",
+    ]);
+    // Only the watch reports "Now available", so the event already names it.
+    const available = {
+      events: [{ type: "available", code: "RJ00000001", language: "", at: "", subject: { kind: "watch" } }],
+    } as ReleaseFeedFamily;
+    expect(releaseFeedSources(available, t, credits)).toEqual([]);
+  });
+
+  it("labels every event above the card except a plain new release", () => {
+    const event = (type: ReleaseFeedEventType) => ({
+      type,
+      code: "RJ00000001",
+      language: "",
+      at: "",
+      subject: { kind: "watch" as const },
+    });
+    expect(releaseEventLabelled(event("released"))).toBe(false);
+    expect(releaseEventLabelled(event("edition"))).toBe(true);
+    expect(releaseEventLabelled(event("available"))).toBe(true);
+    expect(releaseEventLabelled(null)).toBe(false);
   });
 });

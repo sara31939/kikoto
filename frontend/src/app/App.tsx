@@ -2,8 +2,6 @@ import { USER_PREFERENCES_CHANGED } from "@/lib/recommendationSession";
 import { USER_TAGS_CHANGED_EVENT } from "@/lib/userTagEvents";
 import { App as CapacitorApp } from "@capacitor/app";
 import {
-  Fragment,
-  lazy,
   memo,
   Suspense,
   useCallback,
@@ -15,26 +13,17 @@ import {
   type ComponentType,
 } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  AlertTriangle,
-  ChevronLeft,
-  Download,
-  ExternalLink,
-  Lock,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Server,
-  WifiOff,
-  X,
-} from "lucide-react";
+import { AlertTriangle, ChevronLeft, Download, ExternalLink, Lock, Server, WifiOff, X } from "lucide-react";
 
 import { AuthProvider, useAuth } from "@/auth/AuthProvider";
 import {
   INSIGHTS_PATH,
+  accountListIds,
+  accountShortcutIds,
   canAccessPage,
   navItems,
-  navigationDescription,
   navigationLabel,
+  pageTurnedOff,
   visibleNavigationItems,
   type PageID,
 } from "@/app/navigation";
@@ -46,15 +35,24 @@ import { SetupPage } from "@/pages/SetupPage";
 import { cx } from "@/lib/classNames";
 import { PlayerDock } from "@/player/dock/PlayerDock";
 import { PlayerProvider } from "@/player/PlayerProvider";
+import { AppSidebar } from "@/app/AppSidebar";
+import type { AccountDestination } from "@/app/header/AccountPanel";
 import { HeaderActions } from "@/app/HeaderActions";
 import { NotFoundPage } from "@/app/NotFoundPage";
 import { OverlayErrorBoundary, RouteErrorBoundary } from "@/app/RouteErrorBoundary";
 import { ServerUnavailablePage } from "@/app/ServerUnavailablePage";
-import { PageActiveProvider, PageHeaderProvider, usePageHeaderBackState } from "@/app/pageHeader";
+import {
+  PageActiveProvider,
+  PageHeaderDetailSlot,
+  PageHeaderProvider,
+  PageHeaderTitleSlot,
+  usePageHeaderBackState,
+} from "@/app/pageHeader";
 import { useScrollRestoration } from "@/app/scrollRestoration";
 import { MobileRuntimeProvider, useMobileRuntime } from "@/app/MobileRuntime";
 import { LOGIN_REQUEST_EVENT } from "@/lib/appEvents";
 import { useNativeUnlockLabels } from "@/hooks/useNativePrivacySettings";
+import { createEffectScope } from "@/lib/effectScope";
 import { addNativeEdgeBackListener } from "@/lib/nativeEdgeBack";
 import { isNativeApp } from "@/lib/serverConfig";
 import { currentClientStorageScope } from "@/lib/clientStorageScope";
@@ -64,7 +62,7 @@ import type {
   ListeningEntityLinkFactory,
   ListeningHistoryWorkLinkFactory,
 } from "@/features/listening-history/ListeningHistoryPage";
-import { PERSONAL_TAB_PERMISSION } from "@/pages/personalTabs";
+import { PERSONAL_DATA_PERMISSION } from "@/pages/settingsPaths";
 import { preloadWorkDetail } from "@/features/work-detail/lazyWorkDetail";
 import { LibraryOnboarding } from "@/features/library-setup/LibraryOnboarding";
 import { LibraryMigrationGate } from "@/features/library-setup/LibraryMigrationGate";
@@ -90,6 +88,7 @@ import { readLastLibraryLocation } from "@/lib/libraryBrowseState";
 import { libraryTagSearchLocation } from "@/lib/libraryTagSearch";
 import { voiceDetailPath } from "@/lib/voiceRoute";
 import { legacyLibraryRedirect } from "@/app/legacyLibraryRoutes";
+import { openWorkflowRun } from "@/lib/workflowLinks";
 import {
   closePlayerLayer,
   closeTopDocumentLayer,
@@ -101,6 +100,23 @@ import { isMobileTabDetailLocation, navigateToMobileTabHome, pageHomeLocation } 
 import { useStableCallback } from "@/hooks/useStableCallback";
 import { isChunkLoadError, reloadApp } from "@/lib/chunkLoadError";
 import { preloadableComponent } from "@/lib/preloadableComponent";
+import { useDeferredBusy } from "@/hooks/useDeferredBusy";
+import { BrowseLoadingIndicator } from "@/components/collection/BrowseLoadingIndicator";
+import {
+  aboutPage,
+  cleanupPage,
+  forYouPage,
+  insightsPage,
+  preloadRoutePage,
+  recordsPage,
+  settingsPage,
+  subscriptionsPage,
+  systemSettingsPage,
+  tagsPage,
+  translationPage,
+  workflowsPage,
+  workManagementPage,
+} from "@/app/routePageChunks";
 import {
   REMOTE_TRACK_CREATED_EVENT,
   REMOTE_TRACK_TERMINAL_EVENT,
@@ -133,26 +149,26 @@ const LibraryPage = libraryPage.Component;
 const FavoritesPage = favoritesPage.Component;
 const CirclesPage = circlesPage.Component;
 const CreatorWorksPage = creatorWorksPage.Component;
-const SettingsPage = lazy(() => import("@/pages/SettingsPage").then((module) => ({ default: module.SettingsPage })));
-const WorkManagementPage = lazy(() =>
-  import("@/pages/WorkManagementPage").then((module) => ({ default: module.WorkManagementPage })),
-);
-const WorkflowsPage = lazy(() => import("@/pages/WorkflowsPage").then((module) => ({ default: module.WorkflowsPage })));
-const TranslationPage = lazy(() =>
-  import("@/pages/TranslationPage").then((module) => ({ default: module.TranslationPage })),
-);
-const AboutPage = lazy(() => import("@/pages/AboutPage").then((module) => ({ default: module.AboutPage })));
-const InsightsPage = lazy(() => import("@/pages/InsightsPage").then((module) => ({ default: module.InsightsPage })));
-const SubscriptionsPage = lazy(() =>
-  import("@/pages/SubscriptionsPage").then((module) => ({ default: module.SubscriptionsPage })),
-);
+const SettingsPage = settingsPage.Component;
+const SystemSettingsPage = systemSettingsPage.Component;
+const CleanupPage = cleanupPage.Component;
+const TagsPage = tagsPage.Component;
+const WorkManagementPage = workManagementPage.Component;
+const WorkflowsPage = workflowsPage.Component;
+const TranslationPage = translationPage.Component;
+const AboutPage = aboutPage.Component;
+const InsightsPage = insightsPage.Component;
+const ForYouPage = forYouPage.Component;
+const SubscriptionsPage = subscriptionsPage.Component;
+const RecordsPage = recordsPage.Component;
 // Preloaded with the browse workspaces so the first Quick actions tap opens at once.
 const commandPalette = preloadableComponent(() =>
   import("@/app/CommandPalette").then((module) => module.CommandPalette),
 );
 const CommandPalette = commandPalette.Component;
 
-const preferredMobileTabs: PageID[] = ["library", "favorites", "circles", "voice-actors"];
+// Record takes the second tab while the instance offers it, making five tabs.
+const preferredMobileTabs: PageID[] = ["library", "records", "favorites", "circles", "voice-actors"];
 const SIDEBAR_COLLAPSED_KEY = "kikoto:sidebar-collapsed";
 
 enableInAppBackStack(isNativeApp());
@@ -263,6 +279,8 @@ function AuthenticatedApp() {
     (permission: string) => auth.demoMode || hasPermission(permission),
     [auth.demoMode, hasPermission],
   );
+  // Demo opens every administration surface read-only even though its identity is not an administrator.
+  const viewsAdministration = auth.demoMode || auth.user?.role === "admin" || auth.user?.role === "super_admin";
   const releaseFeedUnread = useReleaseFeedUnread(Boolean(auth.user) && !auth.demoMode);
   const listeningHistoryWorkLink = useCallback<ListeningHistoryWorkLinkFactory>(
     (primaryCode) => {
@@ -295,27 +313,66 @@ function AuthenticatedApp() {
     },
     [t],
   );
+  // A page the instance turned off is not found at its address.
+  const availableRoutePage: AppPage = pageTurnedOff(routePage, { recordEnabled: auth.recordEnabled })
+    ? "not-found"
+    : routePage;
   // Work detail belongs to the page it was opened from. A detail whose owner
   // the viewer cannot open stays readable under Library.
   const page: AppPage =
-    workDetailOpen && routePage !== "not-found" && !canAccessPage(routePage, authState, navigationHasPermission)
+    workDetailOpen &&
+    availableRoutePage !== "not-found" &&
+    !canAccessPage(availableRoutePage, authState, navigationHasPermission, viewsAdministration)
       ? "library"
-      : routePage;
+      : availableRoutePage;
   const visibleNavItems = useMemo(
-    () => visibleNavigationItems({ state: authState, hasPermission: navigationHasPermission }),
-    [authState, navigationHasPermission],
+    () =>
+      visibleNavigationItems({
+        state: authState,
+        hasPermission: navigationHasPermission,
+        administrator: viewsAdministration,
+        recordEnabled: auth.recordEnabled,
+      }),
+    [auth.recordEnabled, authState, navigationHasPermission, viewsAdministration],
+  );
+  // Every page the navigation offers loads its chunk while the shell is idle,
+  // so opening it never waits on a loading placeholder.
+  useEffect(
+    () =>
+      whenIdle(() => {
+        for (const item of visibleNavItems) preloadRoutePage(item.id);
+      }),
+    [visibleNavItems],
   );
   const mobileNavItems = useMemo(() => {
     const preferred = preferredMobileTabs
       .map((id) => visibleNavItems.find((item) => item.id === id))
       .filter((item): item is NonNullable<typeof item> => Boolean(item));
-    if (preferred.length >= 4) return preferred.slice(0, 4);
+    const tabCount = preferred.some((item) => item.id === "records") ? 5 : 4;
+    if (preferred.length >= tabCount) return preferred.slice(0, tabCount);
     const additions = visibleNavItems.filter((item) => !preferred.some((candidate) => candidate.id === item.id));
-    return [...preferred, ...additions].slice(0, 4);
+    return [...preferred, ...additions].slice(0, tabCount);
   }, [visibleNavItems]);
-  const showMobilePageTitle = !["library", "favorites", "circles", "voice-actors"].includes(page);
+  // The account panel tiles the shortcut destinations and lists Tags and
+  // Settings on every layout, and lists below the sidebar breakpoint the
+  // sidebar's other pages that the bottom navigation does not carry.
+  const accountDestinations = useMemo<AccountDestination[]>(() => {
+    const inBottomNavigation = (id: PageID) => mobileNavItems.some((item) => item.id === id);
+    const everyLayoutIds: readonly string[] = [...accountShortcutIds, ...accountListIds];
+    return visibleNavItems.flatMap<AccountDestination>((item) => {
+      if (everyLayoutIds.includes(item.id)) {
+        return [{ item, placement: inBottomNavigation(item.id) ? "wide" : "always" }];
+      }
+      return inBottomNavigation(item.id) ? [] : [{ item, placement: "compact" }];
+    });
+  }, [mobileNavItems, visibleNavItems]);
+  // The bottom navigation names its own tabs, so they show the Kikoto mark. A
+  // page that only fills a slot an account cannot use, such as About for an
+  // anonymous visitor, keeps its title.
+  const showMobilePageTitle = !mobileNavItems.some((item) => item.id === page && preferredMobileTabs.includes(item.id));
   const activeItem = useMemo(() => visibleNavItems.find((item) => item.id === page), [page, visibleNavItems]);
-  const canAccessCurrentPage = page !== "not-found" && canAccessPage(page, authState, navigationHasPermission);
+  const canAccessCurrentPage =
+    page !== "not-found" && canAccessPage(page, authState, navigationHasPermission, viewsAdministration);
   const showRoutePage = canAccessCurrentPage && !workDetailOpen;
 
   useEffect(() => {
@@ -445,7 +502,7 @@ function AuthenticatedApp() {
 
   useEffect(() => {
     if (!isNativeApp()) return;
-    let disposed = false;
+    const scope = createEffectScope();
     const goBack = (leaveDestination: boolean) => {
       const step = handleNativeBack({
         commandPalette: {
@@ -462,7 +519,7 @@ function AuthenticatedApp() {
       return step;
     };
     CapacitorApp.addListener("backButton", async () => {
-      if (disposed) return;
+      if (scope.signal.aborted) return;
       const step = goBack(true);
       if (step === "history") exitBackDeadlineRef.current = 0;
       if (step !== "root") return;
@@ -479,23 +536,20 @@ function AuthenticatedApp() {
     }).catch(() => {});
     // An edge swipe follows the same order but never leaves the destination or
     // the app: at a destination's root it does nothing.
-    let removeEdgeBack: (() => void) | null = null;
-    void addNativeEdgeBackListener((swipe) => {
-      if (disposed) return;
-      const start = document.elementFromPoint(swipe.x, swipe.y);
-      if (edgeSwipeStartsOnHorizontalGesture(start, (element) => getComputedStyle(element as Element).overflowX)) {
-        return;
-      }
-      goBack(false);
-    })
-      .then((remove) => {
-        if (disposed) remove();
-        else removeEdgeBack = remove;
-      })
-      .catch(() => {});
+    scope.listen(
+      () =>
+        addNativeEdgeBackListener((swipe) => {
+          if (scope.signal.aborted) return;
+          const start = document.elementFromPoint(swipe.x, swipe.y);
+          if (edgeSwipeStartsOnHorizontalGesture(start, (element) => getComputedStyle(element as Element).overflowX)) {
+            return;
+          }
+          goBack(false);
+        }),
+      (remove) => remove(),
+    );
     return () => {
-      disposed = true;
-      removeEdgeBack?.();
+      scope.cancel();
       void CapacitorApp.removeAllListeners();
     };
   }, [commandPaletteBusy, commandPaletteOpen, loginOpen, navigateNativeBack, t, toast]);
@@ -530,84 +584,14 @@ function AuthenticatedApp() {
           sidebarCollapsed ? "lg:grid-cols-[4.75rem_minmax(0,1fr)]" : "lg:grid-cols-[13rem_minmax(0,1fr)]",
         )}
       >
-        <aside className="theme-shell-surface sticky top-0 hidden h-screen border-r bg-card lg:flex lg:flex-col">
-          <div
-            className={cx(
-              "flex h-[var(--header-height)] items-center border-b",
-              sidebarCollapsed ? "justify-center px-3" : "px-5",
-            )}
-          >
-            <div className="flex min-w-0 items-center gap-2.5">
-              <span className="grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-[var(--control-radius)] bg-primary/10 ring-1 ring-primary/15">
-                <img src="/kikoto-sara-icon-64.png" alt="" className="h-7 w-7" />
-              </span>
-              {!sidebarCollapsed && (
-                <div className="truncate font-[family-name:var(--font-heading)] text-xl font-semibold tracking-tight">
-                  Kikoto
-                </div>
-              )}
-            </div>
-          </div>
-          <nav className={cx("app-scroll min-h-0 flex-1 overflow-y-auto", sidebarCollapsed ? "p-2" : "p-3")}>
-            {visibleNavItems.map((item, index) => {
-              const active = page === item.id;
-              const startsGroup = index > 0 && visibleNavItems[index - 1].group !== item.group;
-              return (
-                <Fragment key={item.id}>
-                  {startsGroup && (
-                    <div aria-hidden="true" className={cx("my-2 border-t", sidebarCollapsed ? "mx-2" : "mx-3")} />
-                  )}
-                  <Button
-                    className={cx(
-                      "relative mb-0.5 w-full font-normal text-muted-foreground",
-                      sidebarCollapsed ? "justify-center px-0" : "justify-start gap-3",
-                      active && "bg-primary/10 font-medium text-foreground hover:bg-primary/15",
-                    )}
-                    variant="ghost"
-                    size={sidebarCollapsed ? "icon" : "default"}
-                    title={sidebarCollapsed ? navigationLabel(item, t) : undefined}
-                    aria-label={sidebarCollapsed ? navigationLabel(item, t) : undefined}
-                    aria-current={active ? "page" : undefined}
-                    onClick={() => openPage(item.id)}
-                  >
-                    {active && (
-                      <span aria-hidden="true" className="absolute inset-y-2 left-0 w-[3px] rounded-full bg-primary" />
-                    )}
-                    <item.icon className={cx("h-4 w-4", active && "text-primary")} />
-                    {!sidebarCollapsed && navigationLabel(item, t)}
-                    {item.id === "subscriptions" && releaseFeedUnread > 0 && (
-                      <span
-                        className={cx(
-                          "rounded-full bg-primary text-2xs font-medium leading-none text-primary-foreground",
-                          sidebarCollapsed ? "absolute right-1.5 top-1.5 h-2 w-2" : "ml-auto px-1.5 py-1",
-                        )}
-                        aria-label={t("subscriptions.unreadBadge", { count: releaseFeedUnread })}
-                      >
-                        {!sidebarCollapsed && (releaseFeedUnread > 99 ? "99+" : releaseFeedUnread)}
-                      </span>
-                    )}
-                  </Button>
-                </Fragment>
-              );
-            })}
-          </nav>
-          <div className={cx("border-t", sidebarCollapsed ? "p-2" : "p-3")}>
-            <Button
-              variant="ghost"
-              size={sidebarCollapsed ? "icon" : "default"}
-              className={cx(
-                "w-full font-normal text-muted-foreground",
-                sidebarCollapsed ? "justify-center px-0" : "justify-start gap-3",
-              )}
-              aria-label={sidebarCollapsed ? t("app.expandSidebar") : t("app.collapseSidebar")}
-              title={sidebarCollapsed ? t("app.expandSidebar") : undefined}
-              onClick={toggleSidebar}
-            >
-              {sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-              {!sidebarCollapsed && t("app.collapse")}
-            </Button>
-          </div>
-        </aside>
+        <AppSidebar
+          items={visibleNavItems}
+          page={page}
+          collapsed={sidebarCollapsed}
+          releaseFeedUnread={releaseFeedUnread}
+          onOpenPage={openPage}
+          onToggleCollapsed={toggleSidebar}
+        />
 
         <main className="app-main min-w-0">
           <header
@@ -623,20 +607,16 @@ function AuthenticatedApp() {
                       ? navigationLabel(activeItem, t)
                       : t("nav.library")
                 }
-                description={
-                  page === "not-found"
-                    ? t("app.notFoundDescription")
-                    : activeItem
-                      ? navigationDescription(activeItem, t)
-                      : t("app.libraryFallback")
-                }
                 showMobileTitle={showMobilePageTitle}
               />
               <HeaderActions
                 user={auth.user}
                 canView={navigationHasPermission}
+                accountDestinations={accountDestinations}
+                currentPage={page}
                 onLogout={() => void auth.logout()}
                 onOpenLogin={() => setLoginOpen(true)}
+                onOpenPage={openPage}
                 onOpenPath={openPath}
                 onOpenCommandPalette={openCommandPalette}
                 onLocaleChange={updateLocale}
@@ -662,7 +642,7 @@ function AuthenticatedApp() {
             staleVersionMessage={t("notFound.staleVersionMessage")}
             reloadLabel={t("notFound.reloadApp")}
           >
-            <Suspense fallback={<PageLoading />}>
+            <Suspense fallback={<RouteLoading />}>
               <div className="py-[var(--page-padding-y)] pl-[max(1rem,var(--safe-area-left))] pr-[max(1rem,var(--safe-area-right))] lg:px-6">
                 {page !== "not-found" && !canAccessCurrentPage && (
                   <AccessRequiredPage page={page} onOpenLogin={() => setLoginOpen(true)} />
@@ -679,98 +659,102 @@ function AuthenticatedApp() {
                   workDetailOpen={workDetailOpen}
                   storageScope={clientStorageScope}
                 />
-                {showRoutePage && page === "settings" && auth.user && (
-                  <SettingsPage
-                    user={auth.user}
-                    readOnly={auth.demoMode}
-                    personal={
-                      navigationHasPermission(PERSONAL_TAB_PERMISSION)
-                        ? {
-                            tags: { canEdit: effectiveHasPermission("tags:write"), demoMode: auth.demoMode },
-                            data: {
+                {/* Route pages suspend apart from the retained browse pages, which stay mounted and untouched. */}
+                <Suspense fallback={<RouteLoading />}>
+                  {showRoutePage && page === "settings" && auth.user && (
+                    <SettingsPage
+                      user={auth.user}
+                      readOnly={auth.demoMode}
+                      data={
+                        navigationHasPermission(PERSONAL_DATA_PERMISSION)
+                          ? {
                               canImportData:
                                 effectiveHasPermission("favorites:write") &&
                                 effectiveHasPermission("tags:write") &&
                                 effectiveHasPermission("playback:use"),
                               demoMode: auth.demoMode,
-                            },
-                          }
-                        : undefined
-                    }
-                    onAccountUpdated={auth.refresh}
-                    onAccessPolicyUpdated={auth.refreshRuntime}
-                  />
-                )}
-                {showRoutePage && page === "metadata" && auth.user && (
-                  <WorkManagementPage
-                    preferenceRevision={preferenceRevision}
-                    canSyncMetadata={auth.demoMode || auth.hasPermission("metadata:sync")}
-                    canManageSources={auth.demoMode || auth.hasPermission("sources:write")}
-                    canEditMetadata={auth.demoMode || auth.hasPermission("library:write")}
-                    canCreateCustomWorks={
-                      !auth.demoMode && auth.hasPermission("library:write") && auth.hasPermission("downloads:manage")
-                    }
-                    readOnly={auth.demoMode}
-                  />
-                )}
-                {showRoutePage && page === "workflows" && (
-                  <WorkflowsPage
-                    canRun={auth.demoMode || auth.hasPermission("workflows:run")}
-                    canSyncMetadata={auth.demoMode || auth.hasPermission("metadata:sync")}
-                    canTagWorks={auth.demoMode || auth.hasPermission("tags:write")}
-                    canFetchRemote={
-                      auth.demoMode || (auth.hasPermission("remote:fetch") && auth.hasPermission("metadata:sync"))
-                    }
-                    canManageSources={auth.demoMode || auth.hasPermission("sources:write")}
-                    readOnly={auth.demoMode}
-                  />
-                )}
-                {showRoutePage && page === "translation" && auth.user && (
-                  <TranslationPage
-                    canTranslateMetadata={auth.hasPermission("metadata:sync") && auth.hasPermission("library:write")}
-                    canTranslateFiles={auth.hasPermission("library:write")}
-                    canOpenActivity={!auth.demoMode && auth.hasPermission("workflows:run")}
-                    readOnly={auth.demoMode}
-                  />
-                )}
-                {showRoutePage && page === "insights" && auth.user && (
-                  <InsightsPage
-                    listening={{
-                      canClear: effectiveHasPermission("playback:use"),
-                      storageScope: clientStorageScope,
-                      workLink: listeningHistoryWorkLink,
-                      entityLink: listeningEntityLink,
-                    }}
-                    demoMode={auth.demoMode}
-                    onOpenPath={openPath}
-                  />
-                )}
-                {showRoutePage && page === "subscriptions" && auth.user && (
-                  <SubscriptionsPage
-                    readOnly={auth.demoMode}
-                    canSubscribe={effectiveHasPermission("favorites:write")}
-                    canManageSchedule={effectiveHasPermission("metadata:sync")}
-                    canRunWorkflows={navigationHasPermission("workflows:run")}
-                    canTrackRemote={effectiveHasPermission("remote:track")}
-                    canFetchRemote={effectiveHasPermission("remote:fetch") && effectiveHasPermission("metadata:sync")}
-                  />
-                )}
-                {showRoutePage && page === "about" && <AboutPage />}
-                {![
-                  "library",
-                  "favorites",
-                  "circles",
-                  "voice-actors",
-                  "subscriptions",
-                  "settings",
-                  "metadata",
-                  "translation",
-                  "workflows",
-                  "insights",
-                  "about",
-                ].includes(page) && (
-                  <PlaceholderPage title={activeItem ? navigationLabel(activeItem, t) : t("app.pageReserved")} />
-                )}
+                            }
+                          : undefined
+                      }
+                      onAccountUpdated={auth.refresh}
+                    />
+                  )}
+                  {showRoutePage && page === "system" && auth.user && (
+                    <SystemSettingsPage
+                      user={auth.user}
+                      readOnly={auth.demoMode}
+                      onAccessPolicyUpdated={auth.refreshRuntime}
+                    />
+                  )}
+                  {showRoutePage && page === "cleanup" && auth.user && (
+                    <CleanupPage
+                      canManageCache={auth.demoMode || auth.hasPermission("downloads:manage")}
+                      canManageDatabase={auth.demoMode || auth.hasPermission("sources:write")}
+                      readOnly={auth.demoMode}
+                    />
+                  )}
+                  {showRoutePage && page === "tags" && auth.user && (
+                    <TagsPage canEdit={effectiveHasPermission("tags:write")} demoMode={auth.demoMode} />
+                  )}
+                  {showRoutePage && page === "metadata" && auth.user && (
+                    <WorkManagementPage
+                      preferenceRevision={preferenceRevision}
+                      canSyncMetadata={auth.demoMode || auth.hasPermission("metadata:sync")}
+                      canManageSources={auth.demoMode || auth.hasPermission("sources:write")}
+                      canEditMetadata={auth.demoMode || auth.hasPermission("library:write")}
+                      canCreateCustomWorks={
+                        !auth.demoMode && auth.hasPermission("library:write") && auth.hasPermission("downloads:manage")
+                      }
+                      readOnly={auth.demoMode}
+                    />
+                  )}
+                  {showRoutePage && page === "workflows" && (
+                    <WorkflowsPage
+                      canRun={auth.demoMode || auth.hasPermission("workflows:run")}
+                      canSyncMetadata={auth.demoMode || auth.hasPermission("metadata:sync")}
+                      readOnly={auth.demoMode}
+                    />
+                  )}
+                  {showRoutePage && page === "translation" && auth.user && (
+                    <TranslationPage
+                      canTranslateMetadata={auth.hasPermission("metadata:sync") && auth.hasPermission("library:write")}
+                      canTranslateFiles={auth.hasPermission("library:write")}
+                      canOpenActivity={!auth.demoMode && auth.hasPermission("workflows:run")}
+                      readOnly={auth.demoMode}
+                    />
+                  )}
+                  {showRoutePage && page === "insights" && auth.user && (
+                    <InsightsPage
+                      listening={{
+                        canClear: effectiveHasPermission("playback:use"),
+                        storageScope: clientStorageScope,
+                        workLink: listeningHistoryWorkLink,
+                        entityLink: listeningEntityLink,
+                      }}
+                      demoMode={auth.demoMode}
+                      onOpenPath={openPath}
+                    />
+                  )}
+                  {showRoutePage && page === "for-you" && auth.user && (
+                    <ForYouPage
+                      userId={auth.user.id}
+                      readOnly={auth.demoMode}
+                      canMark={!auth.demoMode && effectiveHasPermission("favorites:write")}
+                    />
+                  )}
+                  {showRoutePage && page === "subscriptions" && auth.user && (
+                    <SubscriptionsPage
+                      readOnly={auth.demoMode}
+                      canSubscribe={effectiveHasPermission("favorites:write")}
+                      canManageSchedule={effectiveHasPermission("metadata:sync")}
+                      canRunWorkflows={navigationHasPermission("workflows:run")}
+                      canTrackRemote={effectiveHasPermission("remote:track")}
+                      canFetchRemote={effectiveHasPermission("remote:fetch") && effectiveHasPermission("metadata:sync")}
+                    />
+                  )}
+                  {showRoutePage && page === "records" && auth.user && <RecordsPage />}
+                  {showRoutePage && page === "about" && <AboutPage />}
+                </Suspense>
               </div>
             </Suspense>
           </RouteErrorBoundary>
@@ -781,21 +765,24 @@ function AuthenticatedApp() {
             data-mobile-navigation
             className="theme-shell-surface fixed inset-x-0 bottom-0 z-30 border-t bg-card/95 pb-[var(--safe-area-bottom)] pl-[var(--safe-area-left)] pr-[var(--safe-area-right)] backdrop-blur lg:hidden"
           >
-            <nav className="grid grid-cols-4">
+            <nav className={cx("grid", mobileNavItems.length === 5 ? "grid-cols-5" : "grid-cols-4")}>
               {mobileNavItems.map((item) => {
+                const label = navigationLabel(item, t);
                 return (
                   <button
                     key={item.id}
                     className={cx(
-                      "group flex h-[var(--mobile-navigation-height)] flex-col items-center justify-center gap-0.5 text-2xs text-muted-foreground transition-colors",
-                      page === item.id && "font-medium text-foreground",
+                      "group flex h-[var(--mobile-navigation-height)] items-center justify-center text-muted-foreground transition-colors",
+                      page === item.id && "text-foreground",
                     )}
+                    aria-label={label}
+                    title={label}
                     aria-current={page === item.id ? "page" : undefined}
                     onClick={() => openMobilePage(item.id)}
                   >
                     <span
                       className={cx(
-                        "relative grid h-7 w-12 place-items-center rounded-full transition-colors",
+                        "relative grid h-9 w-14 place-items-center rounded-full transition-colors",
                         page === item.id ? "text-primary" : "group-active:bg-muted",
                       )}
                     >
@@ -806,9 +793,11 @@ function AuthenticatedApp() {
                           className="mobile-nav-pill absolute inset-0 rounded-full bg-primary/15"
                         />
                       )}
-                      <item.icon className="relative h-[1.125rem] w-[1.125rem] transition-transform duration-150 group-active:scale-90" />
+                      <item.icon
+                        aria-hidden="true"
+                        className="relative h-[1.375rem] w-[1.375rem] transition-transform duration-150 group-active:scale-90"
+                      />
                     </span>
-                    <span>{navigationLabel(item, t)}</span>
                   </button>
                 );
               })}
@@ -838,15 +827,7 @@ function AuthenticatedApp() {
   );
 }
 
-function AppHeaderTitle({
-  title,
-  description,
-  showMobileTitle,
-}: {
-  title: string;
-  description: string;
-  showMobileTitle: boolean;
-}) {
+function AppHeaderTitle({ title, showMobileTitle }: { title: string; showMobileTitle: boolean }) {
   const back = usePageHeaderBackState();
   if (back) {
     return (
@@ -862,7 +843,8 @@ function AppHeaderTitle({
           <ChevronLeft className="h-5 w-5" />
         </Button>
         <div className="flex min-w-0 items-baseline gap-3">
-          <h1 className="shrink-0 text-base font-semibold lg:text-2xl">{title}</h1>
+          {/* A phone keeps the detail slot's content whole and truncates the section name first. */}
+          <h1 className="min-w-0 truncate text-base font-semibold lg:shrink-0 lg:text-2xl">{title}</h1>
           {back.title && (
             <p className="hidden min-w-0 truncate text-sm text-muted-foreground lg:block" title={back.title}>
               <span aria-hidden="true" className="mr-3 text-border">
@@ -872,16 +854,17 @@ function AppHeaderTitle({
             </p>
           )}
         </div>
+        <PageHeaderDetailSlot className="ml-1.5 flex shrink-0 items-center gap-1.5 empty:hidden lg:hidden" />
       </div>
     );
   }
   return (
-    <div className="flex min-w-0 items-center lg:flex-row lg:items-baseline lg:gap-3">
-      {!showMobileTitle && <img src="/kikoto-sara-icon-64.png" alt="Kikoto" className="h-7 w-7 lg:hidden" />}
+    <div className="flex min-w-0 items-center gap-1.5">
+      {!showMobileTitle && <img src="/kikoto-sara-icon-64.png" alt="Kikoto" className="h-7 w-7 shrink-0 lg:hidden" />}
       <h1 className={cx("truncate text-base font-semibold lg:text-2xl", !showMobileTitle && "hidden lg:block")}>
         {title}
       </h1>
-      <p className="hidden text-xs text-muted-foreground lg:line-clamp-1 lg:block lg:text-sm">{description}</p>
+      <PageHeaderTitleSlot className="flex min-w-0 items-center gap-1 empty:hidden lg:hidden" />
     </div>
   );
 }
@@ -902,6 +885,18 @@ if (isWorkDetailLocationOpen()) {
   preloadWorkDetail();
 } else if (isCachedBrowsePage(initialPage)) {
   void browsePages[initialPage].preload().catch(() => {});
+} else {
+  preloadRoutePage(initialPage);
+}
+
+/** Runs `callback` once the main thread is idle, or after a short delay where idle callbacks are unsupported. */
+function whenIdle(callback: () => void) {
+  if (typeof window.requestIdleCallback === "function") {
+    const handle = window.requestIdleCallback(callback, { timeout: 4000 });
+    return () => window.cancelIdleCallback(handle);
+  }
+  const timer = window.setTimeout(callback, 1500);
+  return () => window.clearTimeout(timer);
 }
 
 function CachedBrowsePages({
@@ -940,17 +935,14 @@ function CachedBrowsePages({
     restoreCurrentHistoryScroll(historyScrollY(window.history.state));
   }, [shownSurface, pageToMount, visitedPages]);
 
-  useEffect(() => {
-    const preload = () => {
-      for (const component of [...Object.values(browsePages), commandPalette]) void component.preload().catch(() => {});
-    };
-    if (typeof window.requestIdleCallback === "function") {
-      const handle = window.requestIdleCallback(preload, { timeout: 4000 });
-      return () => window.cancelIdleCallback(handle);
-    }
-    const timer = window.setTimeout(preload, 1500);
-    return () => window.clearTimeout(timer);
-  }, []);
+  useEffect(
+    () =>
+      whenIdle(() => {
+        for (const component of [...Object.values(browsePages), commandPalette])
+          void component.preload().catch(() => {});
+      }),
+    [],
+  );
 
   return (
     <>
@@ -965,7 +957,7 @@ function CachedBrowsePages({
       {mountedPages.has("library") && (
         <div data-browse-page="library" hidden={shownPage !== "library"}>
           <PageActiveProvider value={shownPage === "library"}>
-            <Suspense fallback={<PageLoading />}>
+            <Suspense fallback={<RouteLoading />}>
               <LibraryPage active={shownPage === "library"} />
             </Suspense>
           </PageActiveProvider>
@@ -974,7 +966,7 @@ function CachedBrowsePages({
       {mountedPages.has("favorites") && (
         <div data-browse-page="favorites" hidden={shownPage !== "favorites"}>
           <PageActiveProvider value={shownPage === "favorites"}>
-            <Suspense fallback={<PageLoading />}>
+            <Suspense fallback={<RouteLoading />}>
               <FavoritesPage active={shownPage === "favorites"} />
             </Suspense>
           </PageActiveProvider>
@@ -983,7 +975,7 @@ function CachedBrowsePages({
       {mountedPages.has("circles") && (
         <div data-browse-page="circles" hidden={shownPage !== "circles"}>
           <PageActiveProvider value={shownPage === "circles"}>
-            <Suspense fallback={<PageLoading />}>
+            <Suspense fallback={<RouteLoading />}>
               <CirclesPage active={shownPage === "circles"} />
             </Suspense>
           </PageActiveProvider>
@@ -992,7 +984,7 @@ function CachedBrowsePages({
       {mountedPages.has("voice-actors") && (
         <div data-browse-page="voice-actors" hidden={shownPage !== "voice-actors"}>
           <PageActiveProvider value={shownPage === "voice-actors"}>
-            <Suspense fallback={<PageLoading />}>
+            <Suspense fallback={<RouteLoading />}>
               <CreatorWorksPage kind="voice" active={shownPage === "voice-actors"} />
             </Suspense>
           </PageActiveProvider>
@@ -1048,25 +1040,21 @@ function RemoteTrackWorkflowObserver({
   const handled = useRef(false);
 
   useEffect(() => {
-    let disposed = false;
-    let timer: number | null = null;
-    const poll = async () => {
-      try {
-        const next = await api.getRemoteTrackRunStatus(detail.runId);
-        if (disposed) return;
-        setRun(next);
-        if (next.status === "queued" || next.status === "running") {
-          timer = window.setTimeout(() => void poll(), document.hidden ? 10_000 : 1_500);
-        }
-      } catch {
-        if (!disposed) timer = window.setTimeout(() => void poll(), 5_000);
-      }
-    };
-    void poll();
-    return () => {
-      disposed = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
+    const scope = createEffectScope();
+    const poll = (delayMs?: number) =>
+      scope.load(
+        (signal) => api.getRemoteTrackRunStatus(detail.runId, signal),
+        {
+          onSuccess: (next) => {
+            setRun(next);
+            if (next.status === "queued" || next.status === "running") poll(document.hidden ? 10_000 : 1_500);
+          },
+          onError: () => poll(5_000),
+        },
+        { delayMs },
+      );
+    poll();
+    return scope.cancel;
   }, [detail.runId]);
 
   useEffect(() => {
@@ -1088,8 +1076,8 @@ function RemoteTrackWorkflowObserver({
       message: succeeded
         ? t("workflows.trackCompleted", { id: run.runId, primaryCode })
         : t("workflows.trackFailed", { id: run.runId, primaryCode }),
-      actionLabel: canOpenActivity ? t("nav.activity") : undefined,
-      onAction: canOpenActivity ? () => openWorkflowActivity(run.runId) : undefined,
+      actionLabel: canOpenActivity ? t("workflowPage.viewRun") : undefined,
+      onAction: canOpenActivity ? () => openWorkflowRun(run.runId) : undefined,
     });
     window.dispatchEvent(new CustomEvent<RemoteTrackTerminalDetail>(REMOTE_TRACK_TERMINAL_EVENT, { detail: terminal }));
     onDone(detail.runId);
@@ -1113,11 +1101,6 @@ function parseRemoteTrackSummary(raw: string) {
     fileSourceId: Number.isInteger(fileSourceId) && fileSourceId > 0 ? fileSourceId : 0,
     primaryCode: typeof value.primary_code === "string" ? value.primary_code.trim().toUpperCase() : "",
   };
-}
-
-function openWorkflowActivity(runId: number) {
-  window.history.pushState({}, "", `/workflows?activity=1&run=${runId}`);
-  window.dispatchEvent(new Event("kikoto:navigation"));
 }
 
 function MobileConnectionBanner({
@@ -1193,41 +1176,15 @@ function LoginOverlay({ onClose }: { onClose: () => void }) {
   );
 }
 
-function PageLoading() {
+/**
+ * A page whose chunk is still loading. The shell cannot know the page's
+ * layout, so it draws no placeholder shape; the page shows its own loading
+ * placeholder once it renders. A slow load shows the shared refresh indicator.
+ */
+function RouteLoading() {
   const { t } = useTranslation();
-  return (
-    <div className="space-y-5 px-4 py-5 lg:px-6" aria-label={t("app.loadingPage")}>
-      <section className="rounded-lg border bg-card p-4">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div className="space-y-2">
-            <div className="h-4 w-32 animate-pulse rounded bg-muted" />
-            <div className="h-7 w-48 animate-pulse rounded bg-muted" />
-            <div className="h-4 w-72 max-w-full animate-pulse rounded bg-muted" />
-          </div>
-          <div className="grid grid-cols-3 gap-2 sm:flex">
-            <div className="h-14 w-24 animate-pulse rounded-md border bg-muted" />
-            <div className="h-14 w-24 animate-pulse rounded-md border bg-muted" />
-            <div className="h-14 w-24 animate-pulse rounded-md border bg-muted" />
-          </div>
-        </div>
-      </section>
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {Array.from({ length: 6 }, (_, index) => (
-          <div key={index} className="rounded-lg border bg-card p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="h-10 w-10 animate-pulse rounded-md bg-muted" />
-              <div className="h-5 w-20 animate-pulse rounded-full bg-muted" />
-            </div>
-            <div className="mt-5 space-y-2">
-              <div className="h-5 w-36 animate-pulse rounded bg-muted" />
-              <div className="h-3 w-full animate-pulse rounded bg-muted" />
-              <div className="h-3 w-4/5 animate-pulse rounded bg-muted" />
-            </div>
-          </div>
-        ))}
-      </section>
-    </div>
-  );
+  const visible = useDeferredBusy(true, { delayMs: 300 });
+  return <BrowseLoadingIndicator refreshing={visible} label={t("app.loadingPage")} />;
 }
 
 function resolveAppPageFromLocation() {
@@ -1240,16 +1197,6 @@ function resolveAppPageFromLocation() {
 
 function resolveRouteRenderKey() {
   return `${window.location.pathname}${window.location.search}`;
-}
-
-function PlaceholderPage({ title }: { title: string }) {
-  const { t } = useTranslation();
-  return (
-    <section className="rounded-lg border bg-card p-5">
-      <h2 className="text-lg font-semibold">{title}</h2>
-      <p className="mt-2 text-sm text-muted-foreground">{t("app.pageReserved")}</p>
-    </section>
-  );
 }
 
 function AccessRequiredPage({ page, onOpenLogin }: { page: PageID; onOpenLogin: () => void }) {

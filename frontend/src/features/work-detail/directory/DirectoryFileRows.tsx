@@ -4,7 +4,6 @@ import {
   Captions,
   Check,
   CircleCheck,
-  ExternalLink,
   FileText,
   Film,
   Folder,
@@ -23,7 +22,6 @@ import {
 import { fileIcon } from "@/features/work-detail/dialogs/mediaFilePresentation";
 import { useDirectoryNameClamp, useDirectoryOriginalNames } from "@/features/work-detail/directory/directoryNames";
 import {
-  fileDownloadable,
   fileKindLabel,
   fileLabel,
   imageThumbnailURL,
@@ -41,7 +39,7 @@ import {
 } from "@/features/work-detail/media/mediaTreeModel";
 import { useDismissiblePopover } from "@/hooks/useDismissiblePopover";
 import i18n from "@/i18n";
-import { assetURL, mediaDownloadURL } from "@/lib/api";
+import { assetURL } from "@/lib/api";
 import { cn } from "@/lib/tailwindClassNames";
 import { type LyricsChoice, lyricsChoiceDisplayLabel } from "@/player/lyricsMatching";
 import { lyricsLanguageLabelKey } from "@/lib/lyricsLanguage";
@@ -61,7 +59,6 @@ export type DirectoryFileHandlers = {
 type FileActionState = {
   preview: FilePreviewState | null;
   canPlay: boolean;
-  canDownload: boolean;
   canOpen: boolean;
   lyricsChoices: LyricsChoice[];
   hasQueueActions: boolean;
@@ -94,15 +91,13 @@ function fileActionState(
 ): FileActionState {
   const preview = previewForFile(file);
   const canPlay = Boolean(handlers.onPlayFolder && playableFiles([file]).length > 0);
-  const canDownload = fileDownloadable(file);
   const lyrics = fileLyricsState(file, lyricsPreferenceOverrides);
   const hasQueueActions =
     canPlay && (file.kind === "video" || Boolean(handlers.onPlayNext) || Boolean(handlers.onAppendQueue));
   return {
     preview,
     canPlay,
-    canDownload,
-    canOpen: canPlay || Boolean(preview && handlers.onPreview) || canDownload,
+    canOpen: canPlay || Boolean(preview && handlers.onPreview),
     lyricsChoices: lyrics.lyricsChoices,
     hasQueueActions,
     hasMoreActions: lyrics.lyricsChoices.length > 0 || hasQueueActions,
@@ -127,38 +122,35 @@ function openFile(
     handlers.onPlayFolder?.(tracks, file.locationId);
     return;
   }
-  if (state.preview) {
-    handlers.onPreview?.(filePreviewRequest(state.preview, previewSiblings));
-    return;
-  }
-  if (state.canDownload) window.open(mediaDownloadURL(file.locationId), "_blank", "noopener,noreferrer");
+  if (state.preview) handlers.onPreview?.(filePreviewRequest(state.preview, previewSiblings));
 }
 
 function fileSizeLabel(file: TreeTrack) {
   return file.sizeBytes === null ? i18n.t("libraryDetail.unknownSize") : formatBytes(file.sizeBytes);
 }
 
-function MetaList({ items, lastItemCompactOnly = false }: { items: ReactNode[]; lastItemCompactOnly?: boolean }) {
-  const visible = items.filter(Boolean);
+/** A meta line entry; a compact-only entry moves to its own control or column on wide layouts. */
+type MetaItem = { content: ReactNode; compactOnly?: boolean };
+
+function MetaList({ items }: { items: MetaItem[] }) {
+  const visible = items.filter((item) => Boolean(item.content));
   if (visible.length === 0) return null;
   return (
     <span className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
-      {visible.map((item, index) => (
-        <span
-          key={index}
-          className={cn(
-            "inline-flex min-w-0 items-center gap-1.5",
-            index === visible.length - 1 && lastItemCompactOnly && "lg:hidden",
-          )}
-        >
-          {index > 0 && (
-            <span aria-hidden="true" className="text-muted-foreground/50">
-              ·
-            </span>
-          )}
-          {item}
-        </span>
-      ))}
+      {visible.map((item, index) => {
+        // On wide layouts a separator only shows after an entry that stays visible there.
+        const followsWideItem = visible.slice(0, index).some((previous) => !previous.compactOnly);
+        return (
+          <span key={index} className={cn("inline-flex min-w-0 items-center gap-1.5", item.compactOnly && "lg:hidden")}>
+            {index > 0 && (
+              <span aria-hidden="true" className={cn("text-muted-foreground/50", !followsWideItem && "lg:hidden")}>
+                ·
+              </span>
+            )}
+            {item.content}
+          </span>
+        );
+      })}
     </span>
   );
 }
@@ -222,7 +214,8 @@ function TrackLeading({
 
 /**
  * One directory entry. Tracks are numbered in folder playback order with their
- * duration in a trailing column; other files show their type and size.
+ * duration in a trailing column on wide layouts and on the meta line on compact
+ * ones; other files show their type and size.
  */
 export function DirectoryFileRow({
   file,
@@ -259,25 +252,32 @@ export function DirectoryFileRow({
   const number = isTrack ? trackNumber(file, tracks) : 0;
   const duration = file.kind === "audio" || file.kind === "video" ? formatTrackDuration(file.durationSeconds) : "";
   const listening = isTrack ? trackListeningState(treeTrackProgress(file, liveCursor), file.durationSeconds) : null;
-  const meta = isTrack
+  const meta: MetaItem[] = isTrack
     ? [
-        file.kind === "video" && (
-          <span className="inline-flex items-center gap-1">
-            <Film className="h-3 w-3" aria-hidden="true" />
-            {fileKindLabel(file.kind)}
-          </span>
-        ),
-        listening && listening.kind !== "unplayed" && <ListeningStateLabel state={listening} />,
-        fileSizeLabel(file),
-        // Wide layouts show a lyrics button instead; last, so hiding it leaves no separator behind.
-        state.lyricsChoices.length > 0 && (
-          <span className="inline-flex items-center gap-1">
-            <Captions className="h-3 w-3" aria-hidden="true" />
-            {i18n.t("libraryDetail.lyrics")}
-          </span>
-        ),
+        {
+          content: file.kind === "video" && (
+            <span className="inline-flex items-center gap-1">
+              <Film className="h-3 w-3" aria-hidden="true" />
+              {fileKindLabel(file.kind)}
+            </span>
+          ),
+        },
+        // Wide layouts keep duration in a trailing column; compact ones give that width to the name.
+        { content: duration && <span className="tabular-nums">{duration}</span>, compactOnly: true },
+        { content: listening && listening.kind !== "unplayed" && <ListeningStateLabel state={listening} /> },
+        { content: fileSizeLabel(file) },
+        // Wide layouts show a lyrics button instead.
+        {
+          content: state.lyricsChoices.length > 0 && (
+            <span className="inline-flex items-center gap-1">
+              <Captions className="h-3 w-3" aria-hidden="true" />
+              {i18n.t("libraryDetail.lyrics")}
+            </span>
+          ),
+          compactOnly: true,
+        },
       ]
-    : [fileKindLabel(file.kind), duration, fileSizeLabel(file)];
+    : [fileKindLabel(file.kind), duration, fileSizeLabel(file)].map((content) => ({ content }));
 
   return (
     <div
@@ -319,20 +319,14 @@ export function DirectoryFileRow({
         >
           {name}
         </span>
-        <MetaList items={meta} lastItemCompactOnly={isTrack && state.lyricsChoices.length > 0} />
+        <MetaList items={meta} />
       </span>
       {isTrack && (
-        <span className="min-w-10 shrink-0 whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">
+        <span className="hidden min-w-10 shrink-0 whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground lg:block">
           {duration}
         </span>
       )}
       <span ref={actionAreaRef} className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-        {file.kind === "file" && state.canDownload && (
-          <ExternalLink
-            className="mx-1 h-3.5 w-3.5 text-primary"
-            aria-label={i18n.t("libraryDetail.downloadsNewTab")}
-          />
-        )}
         {state.lyricsChoices.length > 0 && (
           <LyricsActions
             file={file}
@@ -612,7 +606,7 @@ function MoreActions({
       <AnchoredPopover
         open={open}
         anchorRef={anchorRef}
-        className={`w-52 rounded-lg border bg-card p-1 text-sm text-card-foreground shadow-xl ${hasQueueActions ? "" : "lg:hidden"}`}
+        className={`w-max min-w-40 max-w-[min(13rem,calc(100vw-1.5rem))] rounded-lg border bg-card p-1 text-sm text-card-foreground shadow-xl ${hasQueueActions ? "" : "lg:hidden"}`}
       >
         <div role="menu" aria-label={i18n.t("libraryDetail.moreActionsFor", { title: name })}>
           {choices.length > 0 && (

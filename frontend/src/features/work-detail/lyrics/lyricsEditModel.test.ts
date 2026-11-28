@@ -6,9 +6,7 @@ import type { LyricsEditItem, LyricsEditPlan, MediaItem, WorkFolderEditSources }
 import {
   FOLDER_LYRICS_RESOURCE,
   MANAGED_LYRICS_RESOURCE,
-  folderAudio,
   folderLyrics,
-  lyricsEditAssignments,
   lyricsEditReadiness,
   lyricsEditRequest,
   lyricsEditResources,
@@ -39,6 +37,8 @@ function item(id: number, kind: string, path: string, lyricsMediaItemId: number 
         fileSourceName: "Local",
         locationType: "local",
         path: `${root}/${path}`,
+        folderId: target.folderId,
+        relativePath: path,
         streamUrl: "",
         downloadUrl: "",
         remoteHash: "",
@@ -158,7 +158,7 @@ describe("lyrics edit resources", () => {
   });
 
   it("splits a folder's lyrics into the managed ones and the others", () => {
-    const { managed, loose } = folderLyrics(items, root);
+    const { managed, loose } = folderLyrics(items, target.folderId);
     expect(managed.map((file) => file.path)).toEqual([
       "lyrics_kikoto/zh-hans/mp3/01 Opening.mp3.vtt",
       "lyrics_kikoto/ja/02 Ending.vtt",
@@ -169,7 +169,7 @@ describe("lyrics edit resources", () => {
 
 describe("lyrics edit request", () => {
   const resources = lyricsEditResources(sources, target);
-  const { managed, loose } = folderLyrics(items, root);
+  const { managed, loose } = folderLyrics(items, target.folderId);
   const remoteFiles: FolderEditFile[] = [
     { path: "sub/01 Opening.vtt", name: "01 Opening.vtt", kind: "text", sizeBytes: 5, locationId: null },
   ];
@@ -233,7 +233,7 @@ describe("lyrics edit request", () => {
 });
 
 describe("lyrics edit result", () => {
-  const { managed } = folderLyrics(items, root);
+  const { managed } = folderLyrics(items, target.folderId);
   const kept = new Set(["lyrics_kikoto/zh-hans/mp3/01 Opening.mp3.vtt", "lyrics_kikoto/ja/02 Ending.vtt"]);
 
   it("marks what a planned addition does to the managed lyrics", () => {
@@ -297,33 +297,5 @@ describe("lyrics edit result", () => {
     expect(
       lyricsEditReadiness({ request: { ...request, additions: [] }, undeclared: [], plan: null, planCurrent: false }),
     ).toBe("idle");
-  });
-});
-
-describe("lyrics edit assignments", () => {
-  const audio = folderAudio(items, root);
-  const additions = [
-    { kind: "folder" as const, path: "mp3/01 Opening.mp3.vtt", language: "ja-jp" },
-    { kind: "remote" as const, sourceId: 3, remoteCode: "RJ00000001", path: "sub/01 Opening.vtt", language: "zh-cn" },
-    { kind: "remote" as const, sourceId: 3, remoteCode: "RJ00000001", path: "sub/02 Ending.vtt", language: "zh-cn" },
-  ];
-
-  it("suggests the added files per language and leaves a track its lyrics in that language", () => {
-    expect(lyricsEditAssignments({ audio, additions, plan: null })).toEqual([
-      { audioMediaItemId: 1, itemKey: "folder:mp3/01 Opening.mp3.vtt" },
-      // The first track already has Simplified Chinese lyrics.
-      { audioMediaItemId: 2, itemKey: "remote:3:RJ00000001:sub/02 Ending.vtt" },
-    ]);
-  });
-
-  it("does not assign a file the plan leaves out", () => {
-    const left = plan([
-      planItem("remote:3:RJ00000001:sub/02 Ending.vtt", "lyrics_kikoto/zh-hans/sub/02 Ending.vtt", {
-        action: "exclude",
-      }),
-    ]);
-    expect(lyricsEditAssignments({ audio, additions, plan: left }).map((assignment) => assignment.itemKey)).toEqual([
-      "folder:mp3/01 Opening.mp3.vtt",
-    ]);
   });
 });

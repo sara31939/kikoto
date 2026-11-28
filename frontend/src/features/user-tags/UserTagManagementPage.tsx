@@ -9,6 +9,7 @@ import { segmentedItemClassName, segmentedListClassName } from "@/components/ui/
 import { toastFromError, useToast } from "@/components/ui/toast";
 import { usePendingAction } from "@/hooks/usePendingAction";
 import type { UserTagScope } from "@/lib/api";
+import { startLoad } from "@/lib/effectScope";
 import { announceUserTagsChanged } from "@/lib/userTagEvents";
 
 import { DeleteUserTagDialog, MergeUserTagDialog, RenameUserTagDialog } from "./UserTagDialogs";
@@ -48,21 +49,21 @@ export function UserTagManagementPage({ canEdit, demoMode }: { canEdit: boolean;
   }, [debouncedQuery, query]);
 
   useEffect(() => {
-    const controller = new AbortController();
     setLoading(true);
     setLoadFailed(false);
-    userTagsApi
-      .list({ scope, query: debouncedQuery, page, pageSize: USER_TAG_PAGE_SIZE }, controller.signal)
-      .then((next) => {
-        setResult(next);
-        setLoading(false);
-      })
-      .catch(() => {
-        if (controller.signal.aborted) return;
-        setLoadFailed(true);
-        setLoading(false);
-      });
-    return () => controller.abort();
+    return startLoad(
+      (signal) => userTagsApi.list({ scope, query: debouncedQuery, page, pageSize: USER_TAG_PAGE_SIZE }, signal),
+      {
+        onSuccess: (next) => {
+          setResult(next);
+          setLoading(false);
+        },
+        onError: () => {
+          setLoadFailed(true);
+          setLoading(false);
+        },
+      },
+    );
   }, [debouncedQuery, page, reloadToken, scope]);
 
   const reload = useCallback(() => setReloadToken((value) => value + 1), []);
@@ -121,7 +122,7 @@ export function UserTagManagementPage({ canEdit, demoMode }: { canEdit: boolean;
     );
 
   return (
-    <div className="w-full max-w-4xl space-y-4">
+    <div className="space-y-4">
       {!demoMode && !canEdit && <p className="text-sm text-muted-foreground">{t("personal.readOnlyAccount")}</p>}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div role="radiogroup" aria-label={t("personal.tags.scope")} className={segmentedListClassName()}>

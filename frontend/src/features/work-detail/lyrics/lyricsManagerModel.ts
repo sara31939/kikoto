@@ -1,9 +1,8 @@
 import type { LyricsAssignmentChange, MediaItem } from "@/lib/api";
 import { allLyricsLanguages, lyricsLanguages, mediaItemLyricsAssignments } from "@/lib/lyricsLanguage";
 import { naturalNameCompare } from "@/lib/naturalNameOrder";
-import { isLyricsAttribution } from "@/lib/lyricsAttribution";
-import { parseTimedLyrics } from "@/lib/timedLyrics";
-import { findLyricsMatches, isLyricsPath } from "@/player/lyricsMatching";
+import type { ParsedLyrics } from "@/lib/timedLyrics";
+import { isLyricsPath } from "@/player/lyricsMatching";
 
 /** An audio file of the work as the lyrics manager lists it. */
 export type LyricsManagerAudio = {
@@ -15,7 +14,7 @@ export type LyricsManagerAudio = {
   durationSeconds: number | null;
   /** The stored library lyrics file per language; the empty language applies to every language. */
   assignedLyrics: Readonly<Record<string, number>>;
-  /** The name match used when no assignment exists. */
+  /** The name match the server picks, used when no assignment exists. */
   autoLyricsMediaItemId: number | null;
 };
 
@@ -51,7 +50,7 @@ export function lyricsManagerEntries(items: MediaItem[]): LyricsManagerEntries {
     const location = item.locations.find(
       (candidate) => candidate.locationType === "local" && candidate.availability === "available",
     );
-    return location ? [{ item, location, path: normalizePath(location.path) }] : [];
+    return location ? [{ item, location, path: normalizeKeepingTrailingSlash(location.path) }] : [];
   });
   const root = commonDirectory(local.map((entry) => entry.path));
   const relative = (path: string) => (root && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path);
@@ -68,7 +67,7 @@ export function lyricsManagerEntries(items: MediaItem[]): LyricsManagerEntries {
         assignedLyrics: Object.fromEntries(
           mediaItemLyricsAssignments(item).map((assignment) => [assignment.language, assignment.lyricsMediaItemId]),
         ),
-        autoLyricsMediaItemId: findLyricsMatches(path, items)[0]?.mediaItemId ?? null,
+        autoLyricsMediaItemId: location.lyricsMatchMediaItemId ?? null,
       };
     })
     .sort(comparePaths);
@@ -231,12 +230,12 @@ export type LyricsTimingCheck = {
 };
 
 /**
- * Checks whether timed lyrics fit the audio they are assigned to. The line
- * naming the models of AI-made lyrics is not one of their lines.
+ * Checks whether timed lyrics, as the server read them, fit the audio they are
+ * assigned to. The line the server marks as naming the models of AI-made
+ * lyrics is not one of their lines.
  */
-export function lyricsTimingCheck(text: string, durationSeconds: number | null): LyricsTimingCheck {
-  const parsed = parseTimedLyrics(text);
-  const lines = parsed.lines.filter((line) => !isLyricsAttribution(line.text));
+export function lyricsTimingCheck(parsed: ParsedLyrics, durationSeconds: number | null): LyricsTimingCheck {
+  const lines = parsed.lines.filter((line) => !line.attribution);
   const lastLineSeconds = lines.length > 0 ? lines[lines.length - 1].time : null;
   return {
     timed: parsed.timed,
@@ -281,7 +280,7 @@ function commonDirectory(paths: string[]) {
   return prefix.join("/");
 }
 
-function normalizePath(path: string) {
+function normalizeKeepingTrailingSlash(path: string) {
   return path.replace(/\\/g, "/").replace(/^\/+/, "");
 }
 

@@ -14,7 +14,6 @@ import {
   weekdayAverages,
   hourRangeLabel,
   listeningProfileStatements,
-  listeningRangeYear,
   peakListeningHour,
   radarPoints,
 } from "./listeningHistoryModel";
@@ -35,6 +34,8 @@ describe("listening history presentation", () => {
       values: { hours: 3, minutes: 5 },
     });
     expect(listeningDurationParts(Number.NaN)).toEqual({ key: "seconds", values: { seconds: 0 } });
+    // A weekday's average can fall below a second without being no listening.
+    expect(listeningDurationParts(0.2)).toEqual({ key: "underSecond", values: {} });
   });
 
   it("reads day, month, and year periods as UTC starts", () => {
@@ -68,6 +69,11 @@ describe("listening history presentation", () => {
       averageSeconds: 0,
       peak: null,
     });
+    // An unrounded mean formats like the time per active day it repeats.
+    expect(
+      listeningPeriodInsights(series.slice(2).map((entry, index) => ({ ...entry, listenedSeconds: index + 3 })))
+        .averageSeconds,
+    ).toBe(3.5);
   });
 
   it("counts the longest run and the current run, which may end before an unlistened latest period", () => {
@@ -178,12 +184,6 @@ describe("listening calendar", () => {
 });
 
 describe("calendar years and hours", () => {
-  it("tells a calendar year from a named range", () => {
-    expect(listeningRangeYear("2025")).toBe("2025");
-    expect(listeningRangeYear("30d")).toBeNull();
-    expect(listeningRangeYear("all")).toBeNull();
-  });
-
   it("starts a year on the weekday of its first day", () => {
     // 2025-01-01 is a Wednesday.
     const { weeks, days } = listeningCalendarWeeks({

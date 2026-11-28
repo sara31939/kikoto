@@ -1,12 +1,10 @@
-import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronLeft,
   ChevronRight,
   Copy,
-  Download,
   FileText,
-  FileVideo,
   ImageIcon,
   Loader2,
   Maximize2,
@@ -17,22 +15,21 @@ import {
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { segmentedItemClassName, segmentedListClassName } from "@/components/ui/segmented";
-import { countTextLines, formatLyricsTime, parseLyrics } from "@/features/work-detail/dialogs/textPreviewModel";
-import { VideoPreview } from "@/features/work-detail/media/VideoPreview";
-import type { VideoSubtitle } from "@/features/work-detail/media/videoSubtitles";
-import { formatBytes, formatTrackDuration } from "@/features/work-detail/media/mediaTreeModel";
+import { type ImageZoom, ZoomableImage } from "@/components/zoomable-image";
+import { countTextLines, formatLyricsTime, lyricsView } from "@/features/work-detail/dialogs/textPreviewModel";
+import { WorkVideoPlayer } from "@/features/work-detail/media/WorkVideoPlayer";
+import type { VideoSubtitle } from "@/player/video/videoSubtitles";
+import { formatBytes } from "@/features/work-detail/media/mediaTreeModel";
 import i18n from "@/i18n";
-import { api, assetURL, mediaDownloadURL } from "@/lib/api";
+import { ApiError, TextTooLargeError, api, assetURL, type TimedLyricsResult } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
+import { startLoad } from "@/lib/effectScope";
 import { cn } from "@/lib/tailwindClassNames";
-import { usePlayer } from "@/player/PlayerProvider";
 
 type FilePreviewBase = {
   title: string;
   locationId: number;
   sizeBytes?: number | null;
-  /** A local or cached copy that the download endpoint can serve. */
-  downloadable?: boolean;
 };
 
 export type FilePreviewState =
@@ -66,10 +63,9 @@ export function filePreviewRequest(preview: FilePreviewState, siblings: FilePrev
   return index >= 0 ? { items: siblings, index } : { items: [preview], index: 0 };
 }
 
-const kindIcons = { image: ImageIcon, video: FileVideo, text: FileText } as const;
+const kindIcons = { image: ImageIcon, text: FileText } as const;
 const kindLabelKeys = {
   image: "libraryDetail.image",
-  video: "libraryDetail.video",
   text: "libraryDetail.text",
 } as const;
 
@@ -103,9 +99,10 @@ function HeaderButton({
 }
 
 /**
- * File viewer for directory previews: a media stage for images and video, a
- * reading view for text and timed lyrics, and stepping through sibling files
- * with the header controls, arrow keys, swipes, or the image filmstrip.
+ * File viewer for directory previews: a media stage for images, a reading view
+ * for text and timed lyrics, and stepping through sibling files with the header
+ * controls, arrow keys, swipes, or the image filmstrip. A video opens the
+ * full-screen work video player, which steps through the sibling videos.
  */
 export function FilePreviewDialog({
   request,
@@ -116,10 +113,9 @@ export function FilePreviewDialog({
   onClose: () => void;
   onSetCover?: (locationId: number) => void | Promise<void>;
 }) {
-  const player = usePlayer();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [index, setIndex] = useState(request.index);
-  const [zoomed, setZoomed] = useState(false);
+  const [zoom, setZoom] = useState<ImageZoom>("fit");
   const [details, setDetails] = useState("");
   const [textContent, setTextContent] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -131,7 +127,7 @@ export function FilePreviewDialog({
 
   useEffect(() => setIndex(request.index), [request]);
   useEffect(() => {
-    setZoomed(false);
+    setZoom("fit");
     setDetails("");
     setTextContent(null);
     setCopied(false);
@@ -145,7 +141,10 @@ export function FilePreviewDialog({
     [items.length],
   );
 
+  const videoOpen = preview?.kind === "video";
   useEffect(() => {
+    // The video player's arrow keys seek instead.
+    if (videoOpen) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -159,7 +158,7 @@ export function FilePreviewDialog({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [step]);
+  }, [step, videoOpen]);
 
   // Neighboring local images load ahead so stepping through a gallery feels immediate.
   useEffect(() => {
@@ -169,10 +168,29 @@ export function FilePreviewDialog({
   }, [current, items]);
 
   if (!preview) return null;
+  if (preview.kind === "video") {
+    const videos = items.filter((item) => item.kind === "video");
+    const position = Math.max(
+      videos.findIndex((item) => samePreview(item, preview)),
+      0,
+    );
+    const stepTo = (target: FilePreviewState | undefined) =>
+      target ? () => setIndex(items.findIndex((item) => samePreview(item, target))) : null;
+    return (
+      <WorkVideoPlayer
+        key={`${preview.locationId}:${preview.url}`}
+        video={preview}
+        index={position}
+        total={Math.max(videos.length, 1)}
+        onPrevious={stepTo(videos[position - 1])}
+        onNext={stepTo(videos[position + 1])}
+        onClose={onClose}
+      />
+    );
+  }
   const KindIcon = kindIcons[preview.kind];
   const meta = [
     i18n.t(kindLabelKeys[preview.kind]),
-    preview.kind === "video" ? formatTrackDuration(preview.durationSeconds) : "",
     details,
     typeof preview.sizeBytes === "number" ? formatBytes(preview.sizeBytes) : "",
   ]
@@ -237,10 +255,10 @@ export function FilePreviewDialog({
           )}
           {preview.kind === "image" && (
             <HeaderButton
-              label={zoomed ? i18n.t("libraryDetail.fitToWindow") : i18n.t("libraryDetail.actualSize")}
-              onClick={() => setZoomed((value) => !value)}
+              label={zoom === "fit" ? i18n.t("libraryDetail.actualSize") : i18n.t("libraryDetail.fitToWindow")}
+              onClick={() => setZoom((value) => (value === "fit" ? 1 : "fit"))}
             >
-              {zoomed ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              {zoom === "fit" ? <Maximize2 className="h-4 w-4" /> : <Minimize2 className="h-4 w-4" />}
             </HeaderButton>
           )}
           {preview.kind === "text" && (
@@ -251,18 +269,6 @@ export function FilePreviewDialog({
             >
               {copied ? <Check className="h-4 w-4 text-primary" /> : <Copy className="h-4 w-4" />}
             </HeaderButton>
-          )}
-          {preview.downloadable && preview.locationId > 0 && (
-            <a
-              href={mediaDownloadURL(preview.locationId)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              aria-label={i18n.t("libraryDetail.downloadFile")}
-              title={i18n.t("libraryDetail.downloadFile")}
-            >
-              <Download className="h-4 w-4" />
-            </a>
           )}
           {preview.kind === "image" && onSetCover && preview.canSetCover && (
             <SetCoverButton key={preview.locationId} locationId={preview.locationId} onSetCover={onSetCover} />
@@ -276,25 +282,13 @@ export function FilePreviewDialog({
           <ImageStage
             key={`${preview.locationId}:${preview.url}`}
             preview={preview}
-            zoomed={zoomed}
+            zoom={zoom}
             canPrevious={canPrevious}
             canNext={canNext}
-            onZoomChange={setZoomed}
+            onZoomChange={setZoom}
             onStep={step}
             onDetails={setDetails}
           />
-        ) : preview.kind === "video" ? (
-          <div className="dark app-scroll flex min-h-0 flex-1 items-center justify-center overflow-auto bg-black p-0 text-foreground sm:p-4">
-            <VideoPreview
-              locationId={preview.locationId}
-              fallbackUrl={preview.url}
-              durationSeconds={preview.durationSeconds}
-              canTranscode={preview.canTranscode}
-              subtitles={preview.subtitles}
-              pauseRequested={player.isPlaying}
-              onPlay={player.pause}
-            />
-          </div>
         ) : (
           <TextReader
             key={`${preview.locationId}:${preview.title}`}
@@ -315,9 +309,6 @@ export function FilePreviewDialog({
     </Dialog>
   );
 }
-
-type ZoomFocus = { x: number; y: number };
-type PanGesture = { pointerId: number; x: number; y: number; left: number; top: number; moved: boolean };
 
 // Long enough to find the button again, short enough that a stray tap later does nothing.
 const coverConfirmWindowMs = 4000;
@@ -375,9 +366,10 @@ function SetCoverButton({
   );
 }
 
+/** The image stage: a zoomable image with a loading state and previous and next arrows on wide screens. */
 function ImageStage({
   preview,
-  zoomed,
+  zoom,
   canPrevious,
   canNext,
   onZoomChange,
@@ -385,131 +377,42 @@ function ImageStage({
   onDetails,
 }: {
   preview: Extract<FilePreviewState, { kind: "image" }>;
-  zoomed: boolean;
+  zoom: ImageZoom;
   canPrevious: boolean;
   canNext: boolean;
-  onZoomChange: (zoomed: boolean) => void;
+  onZoomChange: (zoom: ImageZoom) => void;
   onStep: (delta: number) => void;
   onDetails: (details: string) => void;
 }) {
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const focusRef = useRef<ZoomFocus | null>(null);
-  const swipeRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
-  const panRef = useRef<PanGesture | null>(null);
-  const suppressClickRef = useRef(false);
-
-  // Zooming in keeps the point that was clicked, or the center, in the middle of the stage.
-  useLayoutEffect(() => {
-    const container = scrollRef.current;
-    if (!zoomed || !container) return;
-    const focus = focusRef.current ?? { x: 0.5, y: 0.5 };
-    focusRef.current = null;
-    container.scrollLeft = focus.x * container.scrollWidth - container.clientWidth / 2;
-    container.scrollTop = focus.y * container.scrollHeight - container.clientHeight / 2;
-  }, [zoomed]);
 
   const arrowClassName =
     "absolute top-1/2 hidden h-11 w-11 -translate-y-1/2 place-items-center rounded-full bg-background/60 text-foreground backdrop-blur transition-colors hover:bg-background/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:grid";
   return (
     <div className="dark relative flex min-h-0 flex-1 bg-black text-foreground">
-      <div
-        ref={scrollRef}
-        className={cn("app-scroll min-h-0 flex-1", zoomed ? "overflow-auto" : "overflow-hidden p-2 sm:p-6")}
-        style={{ touchAction: zoomed ? "auto" : "pan-y" }}
-        onPointerDown={(event) => {
-          suppressClickRef.current = false;
-          if (zoomed && event.pointerType === "mouse" && event.button === 0) {
-            const container = event.currentTarget;
-            panRef.current = {
-              pointerId: event.pointerId,
-              x: event.clientX,
-              y: event.clientY,
-              left: container.scrollLeft,
-              top: container.scrollTop,
-              moved: false,
-            };
-            return;
-          }
-          if (!zoomed && event.pointerType !== "mouse") {
-            swipeRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
-          }
-        }}
-        onPointerMove={(event) => {
-          const pan = panRef.current;
-          if (!pan || pan.pointerId !== event.pointerId) return;
-          const dx = event.clientX - pan.x;
-          const dy = event.clientY - pan.y;
-          if (!pan.moved && Math.hypot(dx, dy) < 4) return;
-          pan.moved = true;
-          event.currentTarget.scrollLeft = pan.left - dx;
-          event.currentTarget.scrollTop = pan.top - dy;
-        }}
-        onPointerUp={(event) => {
-          const pan = panRef.current;
-          panRef.current = null;
-          // A drag that panned the image must not also zoom it out.
-          if (pan?.moved) suppressClickRef.current = true;
-          const swipe = swipeRef.current;
-          swipeRef.current = null;
-          if (!swipe || swipe.pointerId !== event.pointerId) return;
-          const dx = event.clientX - swipe.x;
-          const dy = event.clientY - swipe.y;
-          if (Math.abs(dx) >= 48 && Math.abs(dx) > Math.abs(dy) * 1.5) {
-            suppressClickRef.current = true;
-            onStep(dx < 0 ? 1 : -1);
-          }
-        }}
-        onPointerCancel={() => {
-          panRef.current = null;
-          swipeRef.current = null;
-        }}
-      >
-        {status === "error" ? (
-          <div className="grid h-full place-items-center px-6 text-center text-sm text-muted-foreground" role="alert">
-            {i18n.t("libraryDetail.imageLoadFailed")}
-          </div>
-        ) : (
-          <div
-            className={cn("flex items-center justify-center", zoomed ? "min-h-full min-w-full w-max" : "h-full w-full")}
-          >
-            <img
-              src={assetURL(preview.url)}
-              alt={preview.title}
-              draggable={false}
-              className={cn(
-                "select-none transition-opacity duration-200",
-                zoomed
-                  ? "max-w-none cursor-grab active:cursor-grabbing"
-                  : "max-h-full max-w-full cursor-zoom-in object-contain",
-                status === "ready" ? "opacity-100" : "opacity-0",
-              )}
-              onLoad={(event) => {
-                setStatus("ready");
-                const image = event.currentTarget;
-                onDetails(
-                  i18n.t("libraryDetail.imageDimensions", { width: image.naturalWidth, height: image.naturalHeight }),
-                );
-              }}
-              onError={() => setStatus("error")}
-              onClick={(event) => {
-                if (suppressClickRef.current) {
-                  suppressClickRef.current = false;
-                  return;
-                }
-                if (!zoomed) {
-                  const bounds = event.currentTarget.getBoundingClientRect();
-                  focusRef.current = {
-                    x: (event.clientX - bounds.left) / Math.max(1, bounds.width),
-                    y: (event.clientY - bounds.top) / Math.max(1, bounds.height),
-                  };
-                }
-                onZoomChange(!zoomed);
-              }}
-            />
-          </div>
-        )}
-      </div>
+      {status === "error" ? (
+        <div className="grid flex-1 place-items-center px-6 text-center text-sm text-muted-foreground" role="alert">
+          {i18n.t("libraryDetail.imageLoadFailed")}
+        </div>
+      ) : (
+        <ZoomableImage
+          src={assetURL(preview.url)}
+          alt={preview.title}
+          zoom={zoom}
+          onZoomChange={onZoomChange}
+          onSwipe={onStep}
+          className="flex-1"
+          fitClassName="p-2 sm:p-6"
+          imageClassName={cn("transition-opacity duration-200", status === "ready" ? "opacity-100" : "opacity-0")}
+          onLoad={(image) => {
+            setStatus("ready");
+            onDetails(
+              i18n.t("libraryDetail.imageDimensions", { width: image.naturalWidth, height: image.naturalHeight }),
+            );
+          }}
+          onError={() => setStatus("error")}
+        />
+      )}
       {status === "loading" && (
         <div
           className="pointer-events-none absolute inset-0 grid place-items-center text-muted-foreground"
@@ -594,6 +497,15 @@ function Filmstrip({
   );
 }
 
+/** A text URL's failure as the viewer names it: the HTTP status or the size bound. */
+function textPreviewURLError(error: unknown) {
+  if (error instanceof ApiError) {
+    return new Error(i18n.t("libraryDetail.textPreviewHttpError", { status: error.status }));
+  }
+  if (error instanceof TextTooLargeError) return new Error(i18n.t("libraryDetail.textFileTooLarge"));
+  return error;
+}
+
 function TextReader({
   preview,
   onDetails,
@@ -606,34 +518,34 @@ function TextReader({
   const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [view, setView] = useState<"lyrics" | "raw">("lyrics");
-  const lyrics = useMemo(() => (text === null ? null : parseLyrics(text)), [text]);
+  const [timedLyrics, setTimedLyrics] = useState<TimedLyricsResult | null>(null);
+  const lyrics = useMemo(() => lyricsView(timedLyrics), [timedLyrics]);
 
-  useEffect(() => {
-    let active = true;
-    const request = preview.url
-      ? fetch(assetURL(preview.url), { headers: { Accept: "text/plain,text/*" } }).then(async (response) => {
-          if (!response.ok) throw new Error(i18n.t("libraryDetail.textPreviewHttpError", { status: response.status }));
-          const length = Number(response.headers.get("content-length") ?? 0);
-          if (length > 512 * 1024) throw new Error(i18n.t("libraryDetail.textFileTooLarge"));
-          const content = await response.text();
-          if (content.length > 512 * 1024) throw new Error(i18n.t("libraryDetail.textFileTooLarge"));
-          return { content };
-        })
-      : api.getMediaText(preview.locationId);
-    request
-      .then((result) => {
-        if (!active) return;
-        setText(result.content);
-        onContent(result.content);
-        onDetails(i18n.t("libraryDetail.lineCount", { count: countTextLines(result.content) }));
-      })
-      .catch((err) => {
-        if (active) setError(err instanceof Error ? err.message : i18n.t("libraryDetail.textPreviewFailed"));
-      });
-    return () => {
-      active = false;
-    };
-  }, [onContent, onDetails, preview]);
+  useEffect(
+    () =>
+      startLoad(
+        async (signal) => {
+          const content = preview.url
+            ? await api.getTextPreview(preview.url, signal).catch((error: unknown) => {
+                throw textPreviewURLError(error);
+              })
+            : (await api.getMediaText(preview.locationId, signal)).content;
+          // The server reads the text as timed lyrics; a failed read leaves it plain text.
+          const timed = await api.parseLyrics(content, signal).catch(() => null);
+          return { content, timed };
+        },
+        {
+          onSuccess: (result) => {
+            setTimedLyrics(result.timed);
+            setText(result.content);
+            onContent(result.content);
+            onDetails(i18n.t("libraryDetail.lineCount", { count: countTextLines(result.content) }));
+          },
+          onError: (err) => setError(err instanceof Error ? err.message : i18n.t("libraryDetail.textPreviewFailed")),
+        },
+      ),
+    [onContent, onDetails, preview],
+  );
 
   const showLyrics = lyrics !== null && view === "lyrics";
   return (

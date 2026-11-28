@@ -23,6 +23,7 @@ import { segmentedItemClassName, segmentedListClassName } from "@/components/ui/
 import { toastFromError, useToast } from "@/components/ui/toast";
 import { ActivityRunSummary } from "@/features/workflows/ActivityRunSummary";
 import { formatRelativeTime, formatTimestamp, parseWorkflowTimestamp } from "@/features/workflows/runPresentation";
+import { workflowRunPath, workflowsPath } from "@/lib/workflowLinks";
 import { useStableCallback } from "@/hooks/useStableCallback";
 import { intlLocaleFor } from "@/i18n";
 import { useLocale } from "@/i18n/LocaleProvider";
@@ -33,7 +34,6 @@ import { cn } from "@/lib/tailwindClassNames";
 type Tab = "updates" | "attention";
 
 const NOTIFICATION_PAGE_SIZE = 50;
-const ATTENTION_PREVIEW_SIZE = 5;
 const IDLE_POLL_MS = 30_000;
 // While the panel shows a running job, its progress refreshes at the Activity cadence.
 const RUNNING_POLL_MS = 5_000;
@@ -69,56 +69,32 @@ export function NotificationCenter({
   const [attentionRuns, setAttentionRuns] = useState<WorkflowRun[]>([]);
   const [attentionCount, setAttentionCount] = useState(0);
   const [runningCount, setRunningCount] = useState(0);
-  const [runningRuns, setRunningRuns] = useState<WorkflowRun[]>([]);
+  const [runningRun, setRunningRun] = useState<WorkflowRun | null>(null);
+  // The badge, as the server counts it.
+  const [unreadCount, setUnreadCount] = useState(0);
 
   // Stable so the polling effect re-subscribes only when its inputs change,
-  // while each poll reads the current page and open state.
-  const refresh = useStableCallback((requestedPage: number = notificationPage) => {
+  // while each poll reads the current page and open state. A failed refresh
+  // keeps the notifications and counts already shown until the next one.
+  const refresh = useStableCallback((requestedPage: number = notificationPage) =>
     api
-      .listNotifications(requestedPage, NOTIFICATION_PAGE_SIZE)
-      .then((page) => {
-        setNotifications(page.notifications);
-        setNotificationCount(page.total);
-        setNotificationPage(page.page);
-        setNotificationTotalPages(page.totalPages);
-        setClearableCount(page.clearableTotal);
+      .getNotificationSummary(requestedPage, NOTIFICATION_PAGE_SIZE)
+      .then((summary) => {
+        const page = summary.notifications;
+        setNotifications(page?.notifications ?? []);
+        setNotificationCount(page?.total ?? 0);
+        setNotificationPage(page?.page ?? 1);
+        setNotificationTotalPages(page?.totalPages ?? 1);
+        setClearableCount(page?.clearableTotal ?? 0);
+        const attention = summary.attention;
+        setAttentionRuns(attention?.runs ?? []);
+        setAttentionCount(attention?.total ?? 0);
+        setRunningCount(attention?.running ?? 0);
+        setRunningRun(attention?.runningRun ?? null);
+        setUnreadCount(summary.unreadCount);
       })
-      .catch(() => {
-        setNotifications([]);
-        setNotificationCount(0);
-        setNotificationPage(1);
-        setNotificationTotalPages(1);
-        setClearableCount(0);
-      });
-    if (!canViewWorkflows) {
-      setAttentionRuns([]);
-      setAttentionCount(0);
-      setRunningCount(0);
-      setRunningRuns([]);
-      return;
-    }
-    api
-      .listWorkflowRuns(1, ATTENTION_PREVIEW_SIZE, "attention")
-      .then((page) => {
-        setAttentionRuns(page.runs);
-        setAttentionCount(page.total);
-        const running = page.viewTotals.running;
-        setRunningCount(running);
-        if (running === 0) {
-          setRunningRuns([]);
-          return;
-        }
-        // The running row only renders inside the open panel.
-        if (!open) return;
-        return api.listWorkflowRuns(1, 1, "running").then((runningPage) => setRunningRuns(runningPage.runs));
-      })
-      .catch(() => {
-        setAttentionRuns([]);
-        setAttentionCount(0);
-        setRunningCount(0);
-        setRunningRuns([]);
-      });
-  });
+      .catch(() => undefined),
+  );
 
   const userId = user.id;
   const pollFast = open && runningCount > 0;
@@ -141,8 +117,6 @@ export function NotificationCenter({
     };
   }, [canViewWorkflows, notificationPage, pollFast, refresh, userId]);
 
-  const unreadCount = notificationCount + attentionCount;
-
   const openChange = (next: boolean) => {
     setOpen(next);
     if (!next) return;
@@ -150,7 +124,7 @@ export function NotificationCenter({
     setTab(notificationCount === 0 && attentionCount > 0 ? "attention" : "updates");
   };
 
-  // Refresh after the open state commits so the running row is fetched too.
+  // Opening the panel reads the current state at once.
   useEffect(() => {
     if (open) refresh();
   }, [open, refresh]);
@@ -166,12 +140,14 @@ export function NotificationCenter({
     const dismissed = notifications.find((item) => item.id === id);
     setNotifications((items) => items.filter((item) => item.id !== id));
     setNotificationCount((count) => Math.max(0, count - 1));
+    setUnreadCount((count) => Math.max(0, count - 1));
     if (dismissed?.status === "succeeded") setClearableCount((count) => Math.max(0, count - 1));
     try {
       await api.dismissNotification(id);
     } catch {
       setNotifications(previous);
       setNotificationCount(previousCount);
+      setUnreadCount((count) => count + 1);
       if (dismissed?.status === "succeeded") setClearableCount((count) => count + 1);
     }
   };
@@ -195,14 +171,14 @@ export function NotificationCenter({
       if (canViewMetadataIssues) {
         return metadataSyncResultURL(notification.workflowRunId, notification.status !== "succeeded", canViewWorkflows);
       }
-      return canViewWorkflows ? `/workflows?activity=1&run=${notification.workflowRunId}` : "/";
+      return canViewWorkflows ? workflowRunPath(notification.workflowRunId) : "/";
     }
     if (notification.type === "availability_watch_ready") {
       return `/discover?view=watch&dialog=ready&run=${notification.workflowRunId}`;
     }
     if (notification.type === "subscription_release") return "/discover";
     if (notification.type === "remote_track" && notification.status === "failed") {
-      return canViewWorkflows ? `/workflows?activity=1&run=${notification.workflowRunId}` : null;
+      return canViewWorkflows ? workflowRunPath(notification.workflowRunId) : null;
     }
     const workPath = `/${encodeURIComponent(notification.workCode)}`;
     if (notification.type === "remote_track") {
@@ -219,7 +195,7 @@ export function NotificationCenter({
       return `/${encodeURIComponent(run.subject)}?view=local`;
     return canViewMetadataIssues && (run.pendingMetadata ?? 0) > 0
       ? metadataIssuesURL(run.id)
-      : `/workflows?activity=1&run=${run.id}`;
+      : workflowRunPath(run.id);
   };
 
   const showAttention = canViewWorkflows && tab === "attention";
@@ -254,7 +230,6 @@ export function NotificationCenter({
           )}
         </Button>
       }
-      align="right"
       ariaLabel={t("notifications.title")}
     >
       <div className="flex min-h-0 w-[min(24rem,calc(100vw-1rem))] max-w-full flex-col">
@@ -283,7 +258,7 @@ export function NotificationCenter({
           <button
             type="button"
             className="block w-full shrink-0 border-b bg-info-surface/40 px-3 py-2.5 text-left transition-colors hover:bg-info-surface/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-            onClick={() => go("/workflows?activity=1")}
+            onClick={() => go(workflowsPath())}
           >
             <span className="mb-1.5 flex items-center justify-between gap-2 text-xs font-medium text-info-foreground">
               <span className="flex items-center gap-1.5">
@@ -292,7 +267,7 @@ export function NotificationCenter({
               </span>
               <ChevronRight className="h-3.5 w-3.5" />
             </span>
-            {runningRuns[0] && <ActivityRunSummary run={runningRuns[0]} />}
+            {runningRun && <ActivityRunSummary run={runningRun} />}
           </button>
         )}
 
@@ -322,7 +297,10 @@ export function NotificationCenter({
         <div role={canViewWorkflows ? "tabpanel" : undefined} className="app-scroll min-h-0 flex-1 overflow-auto p-1.5">
           {showAttention ? (
             attentionRuns.length === 0 ? (
-              <EmptyState icon={<CheckCircle2 className="h-5 w-5" />} text={t("notifications.attentionEmpty")} />
+              <NotificationEmptyState
+                icon={<CheckCircle2 className="h-5 w-5" />}
+                text={t("notifications.attentionEmpty")}
+              />
             ) : (
               <ul className="space-y-0.5">
                 {attentionRuns.map((run) => (
@@ -345,7 +323,7 @@ export function NotificationCenter({
               </ul>
             )
           ) : notifications.length === 0 ? (
-            <EmptyState icon={<Inbox className="h-5 w-5" />} text={t("notifications.empty")} />
+            <NotificationEmptyState icon={<Inbox className="h-5 w-5" />} text={t("notifications.empty")} />
           ) : (
             <ul className="space-y-0.5">
               {notifications.map((notification) => (
@@ -399,7 +377,7 @@ export function NotificationCenter({
             <button
               type="button"
               className="flex h-9 w-full items-center justify-center gap-2 rounded-md text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:bg-muted"
-              onClick={() => go(tab === "attention" ? "/workflows?activity=1" : "/workflows?activity=1&view=history")}
+              onClick={() => go(workflowsPath())}
             >
               <Activity className="h-4 w-4" />
               {t("notifications.openActivity")}
@@ -445,7 +423,7 @@ function TabButton({
   );
 }
 
-function EmptyState({ icon, text }: { icon: ReactNode; text: string }) {
+function NotificationEmptyState({ icon, text }: { icon: ReactNode; text: string }) {
   return (
     <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-sm text-muted-foreground">
       <span className="grid h-10 w-10 place-items-center rounded-full bg-muted">{icon}</span>

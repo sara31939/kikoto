@@ -22,8 +22,8 @@ import { WorkCollectionPagination } from "@/components/work-collection/WorkColle
 import { WorkSelectionAction, WorkSelectionBar } from "@/components/work-collection/WorkSelectionBar";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useMetadataSyncSources } from "@/hooks/useMetadataSyncSources";
-import { useMobileNavigationLayout } from "@/hooks/useMobileNavigationLayout";
 import { api, assetURL, type MaintenanceWork, type MaintenanceWorkPage, type Work } from "@/lib/api";
+import { startLoad } from "@/lib/effectScope";
 import { librarySourceProvidesMetadata } from "@/lib/remoteSourceCapabilities";
 import { cn } from "@/lib/tailwindClassNames";
 import { currentPageSelection, pageAfterUnlinkedDelete, setCurrentPageSelected } from "./unlinkedWorksModel";
@@ -33,8 +33,7 @@ import { MaintenanceToolbar, useMaintenanceSearch, type MaintenanceToolbarSlots 
 import { MetadataIssueDetails } from "./MetadataIssueDetails";
 import { WorkInspector } from "./WorkInspector";
 import {
-  MetadataStatus,
-  SourceStatus,
+  WorkAttentionStatus,
   canRetryMetadata,
   metadataDismissWorkIds,
   metadataRetryWorkId,
@@ -62,10 +61,11 @@ function pressedRowItself(event: MouseEvent<HTMLElement>) {
 
 /**
  * Saved work metadata and attention records for one reason, as a management
- * table: the work with its circle, its metadata and source state, then row
- * actions. Pressing a row or its inspect button opens the work inspector,
- * beside the table on wide screens and in a sheet otherwise. The page owns the
- * reason rail and URL state, and composes the metadata editor behind
+ * list without a frame: the work with its circle and, under the title, what it
+ * needs (nothing for a healthy work), then row actions. Pressing a row opens
+ * the work inspector, beside the table on wide screens and in a sheet
+ * otherwise; keyboard focus reveals an inspect button that does the same. The
+ * page owns the reason rail and URL state, and composes the metadata editor behind
  * `onEditWork`; this table owns paging, search, selection, the selection bar's
  * recovery actions, and the inspector. Its search and list controls render
  * into the page header through `toolbar`. The list loads on demand rather than
@@ -105,7 +105,6 @@ export function WorkMaintenance({
 }) {
   const toast = useToast();
   const { t } = useTranslation();
-  const wideLayout = !useMobileNavigationLayout();
   const inspectorBeside = useMediaQuery(INSPECTOR_BESIDE_QUERY);
   const inspectorTitleId = useId();
   const [page, setPage] = useState(1);
@@ -127,10 +126,10 @@ export function WorkMaintenance({
   const [dismissing, setDismissing] = useState(false);
   const [notice, setNotice] = useState("");
   // A custom work has no provider metadata or remote source to retry or check.
-  // It never appears in the No available source view, so its own view offers
-  // the confirmed deletion when its folder is gone.
+  // It never appears in Needs attention, so its own view offers the confirmed
+  // deletion when its folder is gone.
   const customView = reason === "custom";
-  const deleteView = reason === "no_source" || customView;
+  const deleteView = reason === "all" || customView;
   // Enabled remote sources that provide metadata can each be asked instead of DLsite.
   const metadataSources = useMetadataSyncSources(canSyncMetadata && !readOnly && !customView);
   const remoteSources = useMemo(
@@ -152,12 +151,9 @@ export function WorkMaintenance({
   }, [page, pageSize, query, reason, runId]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    const load = async () => {
-      setLoading(true);
-      try {
-        const next = await api.listMaintenanceWorks(page, pageSize, query, reason, runId, controller.signal);
-        if (controller.signal.aborted) return;
+    setLoading(true);
+    return startLoad((signal) => api.listMaintenanceWorks(page, pageSize, query, reason, runId, signal), {
+      onSuccess: (next) => {
         if (next.works.length === 0 && page > 1 && next.total <= (page - 1) * pageSize) {
           setPage(Math.max(1, Math.ceil(next.total / pageSize)));
           return;
@@ -169,14 +165,10 @@ export function WorkMaintenance({
           next.works.filter((work) => canManageSources || canRetryMetadata(work)).map((work) => work.id),
         );
         setSelectedWorkIds((current) => new Set([...current].filter((id) => present.has(id))));
-      } catch {
-        if (!controller.signal.aborted) setLoadError(t("errors.unavailable"));
-      } finally {
-        if (!controller.signal.aborted) setLoading(false);
-      }
-    };
-    void load();
-    return () => controller.abort();
+      },
+      onError: () => setLoadError(t("errors.unavailable")),
+      onSettled: () => setLoading(false),
+    });
   }, [page, pageSize, query, reason, runId, refreshKey, preferenceRevision, listRevision, canManageSources, t]);
 
   const pageWorkIds = useMemo(
@@ -190,10 +182,7 @@ export function WorkMaintenance({
   );
   // The inspector follows the loaded page, so a work that left the view closes it.
   const inspectedWork = result.works.find((work) => work.id === inspectedWorkId) ?? null;
-  // An inspector beside the table repeats the states, so the rows fold them under the title
-  // and the titles keep their width.
-  const wide = wideLayout && !(inspectorBeside && inspectedWork);
-  const columnCount = wide ? 5 : 3;
+  const columnCount = 3;
   const sourceWorks = selectedWorks.filter((work) => work.noSource);
   const retryIds = selectedWorks.flatMap((work) => {
     const id = metadataRetryWorkId(work);
@@ -235,6 +224,14 @@ export function WorkMaintenance({
     }
   };
   const onDismiss = canSyncMetadata && !readOnly ? (ids: number[]) => void dismissMetadata(ids) : undefined;
+  // A failed DLsite update points at the DLsite proxy, which source managers configure in System.
+  const onOpenProxySettings =
+    canManageSources && !readOnly
+      ? () => {
+          window.history.pushState({}, "", "/system?tab=proxy");
+          window.dispatchEvent(new Event(NAVIGATION_EVENT));
+        }
+      : undefined;
   const navigateWork: MouseEventHandler<HTMLAnchorElement> = (event) => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
@@ -341,6 +338,7 @@ export function WorkMaintenance({
       remoteSources={remoteSources}
       onRetry={(ids, sourceId) => void retryMetadata(ids, sourceId)}
       onDismiss={onDismiss}
+      onOpenProxySettings={onOpenProxySettings}
       dismissing={dismissing}
       onCheckSources={!customView && inspectedWork.noSource ? () => void checkSources([inspectedWork.id]) : undefined}
       onOpenWork={navigateWork}
@@ -433,17 +431,13 @@ export function WorkMaintenance({
               )}
             </WorkSelectionBar>
           ) : (
-            (hasLoaded || !loadError) && (
-              <WorkCollectionPagination {...paginationProps} placement="top" compactMobile compactTop />
-            )
+            // A single page needs no pager; the filter and tab already count the works.
+            (hasLoaded || !loadError) &&
+            totalPages > 1 && <WorkCollectionPagination {...paginationProps} placement="top" compactMobile compactTop />
           )}
-          <section
-            id="metadata-records"
-            aria-label={t("workMaintenance.title")}
-            className="overflow-hidden rounded-lg border bg-card"
-          >
+          <section id="metadata-records" aria-label={t("workMaintenance.title")} className="min-w-0 border-b">
             {runId && (
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-info-border bg-info-surface px-4 py-1.5 text-sm text-info-foreground">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-md border border-info-border bg-info-surface px-4 py-1.5 text-sm text-info-foreground">
                 <span>{t("metadataIssues.runFilter", { id: runId })}</span>
                 <Button size="sm" variant="ghost" onClick={() => onFilterChange("all")}>
                   {t("metadataIssues.showAll")}
@@ -451,13 +445,13 @@ export function WorkMaintenance({
               </div>
             )}
             {notice && (
-              <p role="status" className="border-b px-4 py-2 text-sm text-muted-foreground">
+              <p role="status" className="px-2 pb-2 text-sm text-muted-foreground">
                 {notice}
               </p>
             )}
             {loadError && hasLoaded && (
               <div
-                className="flex min-h-12 flex-wrap items-center justify-between gap-3 border-b border-error-border bg-error-surface px-4 py-2"
+                className="mb-2 flex min-h-12 flex-wrap items-center justify-between gap-3 rounded-md border border-error-border bg-error-surface px-4 py-2"
                 role="alert"
               >
                 <span className="text-sm text-error-foreground">
@@ -474,8 +468,8 @@ export function WorkMaintenance({
                 aria-busy={loading}
                 {...(initialLoading ? { role: "status", "aria-label": t("workMaintenance.loading") } : {})}
               >
-                <WorkTableColumns wide={wide} />
-                <thead className="border-b bg-muted/30 text-xs font-medium text-muted-foreground">
+                <WorkTableColumns />
+                <thead className="border-b text-xs font-medium text-muted-foreground">
                   <tr className="h-11">
                     <th scope="col" className="pl-4 align-middle font-medium max-sm:pl-1.5">
                       <Checkbox
@@ -492,16 +486,6 @@ export function WorkMaintenance({
                     <th scope="col" className="pl-2 align-middle font-medium sm:pl-3">
                       {t("workMaintenance.workColumn")}
                     </th>
-                    {wide && (
-                      <>
-                        <th scope="col" className="px-3 align-middle font-medium">
-                          {t("workMaintenance.metadataColumn")}
-                        </th>
-                        <th scope="col" className="px-3 align-middle font-medium">
-                          {t("workMaintenance.sourceColumn")}
-                        </th>
-                      </>
-                    )}
                     <th scope="col" className="pr-1 text-right align-middle font-medium sm:pr-3">
                       <span className="sr-only">{t("unlinked.actions")}</span>
                     </th>
@@ -523,7 +507,7 @@ export function WorkMaintenance({
                     </tr>
                   </tbody>
                 ) : initialLoading ? (
-                  <WorkTableSkeletonRows wide={wide} />
+                  <WorkTableSkeletonRows />
                 ) : result.works.length === 0 ? (
                   <tbody>
                     <tr>
@@ -630,13 +614,10 @@ export function WorkMaintenance({
                                     {circle}
                                   </span>
                                 </p>
-                                {/* Narrow layouts fold the metadata and source columns under the title. */}
-                                {!wide && (
-                                  <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-                                    <MetadataStatus work={work} known={canSyncMetadata} />
-                                    <SourceStatus tier={work.sourceTier} />
-                                  </div>
-                                )}
+                                {/* Only what the work needs; a healthy work shows nothing here. */}
+                                <div className="mt-1.5 min-w-0 empty:hidden">
+                                  <WorkAttentionStatus work={work} metadataKnown={canSyncMetadata} />
+                                </div>
                                 {work.metadataIssues.length > 0 && !inspected && (
                                   <MetadataIssueDetails
                                     items={work.metadataIssues}
@@ -644,25 +625,12 @@ export function WorkMaintenance({
                                     remoteSources={remoteSources}
                                     onRetry={(ids, sourceId) => void retryMetadata(ids, sourceId)}
                                     onDismiss={onDismiss}
+                                    onOpenProxySettings={onOpenProxySettings}
                                   />
                                 )}
                               </div>
                             </div>
                           </td>
-                          {wide && (
-                            <>
-                              <td className="px-3 py-2.5 align-top">
-                                <div className="flex min-h-12 min-w-0 flex-wrap items-center gap-1">
-                                  <MetadataStatus work={work} known={canSyncMetadata} />
-                                </div>
-                              </td>
-                              <td className="px-3 py-2.5 align-top">
-                                <div className="flex min-h-12 items-center">
-                                  <SourceStatus tier={work.sourceTier} />
-                                </div>
-                              </td>
-                            </>
-                          )}
                           <td className="py-2.5 pr-1 align-top sm:pr-3">
                             <div className="flex flex-col items-end gap-0.5 sm:mt-1.5 sm:flex-row sm:justify-end">
                               {onEditWork && (
@@ -708,11 +676,12 @@ export function WorkMaintenance({
                                   <Trash2 className="h-4 w-4" />
                                 </Button>
                               )}
+                              {/* Pressing the row inspects it; keyboard focus reveals this button instead. */}
                               <Button
                                 size="icon-sm"
                                 variant="ghost"
                                 className={cn(
-                                  "max-sm:h-11 max-sm:w-11",
+                                  "sr-only focus-visible:not-sr-only max-sm:focus-visible:h-11 max-sm:focus-visible:w-11",
                                   inspected ? "bg-primary/10 text-primary" : "text-muted-foreground",
                                 )}
                                 aria-label={t("workMaintenance.inspectFor", { code: work.primaryCode })}
@@ -804,7 +773,7 @@ function UnlinkedWorkDeleteDialog({
   );
 }
 
-function WorkTableSkeletonRows({ wide }: { wide: boolean }) {
+function WorkTableSkeletonRows() {
   return (
     <tbody className="divide-y" aria-hidden="true">
       {Array.from({ length: 3 }, (_, index) => (
@@ -821,16 +790,6 @@ function WorkTableSkeletonRows({ wide }: { wide: boolean }) {
               </div>
             </div>
           </td>
-          {wide && (
-            <>
-              <td className="px-3 py-2.5">
-                <div className="h-4 w-16 animate-pulse rounded bg-muted" />
-              </td>
-              <td className="px-3 py-2.5">
-                <div className="h-4 w-12 animate-pulse rounded bg-muted" />
-              </td>
-            </>
-          )}
           <td className="py-2.5 pr-3">
             <div className="ml-auto mt-1.5 h-8 w-8 animate-pulse rounded-md bg-muted" />
           </td>
@@ -840,18 +799,12 @@ function WorkTableSkeletonRows({ wide }: { wide: boolean }) {
   );
 }
 
-/** Wide layouts give the metadata and source their own columns; narrow ones fold them under the title. */
-function WorkTableColumns({ wide }: { wide: boolean }) {
+/** Selection, the work (with what it needs under the title), and row actions. */
+function WorkTableColumns() {
   return (
     <colgroup>
       <col className="w-14 sm:w-11" />
       <col />
-      {wide && (
-        <>
-          <col className="w-36 xl:w-44" />
-          <col className="w-28" />
-        </>
-      )}
       <col className="w-12 sm:w-32" />
     </colgroup>
   );

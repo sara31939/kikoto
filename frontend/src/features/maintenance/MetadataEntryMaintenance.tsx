@@ -6,6 +6,7 @@ import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/
 import { Input } from "@/components/ui/input";
 import { CollectionPagination } from "@/components/collection/CollectionPagination";
 import { api, ApiError, type MetadataCircle, type MetadataTag } from "@/lib/api";
+import { startLoad } from "@/lib/effectScope";
 import { MaintenanceToolbar, useMaintenanceSearch, type MaintenanceToolbarSlots } from "./MaintenanceControls";
 import { MetadataTagDialog } from "./MetadataTagDialog";
 import { MetadataTagTable } from "./MetadataTagTable";
@@ -46,33 +47,30 @@ export function MetadataEntryMaintenance({
   const [createFailed, setCreateFailed] = useState<string | null>(null);
   const reload = () => setRefresh((value) => value + 1);
   useEffect(() => {
-    const controller = new AbortController();
     setLoading(true);
-    const options = { page, pageSize, query: search.query, signal: controller.signal };
-    const request =
-      kind === "tags"
-        ? api
-            .listMetadataTags({ ...options, includeHidden: true, sort: "id" })
-            .then((next) => ({ entries: next.tags, total: next.total, pendingWorkCount: next.pendingWorkCount }))
-        : api.listMetadataCircles(options).then((next) => ({ entries: next.circles, total: next.total }));
-    void request
-      .then((next) => {
-        if (controller.signal.aborted) return;
-        if (page > 1 && next.total <= (page - 1) * pageSize) {
-          setPage(Math.max(1, Math.ceil(next.total / pageSize)));
-          return;
-        }
-        setResult(next);
-        setLoaded(true);
-        setFailed(false);
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) setFailed(true);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
+    return startLoad<typeof result>(
+      (signal) => {
+        const options = { page, pageSize, query: search.query, signal };
+        return kind === "tags"
+          ? api
+              .listMetadataTags({ ...options, includeHidden: true, sort: "id" })
+              .then((next) => ({ entries: next.tags, total: next.total, pendingWorkCount: next.pendingWorkCount }))
+          : api.listMetadataCircles(options).then((next) => ({ entries: next.circles, total: next.total }));
+      },
+      {
+        onSuccess: (next) => {
+          if (page > 1 && next.total <= (page - 1) * pageSize) {
+            setPage(Math.max(1, Math.ceil(next.total / pageSize)));
+            return;
+          }
+          setResult(next);
+          setLoaded(true);
+          setFailed(false);
+        },
+        onError: () => setFailed(true),
+        onSettled: () => setLoading(false),
+      },
+    );
   }, [kind, page, pageSize, search.query, refresh]);
   const create = async () => {
     setBusy(true);
@@ -131,7 +129,9 @@ export function MetadataEntryMaintenance({
           {t("metadataEntries.pendingWorks", { count: result.pendingWorkCount })}
         </p>
       )}
-      {(loaded || !failed) && <CollectionPagination {...pagination} placement="top" compactMobile compactTop />}
+      {(loaded || !failed) && pagination.totalPages > 1 && (
+        <CollectionPagination {...pagination} placement="top" compactMobile compactTop />
+      )}
       {failed && (
         <div role="alert" className="flex items-center justify-between gap-3 rounded-md border p-3 text-sm">
           <span>{t("metadataEntries.loadFailed")}</span>
@@ -140,7 +140,7 @@ export function MetadataEntryMaintenance({
           </Button>
         </div>
       )}
-      <section className="overflow-hidden rounded-lg border bg-card" aria-busy={loading}>
+      <section className="min-w-0 border-b" aria-busy={loading}>
         {loading && !loaded ? (
           <p className="grid min-h-48 place-items-center p-4 text-sm text-muted-foreground" role="status">
             {t("common.loading")}

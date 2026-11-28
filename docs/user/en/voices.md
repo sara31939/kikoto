@@ -24,8 +24,9 @@ Voice pages present persisted person and credit data.
 - Keeps search, one-tap view chips, and the page-size action on one wrapping
   toolbar row. The chips are `All voices`, `Favorite`, `Tagged`,
   `Available`, `Local`, `Remote`, and `Missing`, and the pressed chip names
-  the current view. On a phone the search field keeps its own row with page
-  size beside it, and the chips scroll sideways below. User tags remain
+  the current view. On a phone the chips scroll sideways with **Search** and
+  page size at the row's end; **Search** opens the search field above the
+  row, and closing it clears the search. User tags remain
   visible and searchable, but the list does not expose a tag filter.
 - Shows favorite and user tag state.
 - Shows confirmed aliases under the detail title. Alias review, duplicate
@@ -40,9 +41,12 @@ Voice pages present persisted person and credit data.
   per work, and the merge can be undone from **Merge history** like a manual
   one.
 - Groups works with no provider voice credits under an `unknown` bucket.
-- Shows Local and Remote availability badges followed by user tags on the
-  cover-tinted voice detail summary. Cache remains available to playback and filtering data, but is not
-  presented as Local.
+- Shows the voice detail summary on the cover's tint without a frame: the
+  portrait; one line with the number of known **Works** and their **Local**,
+  **Remote**, and **Missing** counts, a count of zero left out; the name and
+  aliases; and the personal tags with the button that edits them. Cache
+  remains available to playback and filtering data, but is not presented as
+  Local.
 - Presents known and remote works with the same responsive grid and shared work
   cards as the Library. Selecting a DLsite tag or personal tag on a work card
   opens a local Library search for it.
@@ -61,27 +65,36 @@ Voice pages present persisted person and credit data.
   the remote sources' catalog state load separately.
   Remote source searches use bounded concurrency, while voice counts and user
   tags are aggregated in batches.
-- Keeps Favorite, the common refresh actions, and a **More** menu in the
-  detail summary. **First pull** or **Refresh** queues a Sync a voice actor catalog
-  run with only known works' metadata across every compatible remote source, and
-  **Retry metadata** appears only while known works still lack metadata. The
-  button shows **Refreshing** until the run settles. A warning beside the sync
-  state counts remote sources that failed their last pass and opens that run
-  in Activity. The bell beside **Favorite** subscribes to the voice actor's
-  new works; see [Discover](discover.md#subscribing). **More** holds **Change
-  cover…**, **Sync this voice actor's catalog…**,
-  which opens the preset with this voice actor selected for source, filter,
-  metadata, and tag choices, and **Manage aliases**. Demo offers all three
-  read-only: **Change cover…** saves no cover. The works toolbar mirrors the Library: a bounded search on the
-  left, then the sort button that names the current order, display options,
-  the availability filter, and selection on the right, with the shared
-  collection pagination above and below the grid. Display options hold the
-  **Cards** choice of **Full**, **Compact**, and **Mini** shared with the
-  Library, the columns, and the page size; a newly chosen card mode starts from
-  its [preset](library.md#current-behavior). A phone keeps the sort button
-  above the works and opens search, the filter, the card mode, columns, page
-  size, and
-  selection from a separate options sheet.
+- Keeps the summary's actions quiet: **Favorite**, the subscribe bell, the
+  catalog refresh, and **More**, with no primary button; a phone shows them
+  as icons named for assistive technology. The bell subscribes to the voice
+  actor's new works; see [Discover](discover.md#subscribing).
+- For users who may refresh catalogs, the button before **More** reads
+  **First pull** for a voice actor that was never pulled and **Refresh**
+  after that; its tooltip names when the catalog was last synced. Either
+  queues a Sync a voice actor catalog run with only known works' metadata
+  across every compatible remote source. While a run is going, the button
+  reads **Refreshing** and opens the run in Workflows. For the same users, a
+  warning beside the counts names remote sources that failed their last pass
+  and opens that run in Workflows.
+- **More** holds **Change cover…** and, for users who may refresh catalogs,
+  **Retry metadata** only while known works still lack metadata, **Sync
+  catalog…**, which opens the preset in a dialog with this voice actor
+  selected for source, filter, metadata, and tag choices, and **Manage
+  aliases**, which opens alias review. A user without these permissions sees
+  none of them; Demo offers **Change cover…**, which saves no cover, the
+  preset, and **Manage aliases** read-only.
+- Keeps the works toolbar to a search field, the sort button that names the
+  current order, the availability filter, and **View**. **View** holds the
+  **Cards** choice of **Full**, **Simple**, **Compact**, and **Mini** shared
+  with the Library, the columns, the page size, and **Select works**; a newly
+  chosen card mode starts from its [preset](library.md#current-behavior).
+  The summary's **Works** count states how many works there are; from tablet
+  width a caption before the sort button names the page when the works span
+  more than one, and more pages add the shared pagination below the grid. On
+  a phone **Search**, the sort button, the filter, and **View**, which opens
+  as a sheet, share one row; **Search** opens the search field above that
+  row.
 - Treats the mobile detail back control as Up to the last
   server-and-user-scoped Voice Actors list location, including when the detail
   was opened from Library or Favorites. Wide layouts keep the source-aware

@@ -10,6 +10,7 @@ import (
 
 	"github.com/yexca/kikoto/backend/internal/dlsite"
 	"github.com/yexca/kikoto/backend/internal/metasync"
+	"github.com/yexca/kikoto/backend/internal/personal"
 	"github.com/yexca/kikoto/backend/internal/sqlutil"
 	"github.com/yexca/kikoto/backend/internal/workcode"
 )
@@ -171,6 +172,9 @@ type mediaItemDetail struct {
 	AssignedLyricsMediaItemID *int64                        `json:"assignedLyricsMediaItemId"`
 	LyricsAssignments         []mediaLyricsAssignmentDetail `json:"lyricsAssignments,omitempty"`
 	Locations                 []fileLocationDetail          `json:"locations"`
+	// PlaybackLocations lists the locations the item can play from now, in
+	// playback priority (see orderedPlaybackLocations).
+	PlaybackLocations []playbackLocation `json:"playbackLocations"`
 	// AILyrics names the models that wrote a lyrics file Kikoto published
 	// from speech recognition or translation.
 	AILyrics *lyricsAIModels `json:"aiLyrics,omitempty"`
@@ -191,7 +195,15 @@ type fileLocationDetail struct {
 	// DisplayPath is Path with the display names the viewer's metadata
 	// languages give its file and folders, segment for segment. It is present
 	// only on a local location that has such a name.
-	DisplayPath     string  `json:"displayPath,omitempty"`
+	DisplayPath string `json:"displayPath,omitempty"`
+	// FolderID is the work folder that holds a local location, the deepest of
+	// the media work's recorded folders on the location's file source whose
+	// root contains its path, and RelativePath is Path below that root. Both
+	// are absent on a location no recorded folder holds and on cache and
+	// remote locations. They group and display files; every change to a folder
+	// still checks its paths on the server.
+	FolderID        *int64  `json:"folderId,omitempty"`
+	RelativePath    string  `json:"relativePath,omitempty"`
 	StreamURL       string  `json:"streamUrl"`
 	DownloadURL     string  `json:"downloadUrl"`
 	RemoteHash      string  `json:"remoteHash"`
@@ -202,6 +214,12 @@ type fileLocationDetail struct {
 	// Loudness is the measured loudness of the file version the location
 	// holds, present once playback has measured it.
 	Loudness *mediaLoudnessDetail `json:"loudness,omitempty"`
+	// LyricsChoices ranks the lyrics an audio or video location can play;
+	// the first is the automatic choice.
+	LyricsChoices []mediaLyricsChoice `json:"lyricsChoices,omitempty"`
+	// LyricsMatchMediaItemID is the lyrics file name matching picks for an
+	// audio or video location, which applies where no assignment does.
+	LyricsMatchMediaItemID *int64 `json:"lyricsMatchMediaItemId,omitempty"`
 }
 
 func (s *Server) getWork(w http.ResponseWriter, r *http.Request) {
@@ -211,7 +229,7 @@ func (s *Server) getWork(w http.ResponseWriter, r *http.Request) {
 		writeWorkReadError(w, err)
 		return
 	}
-	if !s.requireDemoWork(w, r, id) {
+	if !s.requireDemoWork(w, r, id) || s.refuseRemoteOnlyWork(w, r, id) {
 		return
 	}
 
@@ -226,7 +244,7 @@ func (s *Server) getWork(w http.ResponseWriter, r *http.Request) {
 	work, err := s.loadWorkDetail(r.Context(), userID, id, includeMedia)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
 		writeError(w, err)
@@ -250,6 +268,10 @@ func (s *Server) getWork(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if localOnlyRequest(r.Context()) {
+		work.SourcePresence = localSourcePresence(work.SourcePresence)
+		localMediaLocations(work.MediaItems)
+	}
 	writeJSON(w, http.StatusOK, work)
 	if includeMedia {
 		s.prefetchWorkVideoKeyframes(work.MediaItems)
@@ -263,7 +285,7 @@ func (s *Server) getWorkMedia(w http.ResponseWriter, r *http.Request) {
 		writeWorkReadError(w, err)
 		return
 	}
-	if !s.requireDemoWork(w, r, id) {
+	if !s.requireDemoWork(w, r, id) || s.refuseRemoteOnlyWork(w, r, id) {
 		return
 	}
 	if _, err := s.ensureLocalMediaIndexedForRequest(r.Context(), id); err != nil {
@@ -273,7 +295,7 @@ func (s *Server) getWorkMedia(w http.ResponseWriter, r *http.Request) {
 	mediaWorkID, err := s.resolveMediaWorkIDForRequest(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
 		writeError(w, err)
@@ -283,6 +305,9 @@ func (s *Server) getWorkMedia(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	if localOnlyRequest(r.Context()) {
+		localMediaLocations(mediaItems)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"workId": id, "mediaWorkId": mediaWorkID, "mediaItems": mediaItems})
 	s.prefetchWorkVideoKeyframes(mediaItems)
@@ -368,7 +393,7 @@ func (s *Server) loadWorkDetailBase(ctx context.Context, userID int64, id int64)
 			COALESCE(user_work_state.favorite, 0) AS favorite,
 			user_work_state.rating
 		FROM work
-		LEFT JOIN user_work_state ON user_work_state.work_id = work.id
+		LEFT JOIN user_work_state ON user_work_state.work_id = `+personal.CanonicalWorkIDSQL("work.id")+`
 			AND user_work_state.user_id = ?
 		WHERE work.id = ?
 	`, userID, id).Scan(

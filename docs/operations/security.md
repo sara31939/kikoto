@@ -136,16 +136,29 @@ password stays readable to anyone who can inspect the container environment.
 
 ## Authentication and Cookies
 
-A super administrator can change **Anonymous access** under
-`Settings -> Users -> Instance access` in production or development. The setting is stored in
+A super administrator can change **Browse and play without an account** under
+`System -> Users -> Instance access` in production or development. The setting is stored in
 SQLite and recorded in the audit log. In production it takes effect without a
 restart. When disabled, unauthenticated clients can reach only health,
 authentication bootstrap and initial setup, library migration status, and
 runtime-setting endpoints before the frontend
 presents the sign-in page. That unauthenticated runtime response contains only
 the deployment mode and access-policy state, not operational settings. When enabled,
-unauthenticated `GET` and `HEAD` requests may browse and play Library content;
+unauthenticated `GET` and `HEAD` requests, and the read-only player queue
+resolve `POST /api/playback/queue/resolve`, may browse and play Library content;
 state-changing methods still require an authenticated account and permission.
+They reach local content only until the separate **Browse remote sources
+without an account** setting, off by default and audited like the first, is
+turned on, because remote reads can reveal the remote source configuration.
+Until then `/api/remote-sources/`, `/api/remote-track-runs/`,
+`/api/library-sources`, a work's source availability, a voice actor's
+`/api/voices/{id}/remote-matches`, and streams and files of remote or cache
+locations answer `401`; a work without a local folder in its family answers
+`401` as well; and work, voice actor, and circle lists and details show only
+works with a local folder, their local locations, and local source counts.
+The remote-browsing setting applies only while anonymous browsing is on, and
+Settings offers it only then. Turning anonymous browsing off also turns remote
+browsing off, and a change to both settings is saved together or not at all.
 Development exposes the same control for production-feature debugging, but its
 automatic root identity means every development request remains authenticated.
 Demo mode neither exposes nor uses the setting.
@@ -153,15 +166,23 @@ Demo mode neither exposes nor uses the setting.
 ### Sign-in Throttling
 
 Failed sign-ins are throttled in memory and reset when the process restarts.
-After 5 failures for one username from one client, 20 failures from one client
-across any usernames, or 50 failures for one username across all clients, that
-client or username receives `429 Too Many Requests` with a `Retry-After`
-header. The first lockout lasts one minute and doubles with each further
-failure, up to 15 minutes for one client and username or 30 minutes otherwise.
-A locked sign-in is rejected without checking the password, even when the
-password is correct. A successful sign-in clears the username counters but not
-the client counter. Unknown usernames are counted and timed like real ones, so
-neither a lockout nor the response time reveals whether an account exists.
+Lockouts apply only to clients: an IPv4 address, or an IPv6 /64. After 5
+failures for one username from one client, or 20 failures from one client
+across any usernames, that client receives `429 Too Many Requests` with a
+`Retry-After` header. The first lockout lasts one minute and doubles with
+each further failure, up to 15 minutes for one client and username or 30
+minutes for the client. A locked sign-in is rejected without checking the
+password, even when the password is correct. A username is never locked, so
+failures from other clients cannot lock its owner out. After 5 failures for
+one username across all clients, each later attempt on it waits before its
+password is checked: one second, doubling with each further failure up to
+eight seconds, and forgotten after an hour without failures. Attempts on one
+username take turns, so parallel attempts each wait out their delay in order
+rather than all at once; the username is still never refused. A successful
+sign-in clears the username's delay and its client-and-username counter, but
+not the client counter. Unknown usernames are counted, delayed, and timed like
+real ones, so neither a lockout, a delay, nor the response time reveals
+whether an account exists.
 
 Passwords are hashed with Argon2id using 19 MiB of memory and two passes per
 check. By default at most eight checks run at once, about 152 MiB in total;
@@ -271,7 +292,7 @@ allowed hosts never receive the private-LAN exception.
 The hardened outbound transport does not inherit ambient `HTTP_PROXY`,
 `HTTPS_PROXY`, or `NO_PROXY` settings; the **Bypass proxy** list below takes
 the place of `NO_PROXY`. Administrators instead configure
-forward proxies under `Settings -> Proxy`: an ordered list of up to
+forward proxies under `System -> Proxy`: an ordered list of up to
 eight `http`, `https`, `socks5`, or `socks5h` proxies with an explicit host and
 port and an optional username and password. **Proxy scope** routes built-in
 DLsite requests, remote-source requests (with per-source direct or proxy
@@ -321,7 +342,7 @@ are stored in the SQLite settings table, are write-only through the settings
 API, and are never returned or included in validation errors.
 
 Only accounts with `sources:write` see source addresses while **Hide addresses
-from accounts that do not manage sources** in `Settings -> Library` is on, which
+from accounts that do not manage sources** in `System -> Library` is on, which
 is the default; other accounts and anonymous readers get covers, image
 previews, playback, and text through Kikoto itself. Accounts that can make the
 server reach remote sources on demand are limited to roles holding
@@ -338,13 +359,16 @@ domains or sanitized host labels instead.
 
 ## Filesystem and Container Boundaries
 
-Kikoto expects `/config`, `/cache`, and `/data` to be dedicated runtime mounts.
+Kikoto expects `/config`, `/cache`, `/data`, and `/record` to be dedicated
+runtime mounts. `/data` contains the audio library and storage pools; `/record`
+contains the independent home video and image library and is not a storage pool.
 Do not mount a host root, home directory, Docker socket, or unrelated sensitive
-tree into those locations. Avoid symbolic links that leave the configured data
-or cache roots.
+tree into those locations. Avoid symbolic links that leave the configured data,
+cache, or record roots.
 
-Local scans ignore symbolic-link files, and media processing and Fetch source
-copies reject stored paths whose resolved target leaves the configured root.
+Local scans and record scans ignore symbolic-link files, and media processing,
+record serving, and Fetch source copies reject stored paths whose resolved target
+leaves the configured root.
 The check compares against the root's own resolved location, so a root that is
 itself a symbolic link, or sits below a linked directory, holds its files.
 Media processing opens the resolved location it checked, and refuses a
@@ -363,17 +387,19 @@ regardless of their owner, so host permission bits do not restrict it inside a
 mount. See [container isolation](docker.md#container-isolation) for that
 capability and the writable runtime mounts.
 
-Media assets only render recognized passive raster images inline. Other files,
-including HTML, SVG, or an HTML file named as an image, are served as downloads
-with `nosniff` and a sandbox CSP. Text previews remain JSON data rendered as
-text by the application. The application shell loads packaged scripts under a
-CSP that blocks inline scripts, frames, and plugins. FFprobe and FFmpeg accept
+Work media assets only render recognized passive raster images inline. Other
+files, including HTML, SVG, or an HTML file named as an image, are served as
+downloads with `nosniff` and a sandbox CSP. Record image previews also require
+the declared raster signature to match the file before they are served inline;
+an invalid record image is unavailable. Text previews remain JSON data rendered
+as text by the application. The application shell loads packaged scripts under
+a CSP that blocks inline scripts, frames, and plugins. FFprobe and FFmpeg accept
 only local file and pipe protocols for local media processing, so embedded
 network URLs cannot bypass the shared outbound policy.
 
 ## Logs and Diagnostics
 
-Server logs and workflow Activity may contain local paths, configured endpoint
+Server logs and workflow runs may contain local paths, configured endpoint
 details, and upstream errors. Redact them before sharing a bug report or support
 request. Never attach a real database, session token, source credential, or
 media file to a public issue.

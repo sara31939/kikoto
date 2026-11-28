@@ -80,7 +80,7 @@ application version that completed startup.
 | Database state | Action |
 | --- | --- |
 | Empty SQLite database | Apply the highest-version baseline the mode reads (see [Selection And Retention](#selection-and-retention)), then any numbered migrations after that version. |
-| Existing database with migration history | Validate the ledger and apply only the next numbered migrations. User data is never reconstructed from the baseline. |
+| Existing database with migration history | Validate the ledger and apply only the next numbered migrations. |
 | Application tables without migration history | Stop and require an operator decision; the manager never infers a version. |
 | Dirty migration from an interrupted/failed start | Retry that exact version after the SQL or environment is repaired. |
 | Future schema version | Stop and ask for a compatible/newer binary. |
@@ -89,7 +89,7 @@ Before the first numbered migration runs on an existing database, startup runs
 an upgrade hook. It writes a pre-migration backup when the database has a
 backup directory (see [Database](../operations/database.md)) and, for a
 database below schema 035, preserves user-authored workflow definitions for
-review (see [Preset Workflows](../architecture/workflows.md#preset-workflows)).
+review (see [Preset Workflows](../architecture/workflows/shown-works-and-presets.md#preset-workflows)).
 A hook failure stops startup before the schema changes. The hook does not run
 for an empty database.
 
@@ -169,10 +169,6 @@ The generated file is reviewed and checksummed like any other packaged asset.
 | Development (default) | `go generate ./migrations` | Writes `compat/<schema>_dev.sql` for the highest numbered file, replacing a file of the same name. Older development baselines stay, because development databases created from them validate their ledger against them. Writes nothing when the highest numbered file already has a released baseline. |
 | Release | `-release` | Reads the root `VERSION`, which must have the form `v<major>.<minor>.<patch>`. Writes `baseline/<schema>_<VERSION>.sql` only when the highest numbered file is above the highest released baseline, then deletes every `compat/*.sql`. |
 
-A release whose numbered chain is unchanged therefore reuses the previous
-released baseline, and no second released baseline exists for one schema
-version.
-
 ### Selection And Retention
 
 An empty database applies the highest-version baseline the mode reads: the
@@ -182,9 +178,10 @@ the first ledger row and in `schema_state`, and then applies any numbered files
 after it. Every other packaged baseline exists only to validate the ledger of a
 database that was created from it.
 
-A released baseline's suffix is the release that generated it; later releases
-with the same numbered chain reuse it. The packaged baselines and the releases
-that shipped them are listed in
+A released baseline's suffix is the release that generated it. A release whose
+numbered chain is unchanged reuses the previous released baseline, so no second
+released baseline exists for one schema version. The packaged baselines and the
+releases that shipped them are listed in
 [Accepted And Refused Ledgers](#accepted-and-refused-ledgers) and
 [Release To Schema Map](#release-to-schema-map).
 
@@ -218,6 +215,8 @@ these first rows and continues through the numbered chain:
 | `baseline/088_v0.9.2.sql` | v0.9.2 | Packaged |
 | `baseline/089_v0.9.3.sql` | v0.9.3 | Packaged |
 | `baseline/096_v0.10.0.sql` | v0.10.0 through v0.10.2 | Packaged |
+| `baseline/102_v0.11.0.sql` | v0.11.0 | Packaged |
+| `baseline/104_v0.11.1.sql` | v0.11.1 | Packaged |
 | `compat/<schema>_dev.sql` | Development builds of the unreleased chain | Development baseline; development mode only |
 
 A checksum-only entry validates a recorded ledger row in every mode and is
@@ -272,5 +271,7 @@ matches the backup.
 | v0.9.2 | `088` | `088_v0.9.2.sql` |
 | v0.9.3 | `089` | `089_v0.9.3.sql` |
 | v0.10.0 through v0.10.2 | `096` | `096_v0.10.0.sql` |
+| v0.11.0 | `102` | `102_v0.11.0.sql` |
+| v0.11.1 | `104` | `104_v0.11.1.sql` |
 
 Per-release upgrade steps are in the [release notes](../history/index.md).

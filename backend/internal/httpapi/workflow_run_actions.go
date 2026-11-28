@@ -26,7 +26,7 @@ func (s *Server) cancelWorkflowRun(w http.ResponseWriter, r *http.Request) {
 func (s *Server) cancelWorkflowRunForActor(w http.ResponseWriter, r *http.Request, actor currentUser, requiredCode string) {
 	id, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid workflow run id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid workflow run id", false)
 		return
 	}
 	tx, err := beginTxWithDatabaseBusyRetry(r.Context(), s.db)
@@ -38,14 +38,14 @@ func (s *Server) cancelWorkflowRunForActor(w http.ResponseWriter, r *http.Reques
 	run, err := s.loadWorkflowRunTx(r.Context(), tx, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workflow run not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "workflow run not found", false)
 			return
 		}
 		writeError(w, err)
 		return
 	}
 	if requiredCode != "" && run.WorkflowCode != requiredCode {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workflow run not found"})
+		writeAPIError(w, http.StatusNotFound, "not_found", "workflow run not found", false)
 		return
 	}
 	allowed, err := canManageWorkflowRun(r.Context(), tx, actor, id)
@@ -54,11 +54,11 @@ func (s *Server) cancelWorkflowRunForActor(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !allowed {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "permission denied"})
+		writeAPIError(w, http.StatusForbidden, "permission_denied", "permission denied", false)
 		return
 	}
 	if run.Status != "queued" && run.Status != "running" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "only queued or running workflow runs can be cancelled"})
+		writeAPIError(w, http.StatusConflict, "conflict", "only queued or running workflow runs can be cancelled", false)
 		return
 	}
 	changed, err := s.cancelWorkflowRunTx(r.Context(), tx, run, id)
@@ -68,7 +68,7 @@ func (s *Server) cancelWorkflowRunForActor(w http.ResponseWriter, r *http.Reques
 	}
 	if !changed {
 		_ = tx.Rollback()
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "workflow run has already finished"})
+		writeAPIError(w, http.StatusConflict, "conflict", "workflow run has already finished", false)
 		return
 	}
 	if err := tx.Commit(); err != nil {
@@ -164,13 +164,13 @@ func (s *Server) retryWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid workflow run id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid workflow run id", false)
 		return
 	}
 	run, err := s.loadWorkflowRun(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workflow run not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "workflow run not found", false)
 			return
 		}
 		writeError(w, err)
@@ -182,20 +182,20 @@ func (s *Server) retryWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowed {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "permission denied"})
+		writeAPIError(w, http.StatusForbidden, "permission_denied", "permission denied", false)
 		return
 	}
 	if run.Status == "queued" || run.Status == "running" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "running workflow runs cannot be retried"})
+		writeAPIError(w, http.StatusConflict, "conflict", "running workflow runs cannot be retried", false)
 		return
 	}
 	dispatch, err := s.dispatchWorkflowRetry(r.Context(), actor, run, id)
 	if errors.Is(err, errWorkflowRetryPermission) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "permission denied"})
+		writeAPIError(w, http.StatusForbidden, "permission_denied", "permission denied", false)
 		return
 	}
 	if errors.Is(err, errWorkflowRetryNoRecoverableJob) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this workflow has no recoverable failed job"})
+		writeAPIError(w, http.StatusConflict, "conflict", "this workflow has no recoverable failed job", false)
 		return
 	}
 	if err != nil {
@@ -239,13 +239,21 @@ func (s *Server) dispatchWorkflowRetry(ctx context.Context, actor currentUser, r
 		if !userHasPermission(actor, "metadata:sync") {
 			return workflowRetryDispatchResult{}, errWorkflowRetryPermission
 		}
-		newRunID, err := s.retryLocalLibraryScan(ctx, runID)
+		newRunID, err := s.retryLocalLibraryScan(ctx)
 		return workflowRetryDispatchResult{NewRunID: newRunID}, err
 	case localMediaIndexWorkflowCode:
 		if !userHasPermission(actor, "metadata:sync") {
 			return workflowRetryDispatchResult{}, errWorkflowRetryPermission
 		}
 		newRunID, err := s.retryLocalMediaIndex(ctx, runID)
+		return workflowRetryDispatchResult{NewRunID: newRunID}, err
+	case recordProbeWorkflowCode:
+		// Reading record media details changes what the library shows, as a
+		// record scan does.
+		if !userHasPermission(actor, "library:write") {
+			return workflowRetryDispatchResult{}, errWorkflowRetryPermission
+		}
+		newRunID, err := s.retryRecordProbe(ctx)
 		return workflowRetryDispatchResult{NewRunID: newRunID}, err
 	case sourcePresenceCheckWorkflowCode:
 		if !userHasPermission(actor, "sources:write") {
@@ -277,16 +285,10 @@ func (s *Server) dispatchWorkflowRetry(ctx context.Context, actor currentUser, r
 	}
 }
 
-func (s *Server) retryLocalLibraryScan(ctx context.Context, runID int64) (int64, error) {
-	var payload localScanJobPayload
-	var inputJSON string
-	if err := s.db.QueryRowContext(ctx, "SELECT input_json FROM workflow_run WHERE id = ?", runID).Scan(&inputJSON); err != nil {
-		return 0, err
-	}
-	if err := json.Unmarshal([]byte(inputJSON), &payload); err != nil {
-		return 0, err
-	}
-	result, err := s.enqueueLocalScanWithOptions(ctx, "manual", "retry_run", 0, payload.FollowUpRun)
+// retryLocalLibraryScan queues a new complete scan; a failed scan's input
+// holds nothing a retry repeats.
+func (s *Server) retryLocalLibraryScan(ctx context.Context) (int64, error) {
+	result, err := s.enqueueLocalScanWithOptions(ctx, "manual", "retry_run", 0)
 	return result.RunID, err
 }
 
@@ -331,7 +333,7 @@ func (s *Server) requireWorkflowRunAccess(w http.ResponseWriter, r *http.Request
 		var showcase bool
 		err := s.db.QueryRowContext(r.Context(), "SELECT trigger_reason = ? FROM workflow_run WHERE id = ?", workflow.DemoShowcaseTriggerReason, runID).Scan(&showcase)
 		if errors.Is(err, sql.ErrNoRows) || err == nil && !showcase {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workflow run not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "workflow run not found", false)
 			return false
 		}
 		if err != nil {
@@ -345,7 +347,7 @@ func (s *Server) requireWorkflowRunAccess(w http.ResponseWriter, r *http.Request
 func requireWorkflowRunAccessFrom(w http.ResponseWriter, r *http.Request, db workflowRunOwnershipQuerier, actor currentUser, runID int64) bool {
 	allowed, err := canViewWorkflowRun(r.Context(), db, actor, runID)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workflow run not found"})
+		writeAPIError(w, http.StatusNotFound, "not_found", "workflow run not found", false)
 		return false
 	}
 	if err != nil {
@@ -353,7 +355,7 @@ func requireWorkflowRunAccessFrom(w http.ResponseWriter, r *http.Request, db wor
 		return false
 	}
 	if !allowed {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "permission denied"})
+		writeAPIError(w, http.StatusForbidden, "permission_denied", "permission denied", false)
 		return false
 	}
 	return true
@@ -372,7 +374,7 @@ func requireWorkflowRunManagement(w http.ResponseWriter, r *http.Request, db wor
 		return false
 	}
 	if !allowed {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "permission denied"})
+		writeAPIError(w, http.StatusForbidden, "permission_denied", "permission denied", false)
 		return false
 	}
 	return true
@@ -386,7 +388,7 @@ func requireWorkflowCandidateManagement(w http.ResponseWriter, r *http.Request, 
 	var candidateType string
 	if err := db.QueryRowContext(r.Context(), "SELECT workflow_run_id, candidate_type FROM workflow_candidate WHERE id = ?", candidateID).Scan(&runID, &candidateType); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workflow candidate not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "workflow candidate not found", false)
 			return false
 		}
 		writeError(w, err)
@@ -396,7 +398,7 @@ func requireWorkflowCandidateManagement(w http.ResponseWriter, r *http.Request, 
 		return false
 	}
 	if workflowCandidateChangesLocalFiles(candidateType) && !userHasPermission(actor, "downloads:manage") {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "permission denied"})
+		writeAPIError(w, http.StatusForbidden, "permission_denied", "permission denied", false)
 		return false
 	}
 	return true
@@ -470,10 +472,10 @@ func canManageWorkflowRun(ctx context.Context, db workflowRunOwnershipQuerier, a
 	return ownership.startedBy(actor), nil
 }
 
+// canRetryWorkflowGraphRun reports whether the actor holds every permission
+// the failed graph's nodes use, as starting that preset requires. Who may
+// manage the run is decided before, by canManageWorkflowRun.
 func (s *Server) canRetryWorkflowGraphRun(ctx context.Context, actor currentUser, runID int64) (bool, error) {
-	if missingWorkflowGraphPermission(actor.Permissions, []string{"system:admin"}) == "" {
-		return true, nil
-	}
 	var payloadJSON string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT payload_json
@@ -488,16 +490,15 @@ func (s *Server) canRetryWorkflowGraphRun(ctx context.Context, actor currentUser
 	if err != nil {
 		return false, err
 	}
+	// A graph the runtime cannot run, such as one with a step that is not a
+	// workflow graph node, has nothing a retry could resume.
 	var payload workflowGraphJobPayload
 	if err := decodeWorkflowJobPayload(payloadJSON, &payload); err != nil {
-		return false, err
-	}
-	if payload.UserID != actor.ID {
-		return false, nil
+		return false, errWorkflowRetryNoRecoverableJob
 	}
 	graph, err := validateWorkflowGraphDefinition(payload.DefinitionJSON)
 	if err != nil {
-		return false, err
+		return false, errWorkflowRetryNoRecoverableJob
 	}
 	return missingWorkflowGraphPermission(actor.Permissions, workflowGraphRequiredPermissions(graph)) == "", nil
 }
@@ -550,7 +551,14 @@ func workflowJobRetryPermissions(job workflowJobRecord) []string {
 			return []string{"remote:fetch", "metadata:sync"}
 		}
 		return []string{"remote:fetch"}
-	case "media_cache_limit_cleanup", "media_cache_cleanup", "local_media_delete", "local_location_cleanup", "media_location_cleanup":
+	case "media_cache_limit_cleanup", "media_cache_cleanup", "local_media_delete", "local_location_cleanup":
+		return []string{"downloads:manage"}
+	case "media_location_cleanup":
+		var payload mediaCleanupJobPayload
+		_ = decodeWorkflowJobPayload(job.PayloadJSON, &payload)
+		if payload.Mode == mediaCleanupForgetWork {
+			return []string{"downloads:manage", "sources:write"}
+		}
 		return []string{"downloads:manage"}
 	case workFolderEditWorkerType:
 		var payload workFolderEditJobPayload
@@ -570,13 +578,13 @@ func (s *Server) reviewWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid workflow run id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid workflow run id", false)
 		return
 	}
 	run, err := s.loadWorkflowRun(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workflow run not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "workflow run not found", false)
 			return
 		}
 		writeError(w, err)
@@ -588,7 +596,7 @@ func (s *Server) reviewWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	// Products a provider reports as not found may stay pending; candidates and
 	// retryable metadata failures must be resolved first.
 	if run.PendingCandidates > 0 || run.PendingFailedMetadata > 0 || run.Status == "queued" || run.Status == "running" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "resolve pending issues and wait for completion before marking the run reviewed"})
+		writeAPIError(w, http.StatusConflict, "conflict", "resolve pending issues and wait for completion before marking the run reviewed", false)
 		return
 	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
@@ -634,7 +642,7 @@ func (s *Server) recoverStaleWorkflowRuns(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !canAdministerWorkflowRuns(actor) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "permission denied"})
+		writeAPIError(w, http.StatusForbidden, "permission_denied", "permission denied", false)
 		return
 	}
 	var result workflow.OrphanSweepResult

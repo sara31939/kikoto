@@ -57,7 +57,7 @@ func (s *Store) DrawForYou(ctx context.Context, request ForYouRequest) (ForYouDr
 	if request.UserID <= 0 {
 		return ForYouDraw{}, errors.New("for you requires an account")
 	}
-	if _, ok := ParseForYouTemperature(string(request.Temperature)); !ok {
+	if !request.Temperature.Valid() {
 		request.Temperature = DefaultForYouTemperature
 	}
 	if request.Now.IsZero() {
@@ -94,7 +94,7 @@ func (s *Store) DrawForYou(ctx context.Context, request ForYouRequest) (ForYouDr
 	if err != nil {
 		return ForYouDraw{}, err
 	}
-	candidates, err := s.loadForYouCandidates(ctx, request.UserID, snapshot.CatalogEpoch, uniqueInt64s(append(recalled, localHeard...)))
+	candidates, err := s.loadForYouCandidates(ctx, request.UserID, snapshot.CatalogEpoch, uniquePositiveInt64s(append(recalled, localHeard...)))
 	if err != nil {
 		return ForYouDraw{}, err
 	}
@@ -105,7 +105,7 @@ func (s *Store) DrawForYou(ctx context.Context, request ForYouRequest) (ForYouDr
 			familiar = append(familiar, id)
 		}
 	}
-	exposure, err := s.forYouExposure(ctx, snapshot.CatalogEpoch, uniqueInt64s(familiar))
+	exposure, err := s.forYouExposure(ctx, snapshot.CatalogEpoch, uniquePositiveInt64s(familiar))
 	if err != nil {
 		return ForYouDraw{}, err
 	}

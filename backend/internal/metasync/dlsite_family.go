@@ -135,7 +135,7 @@ func isDemoEligibleProduct(product dlsite.Product) bool {
 }
 
 func dlsiteProductCode(product dlsite.Product) string {
-	return strings.ToUpper(strings.TrimSpace(firstNonEmptyText(product.WorkNo, product.ProductID)))
+	return strings.ToUpper(strings.TrimSpace(firstNonBlank(product.WorkNo, product.ProductID)))
 }
 
 // SyncFamily refreshes a requested product and every language edition that can
@@ -219,7 +219,7 @@ func (s *DLsiteSyncer) syncFamilyCode(
 	// separate storage and display contract.
 	if s.cacheRoot != "" && isCanonicalProduct(product) {
 		if _, err := s.downloadCover(ctx, product); err != nil {
-			if dlsite.IsTimeout(err) || ctx.Err() != nil {
+			if stopsMetadataRun(ctx, err) {
 				return err
 			}
 			result.Failures = append(result.Failures, fmt.Sprintf("%s cover: %s", code, err.Error()))
@@ -237,7 +237,7 @@ func (s *DLsiteSyncer) recordFamilyFetchFailure(
 	result *DLsiteFamilySyncResult,
 	skipped map[string]bool,
 ) error {
-	if dlsite.IsTimeout(fetchErr) || ctx.Err() != nil {
+	if stopsMetadataRun(ctx, fetchErr) {
 		return fetchErr
 	}
 	if errors.Is(fetchErr, dlsite.ErrNoProduct) {
@@ -283,13 +283,13 @@ func (s *DLsiteSyncer) syncFamilyCanonical(ctx context.Context, result *DLsiteFa
 	// language may be English, Chinese, or another provider language, so the
 	// request locale must not be used as an origin test.
 	if ok &&
-		strings.EqualFold(strings.TrimSpace(firstNonEmptyText(origin.WorkNo, origin.ProductID)), result.CanonicalCode) &&
+		strings.EqualFold(strings.TrimSpace(firstNonBlank(origin.WorkNo, origin.ProductID)), result.CanonicalCode) &&
 		(productEditionLanguage(origin) != "" || strings.TrimSpace(origin.TranslationInfo.Lang) != "" || originResponseLanguage(origin.Language)) {
 		return nil
 	}
 	originProduct, _, originFetched, err := s.syncOriginProductForCode(ctx, result.CanonicalCode)
 	if err != nil {
-		if dlsite.IsTimeout(err) || ctx.Err() != nil {
+		if stopsMetadataRun(ctx, err) {
 			return err
 		}
 		result.Failures = append(result.Failures, fmt.Sprintf("%s origin metadata: %s", result.CanonicalCode, err.Error()))
@@ -298,7 +298,7 @@ func (s *DLsiteSyncer) syncFamilyCanonical(ctx context.Context, result *DLsiteFa
 	products[result.CanonicalCode] = originProduct
 	if originFetched && s.cacheRoot != "" {
 		if _, err := s.downloadCover(ctx, originProduct); err != nil {
-			if dlsite.IsTimeout(err) || ctx.Err() != nil {
+			if stopsMetadataRun(ctx, err) {
 				return err
 			}
 			result.Failures = append(result.Failures, fmt.Sprintf("%s origin cover: %s", result.CanonicalCode, err.Error()))
@@ -360,7 +360,7 @@ func (s *DLsiteSyncer) classifyFamilyEditions(ctx context.Context, canonicalCode
 }
 
 func (s *DLsiteSyncer) syncOriginProduct(ctx context.Context, product dlsite.Product) (dlsite.Product, int64, bool, error) {
-	currentCode := strings.ToUpper(strings.TrimSpace(firstNonEmptyText(product.WorkNo, product.ProductID)))
+	currentCode := strings.ToUpper(strings.TrimSpace(firstNonBlank(product.WorkNo, product.ProductID)))
 	canonicalCode := strings.ToUpper(strings.TrimSpace(baseProductCode(product)))
 	if canonicalCode == "" {
 		canonicalCode = currentCode
@@ -396,7 +396,7 @@ func originResponseLanguage(language string) bool {
 }
 
 func isCanonicalProduct(product dlsite.Product) bool {
-	currentCode := strings.ToUpper(strings.TrimSpace(firstNonEmptyText(product.WorkNo, product.ProductID)))
+	currentCode := strings.ToUpper(strings.TrimSpace(firstNonBlank(product.WorkNo, product.ProductID)))
 	canonicalCode := strings.ToUpper(strings.TrimSpace(baseProductCode(product)))
 	if currentCode == "" {
 		return false
@@ -447,7 +447,7 @@ func originProductCode(product dlsite.Product) string {
 }
 
 func productEdition(product dlsite.Product) (dlsite.LanguageEdition, bool) {
-	currentCode := strings.ToUpper(strings.TrimSpace(firstNonEmptyText(product.WorkNo, product.ProductID)))
+	currentCode := strings.ToUpper(strings.TrimSpace(firstNonBlank(product.WorkNo, product.ProductID)))
 	for _, edition := range product.LanguageEditions {
 		if strings.EqualFold(strings.TrimSpace(edition.WorkNo), currentCode) {
 			return edition, true

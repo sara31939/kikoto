@@ -27,12 +27,12 @@ func (s *Server) untrackWorkSource(w http.ResponseWriter, r *http.Request) {
 	}
 	workID, err := parseInt64PathValue(r, "id")
 	if err != nil || workID <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work id", false)
 		return
 	}
 	sourceID, err := parseInt64PathValue(r, "sourceId")
 	if err != nil || sourceID <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid source id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid source id", false)
 		return
 	}
 	result, err := s.runWorkSourceUntrack(r.Context(), workID, sourceID)
@@ -88,6 +88,20 @@ func (s *Server) runWorkSourceUntrack(ctx context.Context, workID int64, sourceI
 		}
 		locks = append(locks, release)
 	}
+	// A queued or running Fetch may still stage these cache files; they stay
+	// for it, as cache trimming leaves them, and the Fetch removes the ones it
+	// promotes.
+	protected, err := s.activeRemoteFetchCacheKeys(ctx)
+	if err != nil {
+		return workSourceUntrackResult{}, err
+	}
+	cleared := make([]cacheLocationForCleanup, 0, len(cacheLocations))
+	for _, location := range cacheLocations {
+		if _, ok := protected[cacheLocationKey(sourceID, location.Path)]; !ok {
+			cleared = append(cleared, location)
+		}
+	}
+	cacheLocations = cleared
 	for _, location := range cacheLocations {
 		deleted, _, err := s.removeCacheFileUnlocked(location.Path)
 		if err != nil {

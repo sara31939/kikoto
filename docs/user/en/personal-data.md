@@ -2,11 +2,12 @@
 
 [English](../en/personal-data.md) · [简体中文](../zh-Hans/personal-data.md) · [繁體中文](../zh-Hant/personal-data.md) · [日本語](../ja/personal-data.md) · [한국어](../ko/personal-data.md)
 
-Sign in and open **Insights** in the sidebar for your listening calendar,
-report, and history. Personal tags are in **Settings → Tags**, and **Your
-data** is the last section of **Settings → Account**. Quick actions opens
-each one directly, and the account menu behind your avatar opens Insights and
-Tags. They show only your account's data.
+Sign in and open **Insights**, **Tags**, and **Settings** from the
+**Personal** group of the sidebar, or on a phone from the account menu behind
+your avatar. On a wide screen that menu also has all three. Insights holds your listening calendar, report, and history,
+Tags holds your personal tags, and **Your data** is the last section of
+**Settings**. Quick actions opens each one directly. They show only
+your account's data.
 
 ## Personal tags
 
@@ -20,27 +21,28 @@ with `{date}` creates one tag per day.
 
 ## Insights
 
-The switcher at the top of **Insights** chooses what the page covers: the last
-30 days, the last 12 months, all time, or one calendar year. **Year**, the last entry, opens the years with
-dated listening and names the chosen one.
-
-The **listening calendar** shows a year as one cell per day in week columns,
-shaded by listening time, with its listening days, listening time, and
-streaks: the chosen calendar year, or the past year for the other ranges.
+The **listening calendar** at the top of **Insights** shows a year as one cell
+per day in week columns, shaded by listening time; the past year also shows
+the current and longest streaks. The year menu at its top right chooses **Past
+year**, the initial choice, or one calendar year with dated listening.
 Point at or tap a day for its total.
 
-A calendar year opens with its **highlights**: the year's listening time,
-works, and listening days, the work, voice, and circle listened to most, the
-busiest day with its leading work, the longest run of listening days, the
-works first heard that year, and the busiest hour of the day.
+A calendar year adds its **highlights** below the calendar: the year's
+listening time, works, and listening days, the work, voice, and circle
+listened to most, the busiest day with its leading work, the longest run of
+listening days, the works first heard that year, and the busiest hour of the
+day.
 
-For the chosen range the listening report shows:
+The switcher beside **Listening summary** chooses the range of the listening
+report and everything below it: the last 30 days, the last 12 months, or all
+time. For the chosen range the listening report shows:
 
 - Listening time, plays, works, and active days, with the time per active day,
   the time per play, the top work's share of the time, and the share of days in
   the range with listening.
 - A chart by day, month, or year (a calendar year by month; all time switches
-  to years after three years) with the average and busiest period.
+  to years after three years) with a line at the average of the periods with
+  listening and the busiest period named above it.
 - The five most listened works, expandable to ten, each with its time and its
   share of the range's listening.
 - Rhythm: the average listening per day from Monday to Friday and per weekend
@@ -48,13 +50,15 @@ For the chosen range the listening report shows:
   calendar's days for this, so an all-time report describes the past year.
   **By hour of day** adds the listening per hour, midnight first, with the
   busiest hour. It counts only listening recorded with its hour.
-- **Taste profile**: what you listen to, compared with the Library. The radar
-  draws up to eight tags by how far each one's share of your listening time
-  exceeds its share of the Library's works. A marker places your works among
-  the Library's by release year, sales, and work length when enough of them
-  carry that figure: the middle of the track is the Library, and works you
-  listened to longer weigh more. **Your ratings** compares every rating you
-  gave with the public rating of the same works. A few sentences above the
+- **Taste profile**: what you listen to, compared with the Library. Once the
+  range has at least three works you listened to, the radar draws up to eight
+  tags by how far each one's share of your listening time exceeds its share of
+  the Library's works. A marker places your works among the Library's by
+  release year, sales, and work length when enough of them carry that figure:
+  the middle of the track is the Library, and works you listened to longer
+  weigh more. **Your ratings** compares every rating you gave with the public
+  rating of the same works once you rated at least three, and names how many
+  ratings it reads. A few sentences above the
   markers say what stands out, with how many of the works you marked as
   started are finished or marked to relisten.
 - **Tags, voices, and circles**: the leading five of each, expandable to ten,
@@ -71,7 +75,7 @@ toward that work.
 A day starts at midnight in your time zone. **Automatic**, the initial
 setting, follows each device: listening counts toward the current day of the
 device that plays it, and a report ends on the current day of the device that
-shows it. Choose a zone in **Settings → Account → Time zone** to use one zone
+shows it. Choose a zone in **Settings → Time zone** to use one zone
 on every device. The foot of the page names the zone in use and links to that
 setting. Listening is credited to a day when it is recorded, so changing the
 time zone applies to later listening and leaves recorded days as they are.
@@ -156,7 +160,7 @@ Kikoto explains the risks and asks for confirmation:
 
 These requests never follow a redirect, so credentials reach only the address
 you chose. A manually entered address must be public unless you are an
-administrator or an administrator turns on **Settings → Library → Kikoeru
+administrator or an administrator turns on **System → Library → Kikoeru
 account import → Allow LAN addresses for every account**. That switch lets any
 signed-in account make the server connect to devices on its local network.
 Rows without a usable product code are skipped and counted, and at most two

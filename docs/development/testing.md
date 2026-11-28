@@ -1,8 +1,7 @@
 # Testing
 
 The goal is the smallest test set that gives strong confidence in a real
-behavior or stable contract. Before adding a test, state the regression it is
-meant to catch.
+behavior or stable contract.
 
 ## Value Gate
 
@@ -48,8 +47,8 @@ Use these repository-reserved values unless the value itself is under test:
 | Another supported prefix | The equivalent all-zero form, such as `VJ00000000`, only when prefix behavior matters |
 | Generated work codes | Go `testfixture.WorkCode` or TypeScript `syntheticWorkCode`, with an explicit prefix and ordinal |
 | Custom work code | `KT00000001` upward, from Go `testfixture.WorkCode(PrefixKT, n)`; Kikoto assigns these itself, so `WorkCodeAt` never spans them |
-| 101–400 distinct works | `WorkCodeAt` or `syntheticWorkCodeAt`, which deterministically spans the reserved prefix ranges |
-| Isolated larger scale experiment | Go `HighCardinalityWorkCodeAt`, with explicit ordinals in its bounded zero-prefixed range |
+| 101–400 distinct works in one isolated fixture | `WorkCodeAt` or `syntheticWorkCodeAt`, which deterministically spans the reserved prefix ranges |
+| More than 400 distinct works, as in an isolated recommendation scale experiment | Go `HighCardinalityWorkCodeAt`, with explicit ordinals in its bounded zero-prefixed range |
 | Work, circle, or person name | `Example Work`, `Example Circle`, or `Example Voice` with a numeric suffix when needed |
 | Remote source | Code `example_remote_a`, display name `Example Remote A` |
 | Inert URL | `https://source.example.invalid/path` |
@@ -64,14 +63,11 @@ and keep the names generic.
 
 Fixture constructors are deterministic builders, not random generators. Pass an
 explicit ordinal so failures remain reproducible and parallel test order cannot
-change identities. Use `WorkCodeAt` only when one isolated
-fixture genuinely needs more than 100 unique works; its later ranges use the
-equivalent reserved BJ, VJ, and CC forms. `WorkCodeAt` accepts ordinals 0–399;
-isolated recommendation scale experiments use `HighCardinalityWorkCodeAt` for
-0–399,999, spanning four prefixes with zero-prefixed `00000000`–`00099999`
-suffixes. This larger constructor belongs only to fixtures requiring more than
-400 identities. Keep explicit literals when code length,
-case, separators, or serialization is itself the behavior under test.
+change identities. `WorkCodeAt` accepts ordinals 0–399, and its later ranges
+use the equivalent reserved BJ, VJ, and CC forms. `HighCardinalityWorkCodeAt`
+accepts 0–399,999, spanning four prefixes with zero-prefixed `00000000`–`00099999`
+suffixes. Keep explicit literals when code length, case, separators, or
+serialization is itself the behavior under test.
 
 For network tests:
 
@@ -94,6 +90,7 @@ cd backend
 go run ../scripts/check-go-format.go . ../scripts
 go test ./...
 go vet ./...
+go run ../scripts/check-api-errors.go internal/httpapi
 go test -race ./...
 ```
 
@@ -106,10 +103,18 @@ make backend-lint
 
 `backend-format` checks backend and validation-script Go files with the standard
 `gofmt` rules while normalizing CRLF input for cross-platform consistency.
-`backend-lint` runs the pinned `scripts/golangci-lint.yml` policy against changes
+`backend-lint` first runs `scripts/check-go-dropped-errors.go` over the whole
+backend, which rejects a dropped workflow state write, database write, or JSON
+decode error ([Backend Guidelines](backend-guidelines.md#principles)). It then
+runs the pinned `scripts/golangci-lint.yml` policy against changes
 after `GOLANGCI_LINT_BASE` (which defaults to `HEAD` locally and the first
 parent in CI), so existing lint debt does not block new work. Use
 `make backend-lint-full` for a complete audit of the current backend.
+`make backend-vet` runs `go vet` and `scripts/check-api-errors.go`, which fails
+when an `internal/httpapi` handler answers an error through `writeJSON`, by an
+error status or an `{"error": ...}` map, instead of `writeAPIError` or
+`writeAPIErrorDetails`, which write the
+[error shape](../architecture/backend/http-responses.md#http-responses).
 
 The Makefile exports `GOTOOLCHAIN` set to the `toolchain` line of
 `backend/go.mod`, or its `go` line when there is none, so a local run uses the
@@ -121,11 +126,12 @@ another one. `make backend-test-container` uses the Go of `GO_IMAGE`.
 
 `make ci-backend` runs the full test suite with coverage and then with the race
 detector, alongside formatting, lint, module verification, vulnerability checks,
-and vet. It omits a third plain test run because coverage already executes the
-full suite. `make backend-test` remains available for fast local feedback.
-
-CI runs `ci-backend-static`, `ci-backend-coverage`, and the race suite as
-independent matrix jobs. The local `ci-backend` target composes the same checks.
+vet, and `make backend-sql-ratchet`, which fails when `internal/httpapi` runs
+more SQL directly than its recorded baseline or less without lowering it
+([Layering](../../backend/AGENTS.md#layering)). It omits a third plain test run because coverage already executes the
+full suite. CI runs `ci-backend-static`, `ci-backend-coverage`, and the race
+suite as independent matrix jobs that `ci-backend` composes locally.
+`make backend-test` remains available for fast local feedback.
 
 Tests inside a package run one after another, and the race detector slows the
 SQLite-heavy packages many times over, so CI runs the race suite as six
@@ -237,7 +243,9 @@ npm run build
 npm run test:e2e
 ```
 
-Vitest unit tests stay beside their source under `frontend/src`.
+`npm run lint` runs Oxlint, including the project rules in
+`frontend/oxlint-*.mjs`, and the Node tests that pin those rules. Vitest unit
+tests stay beside their source under `frontend/src`.
 Playwright browser regression tests live under `frontend/tests/e2e`. They run the
 Vite application and intercept the API boundary, so they verify browser behavior
 and client request contracts without claiming to exercise a live backend. The
@@ -273,9 +281,7 @@ of `playerPersistence`; Playwright retains real owner/server isolation and
 reload/playback workflows. Service-worker request exclusions execute the actual
 worker fetch handler in a unit harness, while production Smoke verifies the
 served manifest, icons, and worker asset. These tests do not claim to verify
-browser installation or offline lifecycle behavior. Layout assertions protect
-documented viewport, touch-target, or loading-stability contracts, not incidental
-pixel coordinates or internal spans.
+browser installation or offline lifecycle behavior.
 
 Android JVM tests live under `frontend/android/app/src/test` and run through:
 
@@ -302,8 +308,7 @@ The target synchronizes Capacitor through `ios-sync` and writes an unsigned
 `kikoto-<version>-unsigned.ipa` under `frontend/ios/App/build`. The IPA is not
 installable as built; a sideloading tool re-signs it with the installing
 user's identity. The iOS shell has no unit-test suite. CI runs the same target
-on a macOS runner, and the release workflow attaches the IPA to the GitHub
-Release.
+on a macOS runner.
 
 ## Continuous Integration
 
@@ -404,10 +409,9 @@ an independent job fails; source-based cache updates also consume cache storage.
 `make actionlint` lints every workflow, including its expressions, job
 dependencies, the inputs of the reusable workflow, and the inputs passed to
 the composite actions under `.github/actions`. Where `shellcheck` is
-installed, as on the CI runner, it also checks each `run` script. Workflows
-set up Node, Go, and the Android toolchain only through those composite
-actions, which read the Node and Go versions from `frontend/package.json` and
-`backend/go.mod`.
+installed, as on the CI runner, it also checks each `run` script. The
+composite actions read the Node and Go versions from `frontend/package.json`
+and `backend/go.mod`.
 
 The separate `PR Description` workflow checks the contribution template's
 change, validation, and upgrade-impact sections for PRs targeting `main` on
@@ -440,14 +444,14 @@ affected dependency.
 
 ## Frontend Coverage
 
-Vitest covers pure state and model logic. User-visible React interaction
-belongs in Playwright; do not build a large fake component runtime inside a unit test.
+Vitest covers pure state and model logic. Do not build a large fake component
+runtime inside a unit test; user-visible React interaction belongs in
+Playwright.
 
 To produce the frontend coverage report:
 
 ```sh
 cd frontend
-npm ci --strict-allow-scripts
 npm run test:unit:coverage
 ```
 
@@ -473,7 +477,18 @@ For Playwright, prefer locators in this order:
 
 Avoid DOM-parent traversal, Tailwind utility selectors, and fixed sleeps when a
 semantic locator and user-observable completion condition exist. A CSS/class
-assertion should include or point to the design/layout contract it protects.
+or layout assertion protects a documented viewport, touch-target, or
+loading-stability contract and includes or points to it, never incidental pixel
+coordinates or internal spans.
+
+A wait ends on observable state, through `expect` or `expect.poll`. Behavior
+driven by a timer, including an assertion that nothing happens over a period,
+installs `page.clock` before navigation and advances it with
+`page.clock.runFor`, so the spec spends no real time. `make frontend-lint` runs
+`scripts/check-e2e-locators.mjs`, which rejects `waitForTimeout` and any
+`locator()` selector that matches by CSS class, whether a Tailwind utility or an
+authored component class, in `frontend/tests`. A region without an accessible
+name takes a `data-` marker.
 
 Mock the narrowest external boundary needed for determinism: network, clock,
 filesystem, process, or browser API. Do not mock the subject under test or
@@ -481,7 +496,8 @@ recreate production behavior inside the mock.
 
 ## Regression Review
 
-A bug-fix test should identify:
+Before adding a test, state the regression it is meant to catch. A bug-fix
+test should identify:
 
 - The user-visible failure or violated contract.
 - The smallest setup that reproduces it.
@@ -534,6 +550,22 @@ HTTP bodies, request timeouts, polling, and Docker commands are bounded.
   beside another run's Vite server replaces `node_modules` under it and spoils
   that run. Stop the dev server first, or call the npm scripts directly while
   it runs.
+- Text metrics differ by platform font, so a title that overflows or an empty
+  state that wraps one more line can pass on Windows or macOS and fail on
+  Linux. The hosted ubuntu runners resolve the default sans font to DejaVu
+  Sans, which is wider than the Windows and macOS system fonts. The Playwright
+  image ships no DejaVu and resolves it to another font, so
+  `make frontend-e2e-container` does not show these failures either.
+  `make frontend-e2e-linux` runs the suite in the image that `PLAYWRIGHT_IMAGE`
+  pins with DejaVu Sans as its only Latin sans font; pass a spec or project
+  through `E2E_ARGS`, for example
+  `make frontend-e2e-linux E2E_ARGS="tests/e2e/route-error-boundary.spec.ts --project=mobile-chromium"`.
+  It streams `VERSION` and `frontend/` into a container, runs `npm ci` there
+  with `--engine-strict=false` because the image's Node is not the version
+  `engines` pins, and copies `frontend/test-results` back. It needs Docker, a
+  POSIX shell such as Git Bash, and network access for `apt-get` and `npm`, so
+  it is not part of `make ci-local`. Run it after changing text, spacing, or
+  sizing that a spec asserts on.
 - In a checkout without `frontend/node_modules`, `npx prettier` downloads the
   latest Prettier instead of the pinned one and `npx tsc` resolves to an
   unrelated package. Run `npm ci` in `frontend/` first.
@@ -608,25 +640,15 @@ HTTP bodies, request timeouts, polling, and Docker commands are bounded.
 - Check `git status`.
 - Review staged changes for secrets, real source details, private paths, logs,
   databases, and runtime data.
-- Update public docs for behavior changes.
+- Update public docs and README links for behavior changes.
 
 ## Suggested Routine
 
-For a backend-only change:
-
-1. Run `cd backend && go test ./...`
-2. Review affected public docs.
-3. Check git-tracked changes for sensitive paths or data.
-
-For a frontend-facing change:
-
-1. Run backend tests if API behavior changed.
-2. Run frontend lint, unit tests, and the production build.
-3. Run the relevant Playwright project for interaction changes.
-4. Check the affected product docs and README links.
+Run backend tests when backend or API behavior changed. For a frontend-facing
+change, run frontend lint, unit tests, and the production build, plus the
+relevant Playwright project for interaction changes.
 
 ## Related Docs
 
-- [Local development](local-dev.md)
-- [Secure development](security.md)
-- [Commit and release](commit-and-release.md)
+[Local development](local-dev.md), [Secure development](security.md), and
+[Commit and release](commit-and-release.md).

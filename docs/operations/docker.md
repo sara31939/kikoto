@@ -46,7 +46,7 @@ default Compose mapping publishes it as host port `7655` on every host
 interface. For a
 host-only instance, change it to `127.0.0.1:7655:7659`. Otherwise protect the
 port with a host firewall, trusted VPN, or reverse proxy. Production requires
-sign-in by default; enabling anonymous access under Settings -> Users intentionally
+sign-in by default; enabling anonymous access under System -> Users intentionally
 exposes Library and media reads to every client that can reach the port.
 
 Default mounts:
@@ -54,6 +54,7 @@ Default mounts:
 - `./config:/config`
 - `./cache:/cache`
 - `./data:/data`
+- `./record:/record`
 
 ## Container Isolation
 
@@ -68,7 +69,7 @@ or unreadable, and deleting, Fetch, and scans of it fail with a permission
 error. Demo adds no capability: give the root user (uid 0) write access to its
 config and cache folders and read access to its data folder.
 
-`/config`, `/cache`, and the production `/data` mount remain writable; durable
+`/config`, `/cache`, and the production `/data` and `/record` mounts remain writable; durable
 Fetch transaction directories stay on the target storage filesystem, and large
 [temporary files](configuration.md#temporary-files) go to `/cache` rather than
 `/tmp`. Demo keeps its data mount read-only. Limit host access to the
@@ -98,13 +99,16 @@ runtime settings. The production stack uses these deployment defaults:
 | `KIKOTO_HTTP_ADDR` | `0.0.0.0:7659` |
 | `KIKOTO_DB_PATH` | `/config/kikoto.db` |
 | `KIKOTO_DATA_ROOT` | `/data` |
+| `KIKOTO_RECORD_ROOT` | `/record` |
 | `KIKOTO_CACHE_ROOT` | `/cache` |
 | `KIKOTO_STATIC_DIR` | `/app/static` |
 
 Path variables refer to paths **inside the container** and do not change host
-bind mounts. Keep the database and its backups under `/config`, durable media
-and Fetch staging/backup/trash under `/data`, and disposable cache under
-`/cache`. In storage pool mode, mount each disk or cloud drive at its own
+bind mounts. Keep the database and its backups under `/config`, durable audio
+media and Fetch staging/backup/trash under `/data`, the independent record
+library under `/record`, and disposable cache under `/cache`. The record root
+is not a storage pool and must carry its `.kikoto-record` marker before scans
+can index it. In storage pool mode, mount each disk or cloud drive at its own
 first-level folder such as `/data/disk1`; Fetch then keeps its staging, backup,
 and trash inside that pool, so a pool must be one filesystem that supports
 renames. See [Storage pools](../user/en/getting-started.md#storage-pools). Keep
@@ -155,7 +159,7 @@ has no Intel driver.
 
    The list should include `VAProfileH264Main` or `VAProfileH264High` with
    `VAEntrypointEncSlice` or `VAEntrypointEncSliceLP`.
-3. In **Settings → Cache & Fetch**, choose **Intel VA-API** as the hardware
+3. In **System → Cache & Fetch**, choose **Intel VA-API** as the hardware
    encoder and save. Change the render device only when the host has several
    GPUs; `ls /dev/dri` on the host lists them.
 
@@ -281,7 +285,7 @@ refuses every other destination, so no request leaves the container. The
 Library shows a notice above the source stating that it is simulated and not a
 real server. Demo also refreshes a completed example
 for each workflow, plus one running and three attention-needed examples with
-illustrative jobs. These Activity details are synthetic; no example job is
+illustrative jobs. These run details are synthetic; no example job is
 executed. The running example has no live elapsed-time clock or job event
 stream, so it can remain visible during a long-lived Demo deployment. Actual
 `demo_library_scan` runs stay in the isolated database
@@ -306,7 +310,7 @@ library-read and playback permissions, but Demo GET/HEAD/OPTIONS requests may
 read every administration, workflow, activity, source, and user surface so the
 deployment can be demonstrated. Mutation requests are rejected before the
 handler runs; the remote recommendation POST only computes read-only
-[simulated scores](../architecture/data-model.md#recommendation-catalog-and-generations).
+[simulated scores](../architecture/data-model/recommendations.md#recommendation-catalog-and-generations).
 The frontend exposes workflow editing and Fetch selection as
 local previews; Save, Delete, Publish Fetch, health checks, and other writes
 never reach the backend.

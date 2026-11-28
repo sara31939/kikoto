@@ -3,6 +3,10 @@
 ## Current Guarantees
 
 - Local and cached media remain inspectable when a remote source is offline.
+- The independent record library keeps indexed folders and assets when its root
+  is unmounted, missing its marker, or unreadable. A complete online record scan
+  reconciles missing rows; a cancelled or partial scan does not reconcile rows
+  it could not observe.
 - Source outages are scoped to the affected source.
 - Batch source availability checks probe source health before per-work checks.
 - Remote downloads use configurable delay and backoff. Media streams into a
@@ -36,7 +40,7 @@
   canonical work reuse one queued or running run.
 - Fetch, remote playback cache, and cache/local location deletion run as durable
   recoverable jobs with lease heartbeats and restart checkpoints.
-- Fetch Activity records transferred bytes, the known byte total, and the
+- A Fetch run records transferred bytes, the known byte total, and the
   count of selected downloads whose size is still unknown. It shows a
   percentage only when every remaining transfer has a known total.
 - Fetch staging, backup, and trash live at the root of the pool that holds the
@@ -55,7 +59,13 @@
   root. Publication refuses to replace an existing backup. The manifest
   completes in the same transaction that retires the work's `remote_stream`
   rows, so registration can always be repeated. A Fetch that startup recovery
-  cannot finish is logged and recorded in Activity without stopping startup.
+  cannot finish is logged and recorded in its run without stopping startup.
+- **Local works** moves a work's folders into
+  `.kikoto-staging/<run-id>/cleanup` on their own pools before deleting them,
+  so a folder the system will not let go of leaves every folder of the work
+  in place. A folder an interrupted run left there is deleted by its retry or
+  returned when the run is cancelled; one that cannot be returned stays there
+  and is named in the protected logs.
 - A single cache/local deletion and a mixed batch deletion use the same queued
   workflow. Deleting a local location preserves work progress and listening
   marks.
@@ -83,8 +93,8 @@
   `.kikoto-pool` marker. A standard data root without one is adopted only when
   it visibly holds media or the library has no local works yet; an empty root
   of a library with works is an unmounted volume, so the scan fails without
-  marking anything missing. In pool mode an unmarked or foreign-marked pool is
-  offline: its works keep their state, the scan finishes as partial, and the
+  marking anything missing. In pool mode an unmarked, foreign-marked, or linked
+  pool is offline: its works keep their state, the scan finishes as partial, and the
   watcher ignores unregistered first-level folders. Works deeper than the scan
   depth are never marked missing either, and scans always reach at least the
   deepest Fetch folder level. Disk-verified database cleanup confirms absence
@@ -92,6 +102,17 @@
 - Local scan completion is independent of metadata-provider latency or failure.
   Its optional, disabled-by-default metadata follow-up creates a separate run
   after scan completion, with its own retry and review state.
+
+Record scans use the durable `record_library_scan` workflow and coalesce while
+one scan is queued or running. Discovery stores one row per folder and regular
+file, skips links and transaction directories, and classifies assets by the
+bounded extension set documented in the [record library](../architecture/record-library.md).
+A scan ends with its walk and queues no reading of media details. An opened
+folder's pending files are read behind its listing; the durable
+`record_media_probe` run, started by hand or by a trigger, reads the whole
+library, resumes from its checkpoint after a restart, and yields the workflow
+executor to other queued jobs between files. Neither reads a file while the
+record root is unmounted or holds another disk.
 
 ## Limits
 

@@ -19,7 +19,7 @@ func recommendationEvidenceStrength(units int) float64 {
 const recommendationFavoriteEvidence = 100
 
 func recommendationTagSpecificity(frequency, total int) float64 {
-	return 1 - 0.5*float64(frequency)/float64(maxInt(1, total))
+	return 1 - 0.5*float64(frequency)/float64(max(1, total))
 }
 
 // recommendationFeedback is what one work's personal state says about taste.
@@ -106,11 +106,4 @@ type RecommendationAffinity struct {
 	Tags    float64 `json:"tags"`
 	Voices  float64 `json:"voices"`
 	Circles float64 `json:"circles"`
-}
-
-func recommendationDiversityProjection(generationID int64) string {
-	if generationID > 0 {
-		return "COALESCE(recommendation_snapshot.diversity_penalty, 0)"
-	}
-	return "0"
 }

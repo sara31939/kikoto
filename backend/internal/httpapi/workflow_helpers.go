@@ -29,7 +29,7 @@ func (s *Server) recordWorkflowRunEvent(ctx context.Context, runID int64, level 
 func decodeWorkflowTriggerPayload(w http.ResponseWriter, r *http.Request) (workflowTriggerPayload, bool) {
 	var payload workflowTriggerPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body", false)
 		return payload, false
 	}
 	payload.DisplayName = strings.TrimSpace(payload.DisplayName)
@@ -64,21 +64,52 @@ func validateWorkflowTriggerPayload(payload workflowTriggerPayload) error {
 	return nil
 }
 
-func (s *Server) ensureUniqueWorkflowStartupTrigger(ctx context.Context, definitionID, excludeTriggerID int64, triggerType string) error {
-	if triggerType != "startup" {
+// ensureUniqueWorkflowTrigger enforces how many automatic triggers a workflow
+// holds: one startup and one After trigger per definition, except the source
+// presence check, which holds one startup and one interval trigger per source.
+// It reads the source from the prepared, normalized config.
+func (s *Server) ensureUniqueWorkflowTrigger(ctx context.Context, definition workflowDefinitionRecord, excludeTriggerID int64, triggerType string, preparedConfigJSON string) error {
+	if definition.Code == sourcePresenceCheckWorkflowCode {
+		if triggerType != "startup" && triggerType != "schedule" {
+			return nil
+		}
+		options, err := normalizeSourcePresenceCheckTriggerConfig(preparedConfigJSON)
+		if err != nil {
+			return err
+		}
+		var count int
+		if err := s.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM workflow_trigger
+			WHERE workflow_definition_id = ? AND trigger_type = ? AND id != ?
+				AND json_extract(config_json, '$.sourceId') = ?
+		`, definition.ID, triggerType, excludeTriggerID, options.SourceID).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			return nil
+		}
+		if triggerType == "startup" {
+			return fmt.Errorf("source already has a startup check")
+		}
+		return fmt.Errorf("source already has an interval check")
+	}
+	if triggerType != "startup" && triggerType != workflow.AfterWorkflowTriggerType {
 		return nil
 	}
 	var count int
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_trigger
-		WHERE workflow_definition_id = ? AND trigger_type = 'startup' AND id != ?
-	`, definitionID, excludeTriggerID).Scan(&count); err != nil {
+		WHERE workflow_definition_id = ? AND trigger_type = ? AND id != ?
+	`, definition.ID, triggerType, excludeTriggerID).Scan(&count); err != nil {
 		return err
 	}
-	if count > 0 {
+	if count == 0 {
+		return nil
+	}
+	if triggerType == "startup" {
 		return fmt.Errorf("workflow already has a startup trigger")
 	}
-	return nil
+	return fmt.Errorf("workflow already has an after trigger")
 }
 
 func allowedCandidateReviewStatus(status string) bool {
@@ -119,6 +150,8 @@ func normalizeOptionalString(value *string) any {
 func mergeJSONObjects(raw string, patch map[string]any) map[string]any {
 	result := map[string]any{}
 	if strings.TrimSpace(raw) != "" {
+		// Tolerant: cancelling a run must not fail on its unreadable summary,
+		// which then keeps only the patch.
 		_ = json.Unmarshal([]byte(raw), &result)
 	}
 	for key, value := range patch {

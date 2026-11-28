@@ -28,7 +28,7 @@ func (s *Server) streamWorkflowRunEvents(w http.ResponseWriter, r *http.Request)
 	}
 	id, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid workflow run id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid workflow run id", false)
 		return
 	}
 	if !s.requireWorkflowRunAccess(w, r, actor, id) {
@@ -36,12 +36,12 @@ func (s *Server) streamWorkflowRunEvents(w http.ResponseWriter, r *http.Request)
 	}
 	afterID, err := workflowEventCursor(r)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid workflow event cursor"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid workflow event cursor", false)
 		return
 	}
 	if _, err := s.workflowStore.LoadRun(r.Context(), id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workflow run not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "workflow run not found", false)
 			return
 		}
 		writeError(w, err)
@@ -63,6 +63,12 @@ func (s *Server) streamWorkflowRunEvents(w http.ResponseWriter, r *http.Request)
 	lastTickAt := time.Time{}
 	redactor := s.remoteAddressRedactorFor(r.Context())
 	writeUpdate := func(forceTick bool) (string, error) {
+		// The status is read before the events, so every event written before
+		// a terminal status is sent before the stream closes on that status.
+		run, err := s.workflowStore.LoadRun(r.Context(), id)
+		if err != nil {
+			return "", err
+		}
 		events, err := s.workflowStore.ListEventsAfter(r.Context(), id, lastEventID)
 		if err != nil {
 			return "", err
@@ -81,10 +87,6 @@ func (s *Server) streamWorkflowRunEvents(w http.ResponseWriter, r *http.Request)
 			}
 		}
 
-		run, err := s.workflowStore.LoadRun(r.Context(), id)
-		if err != nil {
-			return "", err
-		}
 		terminal := !isActiveWorkflowRunStatus(run.Status)
 		if forceTick || terminal || lastTickAt.IsZero() || time.Since(lastTickAt) >= workflowEventStreamTickInterval {
 			payload, marshalErr := json.Marshal(map[string]any{

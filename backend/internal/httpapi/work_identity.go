@@ -173,19 +173,19 @@ func (s *Server) workEditionVisibleInLibrary(ctx context.Context, workID int64) 
 func (s *Server) resolveWorkCode(w http.ResponseWriter, r *http.Request) {
 	code := normalizeWorkCode(r.PathValue("code"))
 	if code == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work code"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work code", false)
 		return
 	}
 	resolved, err := s.resolveWorkCodeDetail(r.Context(), code)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
 		writeError(w, err)
 		return
 	}
-	if !s.requireDemoWork(w, r, resolved.WorkID) {
+	if !s.requireDemoWork(w, r, resolved.WorkID) || s.refuseRemoteOnlyWork(w, r, resolved.WorkID) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resolved)

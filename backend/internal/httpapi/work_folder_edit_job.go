@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/yexca/kikoto/backend/internal/localfs"
+	"github.com/yexca/kikoto/backend/internal/workflow"
 )
 
 type workFolderEditJobPayload struct {
@@ -32,9 +34,11 @@ type workFolderEditJobPayload struct {
 	// Merges are deleted once the folder is indexed, with the files each held
 	// when the edit was planned.
 	Merges []workFolderEditMerge `json:"merges,omitempty"`
-	// Assignments are stored once the folder is indexed.
-	Assignments []workFolderEditAssignment `json:"assignments,omitempty"`
-	RequestID   string                     `json:"request_id"`
+	// LegacyLyricsAssignments are the track bindings of added lyrics an edit
+	// queued while edits still bound lyrics to tracks. Lyrics are bound only
+	// through Lyrics files, so they are reported rather than stored.
+	LegacyLyricsAssignments []json.RawMessage `json:"assignments,omitempty"`
+	RequestID               string            `json:"request_id"`
 	// Summary is the summary of the plan the edit was queued with.
 	Summary *workFolderEditSummary `json:"summary,omitempty"`
 }
@@ -69,9 +73,6 @@ func workFolderEditPermissions(payload workFolderEditJobPayload) []string {
 			break
 		}
 	}
-	if len(payload.Assignments) > 0 {
-		permissions = append(permissions, "library:write")
-	}
 	return permissions
 }
 
@@ -105,7 +106,6 @@ type workFolderEditExecution struct {
 	targetAbs  string
 	progress   int
 	total      int
-	assigned   int
 	// node is the step an error belongs to.
 	node string
 }
@@ -113,11 +113,11 @@ type workFolderEditExecution struct {
 func (s *Server) executeWorkFolderEditJob(ctx context.Context, job workflowJobRecord) error {
 	execution := &workFolderEditExecution{server: s, job: job, node: "stage"}
 	if err := decodeWorkflowJobPayload(job.PayloadJSON, &execution.payload); err != nil {
-		_ = s.failClaimedWorkflowJob(context.WithoutCancel(ctx), job, err.Error())
+		s.failJobOrLog(context.WithoutCancel(ctx), job, err.Error())
 		return err
 	}
 	if err := decodeWorkflowJobCheckpointDetail(job.CheckpointJSON, &execution.checkpoint); err != nil {
-		_ = s.failClaimedWorkflowJob(context.WithoutCancel(ctx), job, err.Error())
+		s.failJobOrLog(context.WithoutCancel(ctx), job, err.Error())
 		return err
 	}
 	execution.total = workFolderEditProgressTotal(execution.payload)
@@ -172,7 +172,9 @@ func (s *Server) settleCancelledWorkFolderEdit(ctx context.Context, runID int64)
 	// A settlement that started finishes, so a stop never leaves it between
 	// moved files.
 	ctx = context.WithoutCancel(ctx)
-	defer func() { _ = s.restoreMediaCleanupFolders(ctx, runID) }()
+	defer func() {
+		logWorkflowWriteError(ctx, "restore cleanup folders", workflowJobRecord{RunID: runID, WorkerType: workFolderEditWorkerType}, s.restoreMediaCleanupFolders(ctx, runID))
+	}()
 	execution := &workFolderEditExecution{server: s}
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, workflow_run_id, payload_json, checkpoint_json FROM workflow_job
@@ -288,11 +290,6 @@ func (e *workFolderEditExecution) run(ctx context.Context) error {
 	if err := e.index(ctx); err != nil {
 		return err
 	}
-	assigned, err := s.declareWorkFolderEditAssignments(ctx, e.payload)
-	if err != nil {
-		return err
-	}
-	e.assigned = assigned
 	e.node = "merge"
 	if err := e.mergeFolders(ctx); err != nil {
 		return err
@@ -504,11 +501,11 @@ func (e *workFolderEditExecution) remove(ctx context.Context) error {
 		}
 		// A removal that started is recorded even if the service stops next.
 		statusCtx := context.WithoutCancel(ctx)
-		deleted, err := s.clearLocalMediaLocation(statusCtx, target.LocationID, target.Path)
+		setAside, err := e.setAsideRemoval(statusCtx, index, target)
 		if err != nil {
 			return err
 		}
-		if deleted {
+		if setAside {
 			e.checkpoint.Deleted++
 		}
 		removed[key] = true
@@ -522,6 +519,139 @@ func (e *workFolderEditExecution) remove(ctx context.Context) error {
 	return s.updateRemoteFetchPhaseNode(ctx, e.job.RunID, "remove", "succeeded", map[string]any{
 		"locations": len(e.payload.Removals), "deleted": e.checkpoint.Deleted,
 	})
+}
+
+func (e *workFolderEditExecution) removedPath(index int) string {
+	return filepath.Join(e.stagingAbs, fmt.Sprintf("r%06d", index))
+}
+
+// setAsideRemoval moves a removed file into the staging folder, which lies on
+// the folder's own filesystem, and marks its location unavailable. The file
+// is deleted with the staging folder once the edit succeeds, and a failed or
+// cancelled edit puts it back. It reports whether a file was set aside.
+func (e *workFolderEditExecution) setAsideRemoval(ctx context.Context, index int, target mediaCleanupTarget) (bool, error) {
+	s := e.server
+	if err := s.ensureLibraryPathOnline(ctx, target.Path); err != nil {
+		return false, err
+	}
+	source, err := validateDestructivePath(s.cfg.DataRoot, target.Path, true, false)
+	if err != nil {
+		return false, err
+	}
+	staged := e.removedPath(index)
+	info, err := os.Lstat(source)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// Gone already, or set aside before the checkpoint was written.
+		_, stagedErr := os.Lstat(staged)
+		if stagedErr != nil && !errors.Is(stagedErr, os.ErrNotExist) {
+			return false, stagedErr
+		}
+		return stagedErr == nil, e.markRemovalAvailability(ctx, target.LocationID, "unavailable")
+	case err != nil:
+		return false, err
+	case unsafeFetchStagingEntry(info):
+		return false, fmt.Errorf("refusing to remove symbolic link or reparse point: %s", target.Path)
+	case !info.Mode().IsRegular():
+		return false, fmt.Errorf("refusing to remove non-regular file: %s", target.Path)
+	}
+	if err := os.MkdirAll(e.stagingAbs, 0o755); err != nil {
+		return false, err
+	}
+	if err := renameNoReplace(source, staged); err != nil {
+		return false, err
+	}
+	return true, e.markRemovalAvailability(ctx, target.LocationID, "unavailable")
+}
+
+func (e *workFolderEditExecution) markRemovalAvailability(ctx context.Context, locationID int64, availability string) error {
+	return withDatabaseBusyRetry(ctx, func() error {
+		_, err := e.server.db.ExecContext(ctx, `UPDATE media_file_location SET availability = ?,
+			last_checked_at = CURRENT_TIMESTAMP WHERE id = ? AND location_type = 'local'`, availability, locationID)
+		return err
+	})
+}
+
+// putBackRemovals returns each removed file the edit set aside to its place,
+// whether or not its checkpoint was written,
+// and makes its location available again. A file whose place another file
+// took since stays set aside, and the staging folder keeps it. It returns how
+// many files stay set aside.
+func (e *workFolderEditExecution) putBackRemovals(ctx context.Context) int {
+	if e.stagingAbs == "" || len(e.payload.Removals) == 0 {
+		return 0
+	}
+	// Every removal is checked, not only the ones the checkpoint lists: the
+	// rename into staging comes before its checkpoint, so a failure or a stop
+	// in between leaves a set-aside file the checkpoint does not name.
+	removed := stringSet(e.checkpoint.Removed)
+	remaining := make([]string, 0, len(e.checkpoint.Removed))
+	kept := 0
+	for index, target := range e.payload.Removals {
+		key := mediaCleanupTargetKey(target)
+		restored, err := e.putBackRemoval(ctx, index, target)
+		if err != nil {
+			slog.Error("work folder edit could not put a removed file back", "run_id", e.job.RunID, "path", target.Path, "error", err)
+			remaining = append(remaining, key)
+			kept++
+			continue
+		}
+		if restored && removed[key] && e.checkpoint.Deleted > 0 {
+			e.checkpoint.Deleted--
+		}
+	}
+	e.checkpoint.Removed = remaining
+	if err := e.saveCheckpoint(context.WithoutCancel(ctx), "remove"); err != nil {
+		slog.Warn("save work folder edit checkpoint", "run_id", e.job.RunID, "error", err)
+	}
+	return kept
+}
+
+func (e *workFolderEditExecution) putBackRemoval(ctx context.Context, index int, target mediaCleanupTarget) (bool, error) {
+	staged := e.removedPath(index)
+	if _, err := os.Lstat(staged); errors.Is(err, os.ErrNotExist) {
+		// The file was already gone when the edit removed it.
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	source, err := validateDestructivePath(e.server.cfg.DataRoot, target.Path, true, false)
+	if err != nil {
+		return false, err
+	}
+	if err := mkdirPlainDirectories(e.targetAbs, filepath.Dir(source)); err != nil {
+		return false, err
+	}
+	if err := renameNoReplace(staged, source); errors.Is(err, os.ErrExist) {
+		if e.pathTakenByEdit(target.Path) {
+			// The file the edit chose to replace it with holds its path, so
+			// the replaced file has nowhere to return and goes as decided.
+			return false, os.Remove(staged)
+		}
+		return false, errors.New("another file took its place")
+	} else if err != nil {
+		return false, err
+	}
+	return true, e.markRemovalAvailability(ctx, target.LocationID, "available")
+}
+
+// pathTakenByEdit reports whether a file this edit added or moved now holds
+// the path.
+func (e *workFolderEditExecution) pathTakenByEdit(path string) bool {
+	key := fetchTargetKey(path)
+	published := stringSet(e.checkpoint.Published)
+	for _, item := range e.payload.Items {
+		if published[item.ItemKey] && fetchTargetKey(item.TargetPath) == key {
+			return true
+		}
+	}
+	placed := int64Set(e.checkpoint.Placed)
+	for _, move := range e.payload.Moves {
+		if placed[move.LocationID] && fetchTargetKey(move.TargetPath) == key {
+			return true
+		}
+	}
+	return false
 }
 
 // checkWorkFolderEditRemoval refuses to remove a file that changed since the
@@ -575,7 +705,7 @@ func (e *workFolderEditExecution) publish(ctx context.Context) error {
 		if err := s.ensureWorkflowRunActive(ctx, e.job.RunID); err != nil {
 			return err
 		}
-		if item.Language != nil && !lyricsRootReady {
+		if !lyricsRootReady && targetInLyricsRoot(e.payload.TargetRoot, item.TargetPath) {
 			// Kikoto creates and marks its lyrics folder, and never writes
 			// lyrics into a folder of that name it did not create.
 			if err := ensureLyricsRoot(e.targetAbs); err != nil {
@@ -1017,9 +1147,12 @@ func (e *workFolderEditExecution) finish(ctx context.Context) error {
 		"added":     len(e.checkpoint.Published),
 		"removed":   len(e.checkpoint.Removed),
 		"deleted":   e.checkpoint.Deleted,
-		"assigned":  e.assigned,
 		"work_id":   e.payload.WorkID,
 		"folder_id": e.payload.FolderID,
+	}
+	unbound := len(e.payload.LegacyLyricsAssignments)
+	if unbound > 0 {
+		summary["lyrics_bindings_not_stored"] = unbound
 	}
 	tx, err := beginTxWithDatabaseBusyRetry(ctx, s.db)
 	if err != nil {
@@ -1035,6 +1168,14 @@ func (e *workFolderEditExecution) finish(ctx context.Context) error {
 	}
 	if err := finishWorkflowRunResultTx(ctx, tx, e.job.RunID, e.job.ID, "succeeded", "", e.total, e.total, mustJSON(summary)); err != nil {
 		return err
+	}
+	if unbound > 0 {
+		if err := workflow.InsertEvent(ctx, tx, e.job.RunID, workflow.EventSpec{
+			JobID: e.job.ID, Level: "warn", Type: "work_folder_edit.lyrics_bindings_not_stored",
+			Message: fmt.Sprintf("The lyrics were added, but %d track bindings chosen before the update were not stored; bind lyrics to tracks in Lyrics files", unbound),
+		}); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -1061,7 +1202,7 @@ func summarizeWorkFolderEditPayload(payload workFolderEditJobPayload) workFolder
 }
 
 // removeStaging deletes the run's staging directory, which holds only what
-// this run collected.
+// this run collected and the files a successful edit removed.
 func (e *workFolderEditExecution) removeStaging() {
 	if e.stagingAbs == "" {
 		return
@@ -1135,11 +1276,11 @@ func (e *workFolderEditExecution) putBackMove(index int, move workFolderEditMove
 	return nil
 }
 
-// discardStaging puts lifted files back and deletes what the run collected.
-// A moved file that could not go back keeps the staging folder, so it is never
-// deleted; it returns how many such files there are.
+// discardStaging puts lifted and removed files back and deletes what the run
+// collected. A moved or removed file that could not go back keeps the staging
+// folder, so it is never deleted; it returns how many such files there are.
 func (e *workFolderEditExecution) discardStaging(ctx context.Context) int {
-	kept := e.putBackLiftedMoves(ctx)
+	kept := e.putBackLiftedMoves(ctx) + e.putBackRemovals(ctx)
 	if kept == 0 {
 		e.removeStaging()
 		return 0
@@ -1170,19 +1311,20 @@ func (e *workFolderEditExecution) fail(ctx context.Context, runErr error) error 
 		// keeps its result.
 		if runStatus == "cancelled" {
 			e.discardStaging(statusCtx)
-			_ = s.restoreMediaCleanupFolders(statusCtx, e.job.RunID)
+			logWorkflowWriteError(statusCtx, "restore cleanup folders", e.job, s.restoreMediaCleanupFolders(statusCtx, e.job.RunID))
 		}
 		return runErr
 	}
 	kept := 0
 	if willRetry := isRetryableWorkflowError(runErr) && e.job.RetryCount < e.job.MaxRetries; willRetry {
-		// A queued retry can still be cancelled, so it holds no moved file.
-		kept = e.putBackLiftedMoves(statusCtx)
+		// A queued retry can still be cancelled, so it holds no moved or
+		// removed file.
+		kept = e.putBackLiftedMoves(statusCtx) + e.putBackRemovals(statusCtx)
 	} else {
 		kept = e.discardStaging(statusCtx)
 		// A merged folder the edit had started to delete is a folder of the
 		// work again, holding whatever it still holds.
-		_ = s.restoreMediaCleanupFolders(statusCtx, e.job.RunID)
+		logWorkflowWriteError(statusCtx, "restore cleanup folders", e.job, s.restoreMediaCleanupFolders(statusCtx, e.job.RunID))
 	}
 	slog.Error("work folder edit failed", "run_id", e.job.RunID, "job_id", e.job.ID, "step", e.node, "error", runErr)
 	tx, err := beginTxWithDatabaseBusyRetry(statusCtx, s.db)
@@ -1192,7 +1334,7 @@ func (e *workFolderEditExecution) fail(ctx context.Context, runErr error) error 
 	defer func() { _ = tx.Rollback() }()
 	message := runErr.Error()
 	if kept > 0 {
-		message = fmt.Sprintf("%s; %d moved files could not return to their place and wait in the edit's staging folder for a retry", message, kept)
+		message = fmt.Sprintf("%s; %d moved or removed files could not return to their place and wait in the edit's staging folder for a retry", message, kept)
 	}
 	if _, err := tx.ExecContext(statusCtx, `
 		UPDATE workflow_node_run

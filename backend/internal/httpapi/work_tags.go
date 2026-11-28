@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+
+	"github.com/yexca/kikoto/backend/internal/personal"
 )
 
 const maxWorkUserTags = 50
@@ -36,12 +38,12 @@ func (s *Server) setWorkUserTags(w http.ResponseWriter, r *http.Request) {
 	}
 	workID, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work id", false)
 		return
 	}
 	if err := s.requireWorkExists(r.Context(), workID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
 		writeError(w, err)
@@ -51,14 +53,21 @@ func (s *Server) setWorkUserTags(w http.ResponseWriter, r *http.Request) {
 		Tags []string `json:"tags"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body", false)
 		return
 	}
 	if len(payload.Tags) > maxWorkUserTags {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "too many work tags"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "too many work tags", false)
 		return
 	}
-	tags, err := s.replaceWorkUserTags(r.Context(), user.ID, workID, payload.Tags)
+	// Personal tags belong to the family's canonical work, also when the
+	// request names an edition.
+	stateWorkID, err := s.canonicalWorkID(r.Context(), workID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	tags, err := s.replaceWorkUserTags(r.Context(), user.ID, stateWorkID, payload.Tags)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -143,8 +152,15 @@ func (s *Server) addWorkUserTag(ctx context.Context, userID int64, workIDs []int
 	}
 	added := 0
 	seen := map[int64]bool{}
-	for _, workID := range workIDs {
-		if workID <= 0 || seen[workID] {
+	for _, requestedID := range workIDs {
+		if requestedID <= 0 {
+			continue
+		}
+		workID, err := personal.CanonicalWorkID(ctx, tx, requestedID)
+		if err != nil {
+			return 0, err
+		}
+		if seen[workID] {
 			continue
 		}
 		seen[workID] = true
@@ -166,7 +182,13 @@ func (s *Server) addWorkUserTag(ctx context.Context, userID int64, workIDs []int
 	return added, nil
 }
 
+// loadWorkUserTags reads the personal tags of a work's family, which its
+// canonical work holds.
 func (s *Server) loadWorkUserTags(ctx context.Context, userID int64, workID int64) ([]workUserTag, error) {
+	workID, err := s.canonicalWorkID(ctx, workID)
+	if err != nil {
+		return nil, err
+	}
 	tagsByWork, err := s.loadWorkUserTagsBatch(ctx, userID, []int64{workID})
 	if err != nil {
 		return nil, err
@@ -174,7 +196,21 @@ func (s *Server) loadWorkUserTags(ctx context.Context, userID int64, workID int6
 	return tagsByWork[workID], nil
 }
 
+// loadWorkUserTagsBatch reads each work's personal tags from its family's
+// canonical work, keyed by the requested work.
 func (s *Server) loadWorkUserTagsBatch(ctx context.Context, userID int64, workIDs []int64) (map[int64][]workUserTag, error) {
+	canonical, unique, err := s.canonicalWorkIDs(ctx, workIDs)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := s.loadStoredWorkUserTags(ctx, userID, unique)
+	if err != nil {
+		return nil, err
+	}
+	return byRequestedWork(workIDs, canonical, tags, func() []workUserTag { return []workUserTag{} }), nil
+}
+
+func (s *Server) loadStoredWorkUserTags(ctx context.Context, userID int64, workIDs []int64) (map[int64][]workUserTag, error) {
 	result := make(map[int64][]workUserTag, len(workIDs))
 	unique := make([]int64, 0, len(workIDs))
 	seen := map[int64]bool{}

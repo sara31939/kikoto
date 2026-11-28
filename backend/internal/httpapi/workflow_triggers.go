@@ -21,6 +21,7 @@ var allowedScheduledTriggerTypes = map[string]bool{
 	"schedule":         true,
 	"filesystem_event": true,
 	"source_poll":      true,
+	"after_workflow":   true,
 }
 
 func (s *Server) ensureSystemWorkflowDefinitions(ctx context.Context) error {
@@ -73,6 +74,8 @@ var systemWorkflowSpecs = []systemWorkflowSpec{
 	rankingWorkflowSpec(remoteRankingWorkflowCode),
 	shownWorksWorkflowSpec(shownWorksMetadataSyncWorkflowCode),
 	shownWorksWorkflowSpec(shownWorksSourceCheckWorkflowCode),
+	recordScanWorkflowSpec(),
+	recordProbeWorkflowSpec(),
 	{
 		Code:        "local_library_scan",
 		Name:        "Scan local library",
@@ -212,29 +215,29 @@ func (s *Server) createWorkflowTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validateWorkflowTriggerPayload(payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	definition, err := s.loadWorkflowDefinition(r.Context(), payload.WorkflowDefinitionID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "workflow definition not found"})
+			writeAPIError(w, http.StatusBadRequest, "invalid_request", "workflow definition not found", false)
 			return
 		}
 		writeError(w, err)
 		return
 	}
 	if !canUseWorkflowDefinition(actor, definition) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "workflow definition belongs to another user"})
-		return
-	}
-	if err := s.ensureUniqueWorkflowStartupTrigger(r.Context(), payload.WorkflowDefinitionID, 0, payload.TriggerType); err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusForbidden, "permission_denied", "workflow definition belongs to another user", false)
 		return
 	}
 	prepared, err := s.prepareWorkflowTrigger(r.Context(), actor, definition, payload, time.Now().UTC(), nil)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
+		return
+	}
+	if err := s.ensureUniqueWorkflowTrigger(r.Context(), definition, 0, payload.TriggerType, prepared.ConfigJSON); err != nil {
+		writeAPIError(w, http.StatusConflict, "conflict", err.Error(), false)
 		return
 	}
 	enabled := true
@@ -272,7 +275,7 @@ func (s *Server) updateWorkflowTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid workflow trigger id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid workflow trigger id", false)
 		return
 	}
 	current, currentDefinition, err := s.loadWorkflowTriggerUpdateContext(r.Context(), actor, id)
@@ -285,7 +288,7 @@ func (s *Server) updateWorkflowTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validateWorkflowTriggerPayload(payload); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	current, prepared, enabled, err := s.prepareWorkflowTriggerUpdate(r.Context(), actor, id, current, currentDefinition, payload)
@@ -315,7 +318,8 @@ func (err *workflowTriggerUpdateHTTPError) Error() string { return err.message }
 func writeWorkflowTriggerUpdateError(w http.ResponseWriter, err error) {
 	var httpErr *workflowTriggerUpdateHTTPError
 	if errors.As(err, &httpErr) {
-		writeJSON(w, httpErr.status, map[string]string{"error": httpErr.message})
+		code, retryable := defaultErrorClassification(httpErr.status)
+		writeAPIError(w, httpErr.status, code, httpErr.message, retryable)
 		return
 	}
 	writeError(w, err)
@@ -375,12 +379,12 @@ func (s *Server) prepareWorkflowTriggerUpdate(ctx context.Context, actor current
 	if payload.TriggerType == "filesystem_event" && current.TriggerType != "filesystem_event" {
 		return workflowTriggerRecord{}, preparedWorkflowTrigger{}, false, workflowTriggerUpdateHTTPErrorf(http.StatusConflict, "filesystem watching is a fixed trigger for the local library scan")
 	}
-	if err := s.ensureUniqueWorkflowStartupTrigger(ctx, payload.WorkflowDefinitionID, id, payload.TriggerType); err != nil {
-		return workflowTriggerRecord{}, preparedWorkflowTrigger{}, false, workflowTriggerUpdateHTTPErrorf(http.StatusConflict, "%s", err)
-	}
 	prepared, err := s.prepareWorkflowTrigger(ctx, actor, definition, payload, time.Now().UTC(), &current)
 	if err != nil {
 		return workflowTriggerRecord{}, preparedWorkflowTrigger{}, false, workflowTriggerUpdateHTTPErrorf(http.StatusBadRequest, "%s", err)
+	}
+	if err := s.ensureUniqueWorkflowTrigger(ctx, definition, id, payload.TriggerType, prepared.ConfigJSON); err != nil {
+		return workflowTriggerRecord{}, preparedWorkflowTrigger{}, false, workflowTriggerUpdateHTTPErrorf(http.StatusConflict, "%s", err)
 	}
 	enabled := payload.Enabled == nil || *payload.Enabled
 	return current, prepared, enabled, nil
@@ -463,13 +467,13 @@ func (s *Server) deleteWorkflowTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid workflow trigger id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid workflow trigger id", false)
 		return
 	}
 	current, err := s.loadWorkflowTrigger(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "workflow trigger not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "workflow trigger not found", false)
 			return
 		}
 		writeError(w, err)
@@ -481,23 +485,23 @@ func (s *Server) deleteWorkflowTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canUseWorkflowDefinition(actor, definition) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "workflow trigger belongs to another user"})
+		writeAPIError(w, http.StatusForbidden, "permission_denied", "workflow trigger belongs to another user", false)
 		return
 	}
 	if missing := missingWorkflowGraphPermission(actor.Permissions, s.storedWorkflowTriggerPermissions(r.Context(), definition, current)); missing != "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "permission denied"})
+		writeAPIError(w, http.StatusForbidden, "permission_denied", "permission denied", false)
 		return
 	}
 	if current.TriggerType == "filesystem_event" && definition.Code == "local_library_scan" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "the local library filesystem trigger cannot be deleted"})
+		writeAPIError(w, http.StatusConflict, "conflict", "the local library filesystem trigger cannot be deleted", false)
 		return
 	}
 	if definition.Code == creatorSubscriptionWorkflowCode {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "the subscription refresh schedule cannot be deleted"})
+		writeAPIError(w, http.StatusConflict, "conflict", "the subscription refresh schedule cannot be deleted", false)
 		return
 	}
 	if isRankingWorkflowCode(definition.Code) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "the ranking pull schedule cannot be deleted"})
+		writeAPIError(w, http.StatusConflict, "conflict", "the ranking pull schedule cannot be deleted", false)
 		return
 	}
 	result, err := s.db.ExecContext(r.Context(), "DELETE FROM workflow_trigger WHERE id = ?", id)
@@ -511,7 +515,7 @@ func (s *Server) deleteWorkflowTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rows == 0 {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "workflow trigger not found"})
+		writeAPIError(w, http.StatusNotFound, "not_found", "workflow trigger not found", false)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

@@ -19,6 +19,7 @@ does not update its environment.
 | `KIKOTO_DB_READ_CONNECTIONS` | `8` | SQLite reader connections; writes use one separate connection. See [Database concurrency](database.md#concurrency). Each connection may hold a 16 MiB page cache; a missing, invalid, or non-positive value uses the default. |
 | `KIKOTO_DB_BACKUP_DIR` | `backups` beside the database | Verified database backups; see [Database backups](database.md#backups). Direct backend runs only: the Compose stacks do not pass it, so the container always uses `/config/backups`. |
 | `KIKOTO_DATA_ROOT` | `../data` | Local media library root. |
+| `KIKOTO_RECORD_ROOT` | `../record` | Independent home video and image library root. It is initialized with a `.kikoto-record` marker before scanning. |
 | `KIKOTO_CACHE_ROOT` | `../cache` | Runtime cache root. It also holds [temporary files](#temporary-files). |
 | `KIKOTO_STATIC_DIR` | Empty | Frontend asset directory; empty disables static file serving. |
 | `KIKOTO_LOCAL_SCAN_DEPTH` | `3` | Maximum local scan folder depth. |
@@ -44,6 +45,8 @@ system temporary directory:
 - The working files SQLite writes while it compacts the database, builds an
   index, or sorts more than its page cache holds. Compaction needs free space
   on the cache volume of about the database size.
+- A Record thumbnail while `ffmpeg` makes it, at most 2 MiB each. Only a
+  finished thumbnail enters the transcode cache.
 
 Startup empties `.kikoto-tmp`, so a file left by an interrupted run does not
 outlive the next start. When the cache root cannot hold the directory, startup
@@ -52,7 +55,7 @@ Compose stacks bound to a 64 MiB in-memory `/tmp`.
 
 ## Administrator Settings
 
-Administrators manage the instance from the administration tabs in Settings:
+Administrators manage the instance from the tabs of the System page:
 
 - **Library**: library storage, local scan depth, creator catalog freshness,
   Kikoeru import address policy, and remote file sources with their fallback
@@ -60,6 +63,9 @@ Administrators manage the instance from the administration tabs in Settings:
   which is only the default.
 - **Cache & Fetch**: playback and transcode cache limits, the remote per-file
   download limit, failed Fetch staging retention, and remote download pacing.
+  The transcode cache limit also bounds Record thumbnails, which live in
+  `transcodes/record-thumbs/` and are evicted with the other transcode cache
+  files, least recently used first.
 - **Proxy**: outbound proxies and their scopes.
 - **ASR & LLM**: ASR services, LLM providers, the content safety policy, and the AI lyrics attribution
   that governs both.
@@ -77,16 +83,18 @@ Administrators manage the instance from the administration tabs in Settings:
     helper; another machine or a custom service takes an origin. A Kikoto
     Helper requires the API token its web interface shows, for both services.
 
-  [Settings → ASR & LLM](../user/en/settings.md#asr--llm) defines credential
+  [System → ASR & LLM](../user/en/settings.md#asr--llm) defines credential
   clearing, model discovery, declared content boundaries and structured safety
   rules.
-- **Cleanup**: cache cleanup and database backups.
 - **Users**: accounts and production instance access.
+
+The [Cleanup](../user/en/settings.md#cleanup) page holds local work deletion,
+cache cleanup, database cleanup, and database backups.
 
 There is no instance-wide metadata language.
 
 Listening reports count days in each account's time zone, which follows the
-account's device unless the account chooses a zone in Settings → Account. A
+account's device unless the account chooses a zone in Settings → Time zone. A
 client that names no zone is counted in the server's: the container's `TZ` when
 that names an IANA zone, and UTC otherwise. The server carries its own zone
 database, so the image needs no `tzdata` package.
@@ -104,7 +112,7 @@ back, or return mixed-language metadata.
 Production anonymous access is an SQLite-backed instance setting rather than an
 environment variable. It defaults to disabled. A super administrator can
 enable read-only Library browsing and playback under
-`Settings -> Users -> Instance access`;
+`System -> Users -> Instance access`;
 the change applies immediately in production and is audited. Development shows
 and saves the same option so its automatic root identity can inspect every
 production administration surface, but all development requests remain
@@ -126,13 +134,13 @@ Set `api_url` to the upstream service base URL, such as
 `https://example.invalid`. The client appends paths such as `/api/health` and
 `/api/works`, so including a trailing `/api` would produce `/api/api/...`.
 
-After first startup, Settings is the source of truth for configured sources.
+After first startup, System -> Library is the source of truth for configured sources.
 
 Demo mode does not bootstrap or expose the root identity, recover or dispatch
 workflow jobs, or accept supplied sessions. Its HTTP API rejects mutation
 requests, and the Demo identity has only library-read and playback permissions.
 The read-only remote recommendation POST uses
-[simulated scores](../architecture/data-model.md#recommendation-catalog-and-generations),
+[simulated scores](../architecture/data-model/recommendations.md#recommendation-catalog-and-generations),
 and the For you draw POST returns a random sample of the admitted works that
 records nothing.
 Read requests are nevertheless allowed through administration, workflow,

@@ -5,14 +5,16 @@ Playback is handled by a global browser audio player.
 
 ## Current Behavior
 
-- Local and cached audio with a browser-oriented extension is served directly
-  with HTTP range support. This keeps startup and duration discovery on the
-  browser's native media path without waiting for FFprobe.
+- Local and cached audio the browser decodes is served directly with HTTP range
+  support, which keeps startup and duration discovery on the browser's native
+  media path. The server decides from the file's codec and container as
+  FFprobe reports them, not from the file name, so an `.mp3` that holds FLAC
+  plays or converts according to what the browser decodes.
 - When direct audio decoding fails and the file still exists, the player offers
   compatibility playback for only the current track, the current queue, or all
-  future local and cached playback. Compatibility playback and audio with an
-  extension the browser does not play, such as `.wma`, `.aiff`, `.aif`, or
-  `.mka`, stream as an HLS VOD playlist with the file's complete duration and
+  future local and cached playback. Compatibility playback and audio in a
+  codec or container the browser does not play, such as WMA, AIFF, or Matroska
+  audio, stream as an HLS VOD playlist with the file's complete duration and
   six-second 192 kbit/s AAC segments. One continuous FFmpeg encode produces
   the segments in order from where playback starts or seeks to, so even a
   multi-hour file starts within about a second and segment boundaries stay
@@ -30,7 +32,9 @@ Playback is handled by a global browser audio player.
   there. A confirmed missing file does not
   offer conversion: with **Switch sources on failure** enabled in Settings it
   continues through the normal source fallback order, and otherwise playback
-  stops with a Retry action.
+  stops with a Retry action. A file whose library or storage pool goes offline
+  while it plays pauses with a notice that the disk holding it is offline and a
+  Retry action, without switching to another source.
 - Local and cached video plays directly, with HTTP range support, when the
   browser decodes the file as stored. The player reports the containers,
   codecs, profiles, levels, and bit depths the browser plays, and the server
@@ -73,7 +77,7 @@ Playback is handled by a global browser audio player.
   no audio, are left out, and Demo reads keyframes only when a video is
   played. Every other video is transcoded
   to six-second 720p H.264/AAC segments, by the CPU or, when an administrator
-  turns on a hardware encoder under Settings → Cache & Fetch and its test
+  turns on a hardware encoder under System → Cache & Fetch and its test
   encode succeeds, by an Intel GPU. A file whose GPU encode fails is encoded
   by the CPU instead, within the same request.
 - One continuous FFmpeg process produces the segments in order from where
@@ -88,8 +92,8 @@ Playback is handled by a global browser audio player.
   natively, which keeps native fullscreen and AirPlay; other browsers, the
   Android app included, use hls.js, and a browser without it plays the
   playlist natively when it can.
-- A video with two or more audio tracks shows an **Audio track** menu below
-  the video, which names each track by number and by the title, language, and
+- A video with two or more audio tracks shows an **Audio track** menu at the
+  top of the player, which names each track by number and by the title, language, and
   channel layout the file gives. Without a choice the viewer plays the track
   the file flags as default, or the first track when none is flagged. Only
   the first track plays directly, because a browser playing a file itself
@@ -144,7 +148,7 @@ Playback is handled by a global browser audio player.
   encoding, and produced with a conservative two-thread profile or the GPU
   encoder at up to 2800 kbit/s; copied video keeps the source picture. Video
   and audio conversions share a server-wide number of slots, two by default,
-  which an administrator sets from 1 to 5 under **Settings → Cache & Fetch**.
+  which an administrator sets from 1 to 5 under **System → Cache & Fetch**.
   FFprobe has a small fixed concurrency limit, and embedded subtitle
   extraction runs one at a time in a slot of its own. Each has a short,
   bounded wait queue; requests that cannot acquire a slot promptly are
@@ -153,8 +157,9 @@ Playback is handled by a global browser audio player.
   make both binaries available on the backend process `PATH`.
 - Clicking a playable file queues naturally sorted playable files in the same
   folder and starts the selected file at zero.
-- Work detail exposes fixed Resume instead of work-level Play. Resume is disabled
-  without a positive unfinished cursor.
+- Work detail leads with Resume when the work has a positive unfinished
+  cursor, and otherwise with Play, which queues the playable files of the
+  folder the Directory opens on and starts the first at zero.
 - Playback continues across navigation.
 - Entering Work detail while a matching work is actively playing selects the
   current playback source and opens that track's folder. A paused queue, an
@@ -173,7 +178,9 @@ Playback is handled by a global browser audio player.
   sent serially; a transient database-busy response receives one short jittered
   retry.
 - Browser queue persistence does not retain per-track progress. Reloaded queue
-  metadata is refreshed from the server. When the durable work cursor still
+  metadata is refreshed from the server, and each restored item plays from its
+  local copy unless you picked another source for it in the player; an item
+  you have already started keeps playing from where it is. When the durable work cursor still
   points at the restored current track and is unfinished, that track continues
   from the saved position.
 - The player dock supports Mini, Compact, and full Now Playing states, queue
@@ -185,6 +192,10 @@ Playback is handled by a global browser audio player.
   screen lyrics, playback mode, sleep timer, and queue; playback speed and
   compatibility scope share the More menu beside the title. The Compact bar
   adds a Next control.
+- The button in the top-right corner of the full view clears the whole queue,
+  which also closes the player. It and **Clear** in the queue view both ask for
+  a second press. Pressing anywhere else, pressing Escape, or waiting four
+  seconds cancels it.
 - While a track plays, the next track that end-of-track advancement would
   select is preloaded once the current track is within 45 seconds of its end
   or already fully buffered. Only that one track is warmed, through the same
@@ -199,7 +210,7 @@ Playback is handled by a global browser audio player.
   whole-second values from 1 through 300 and stores them per server and user in
   the browser. The same values drive player buttons, keyboard shortcuts,
   browser Media Session actions, Android media controls, and the back and
-  forward buttons and double taps of the file viewer's video.
+  forward buttons and double taps of the video players.
 - Compact playback reserves page space on mobile and desktop so final actions
   are not covered. PWA update notices stack above the Compact dock.
 - Mobile full playback uses edge-to-edge safe areas on every side. Bottom
@@ -259,8 +270,9 @@ Playback is handled by a global browser audio player.
   disabled.
 - The timing buttons beside timed lyrics move every line 0.5 seconds earlier or
   later, up to 30 seconds either way, and a reset button returns to the file's
-  own timing. The offset applies to the active line, line seeking, and screen
-  lyrics. It belongs to the listener and the audio file, is saved for library
+  own timing. An LRC file's own `[offset:]` tag applies first, a positive
+  value showing lines earlier, and your offset applies on top. The offset
+  applies to the active line, line seeking, and screen lyrics. It belongs to the listener and the audio file, is saved for library
   audio and kept for the session elsewhere, and never changes the lyrics file.
 - **Loudness normalization** in Settings evens out loudness between local
   tracks. It is off by default. **Turn loud tracks down** lowers a track whose

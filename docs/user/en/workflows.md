@@ -5,28 +5,101 @@ Workflows make backend actions inspectable.
 
 ## User Surfaces
 
-- Workflows: built-in definitions, including the preset catalog sync
-  workflows, with their triggers managed in the selected definition. There is no custom
-  workflow editor.
-- A status strip at the top shows what is running now with its progress and
-  how many runs need attention; each cell opens Activity.
-- **Activity** is the first entry of the workflow list, with the number of
-  running runs and of runs that need attention beside it. Selecting it shows
-  every workflow's runs in place of a workflow: active runs above
-  **Needs attention** and **History**. Each row shows the status, run number,
-  trigger, and elapsed time. Selecting a row, or the **Latest run** card,
-  opens the run's details: start and finish times, duration, trigger, steps,
+- **Workflows** holds the maintenance an administrator starts by hand and
+  every workflow's runs. **Running** at the top lists the queued and running
+  runs of every workflow while there are any, above three tabs:
+  **Operations**, the default, **Needs attention**, and **History**.
+- **Operations** holds the cards, then **Next**. Under **Library** are
+  **Scan** (scan the local library), **Metadata** (sync work metadata), and
+  **Index** (refresh local work files); while [Record](record-library.md) is
+  on, **Record** adds **Record scan** (scan the Record folder) and **Media
+  details** (read the length and cover art of Record videos and audio files).
+  Work on one target starts where that target is: Fetch from a work, a catalog
+  sync from its circle, series, or voice actor, and a remote source's library
+  work check from that source in [Library](settings.md#library) settings.
+  There is no custom workflow editor.
+- A card shows the operation's name, its state, what starts it on its own,
+  and **Run**. The state reads **Never run**, **Starting**, **Queued**,
+  **Running** with its progress, or how the latest run ended and when, such as
+  **Succeeded** or **Failed**; **Needs review** marks a run with items that
+  wait for a decision. Select the state to open that run. The line below
+  lists its automatic starts, such as **At startup**, **After a scan adds
+  works**, **Watching folders**, or **Every 6 hours**, with when the next scheduled run is due, or says
+  **Automatic runs paused** when every trigger is off. Phones stack the cards.
+- **Run** starts the operation, and the card shows the run at once. Metadata
+  and Index run incrementally: Metadata refreshes missing or outdated
+  metadata of every work from DLsite, and Index indexes only local works whose
+  files were never indexed. Turn on **Full** beside Run to refresh every
+  work's metadata or re-index every local work instead; it applies to that run
+  and turns off once the run is requested. A scan always checks every folder,
+  so Scan has no Full. Scan and Index cover the whole library, so they cannot
+  be started again until their run ends. Metadata runs per scope and can start
+  another while one runs: its card follows the running run and counts the
+  others, and a new run that waits behind another says so. A run started by a
+  trigger or in another browser shows on its card the same way.
+- Record scan finds new and removed files in the
+  [Record folder](record-library.md#scanning-and-artwork). Media details reads
+  every file still waiting, including files an earlier run gave up on after a
+  timeout; opening a folder on the Record page reads that folder's files on
+  its own. Neither has Full, and each has one run queued or running at a time;
+  starting another returns that run. Record scan can also run at startup or
+  on a schedule, and Media details on a schedule or after a Record scan finds
+  new files, from their trigger buttons.
+- **Metadata options**, the button beside the Metadata card's name, sets
+  the [remote metadata fallback](settings.md#remote-metadata-fallback) (off by
+  default; on, it asks up to 16 chosen sources in the order you set when
+  DLsite reports a work as not found) and
+  [purchase bonus linking](settings.md#purchase-bonuses) (on by default). The
+  card's runs and Metadata's triggers use them, and the card names them
+  while they differ from the defaults, such as **Remote fallback: Example
+  Remote B → Example Remote A**. They are saved in this browser and in
+  Metadata's triggers; a source
+  that is switched off or no longer provides metadata drops out of the
+  fallback.
+- The calendar button at the end of a card's name row opens what makes that
+  operation run on its own, and is lit while any of it is on. It holds one
+  switch for each way the operation can start, and each change saves at once.
+  Scan and Record scan can run **At startup**, and Scan also watches folders
+  (**When local library folders change**). Metadata, Index, and Media details
+  instead run once the scan they follow has found something for them: **After
+  a scan adds works**, **After a scan finds new folders**, and **After a
+  Record scan finds new files**, each working only on what the scan found.
+  Every operation can run **On a schedule** with an interval of 1, 6, or 12
+  hours, 1 day, or 7 days. While on, a Metadata or Index schedule and the
+  folder watcher choose **Incremental** or **Full**. Switching one off pauses
+  it and keeps its interval and mode. A new install runs nothing on its own
+  until library setup or you turn a trigger on.
+- Running and Next each show five entries, and **Show all** shows the rest.
+  **Needs attention** lists the runs that wait for a decision, 20 to a page,
+  and its tab counts them while there are any. **History** lists the runs
+  that ended, newest first; it narrows to failed runs or to one workflow, and
+  the search field finds runs by workflow name, work code, circle, or source.
+- **Next** lists the triggers that are on: interval schedules by their next
+  run, then startup, after-scan, and folder triggers, each with when it runs and whether
+  it runs in full. A paused trigger runs nothing, so Next leaves it out; its
+  card's trigger list, or the page where it is set up, still shows it. A
+  ranking pull shows only while one of its rankings has a pull planned, with
+  when that pull is due; the rankings' own schedules on Discover turn it on
+  and off. The
+  operations' triggers have a switch that pauses them and an edit button that
+  opens their card's triggers. Another workflow's triggers, such as a ranking pull or
+  a source's library work check, lead to where they are set up.
+- Each run shows the status, run number, trigger, and elapsed time. Selecting
+  one opens its details: start and finish times, duration, trigger, steps,
   candidates, run actions, and a collapsed **Diagnostic log** of run events.
-  Wide screens show the details beside the list; elsewhere they replace it,
-  and **Back to runs** returns to the list. On phones Activity opens from the
-  list like a workflow, and the header back button returns from a run to the
-  list and from Activity to where you were. Selecting a workflow leaves
-  Activity. `/activity` and `/runs` links open Workflows on Activity and
-  select the linked run.
-- Activity lists every run, including those of features with their own pages:
-  translations are followed on the [Translation](translation.md) page, and
-  transcriptions in a work's **Manage lyrics → Transcribe**. A notification
-  about such a run opens that page.
+  On a wide screen, a run chosen in **Needs attention** or **History** opens
+  beside that list and stays in view while the list scrolls; **Close run**,
+  Escape, or selecting the run again closes it, and another tab or filter
+  closes it too. A run opened from **Running**, a card, a notification, or
+  another page, and every run on a narrower screen, takes the page, and
+  **Back to runs** or the header back button returns to the list it was
+  opened from. `/runs` and
+  `/activity` links, and earlier links to runs inside Workflows, open
+  Workflows with the linked run.
+- Workflows lists every run, including those of features with their own
+  pages: translations are followed on the [Translation](translation.md) page,
+  and transcriptions in a work's **Manage lyrics → Transcribe**. A
+  notification about such a run opens that page.
 
 ## Who Can Use Workflows
 
@@ -40,9 +113,10 @@ administrators.
 - Starting, configuring, or scheduling a workflow needs every permission its
   steps use: Track needs `remote:track`, Fetch and every Fetch-based bulk
   action need both `remote:fetch` and `metadata:sync`, scans, metadata
-  workflows, and the ranking pulls need `metadata:sync`, and the source check
-  needs `sources:write`. Contributors
-  without `metadata:sync` can still see these workflows, but cannot start or
+  workflows, and the ranking pulls need `metadata:sync`, the Record
+  operations need `library:write`, and the source check needs
+  `sources:write`. Contributors
+  without `metadata:sync` can still see these operations, but cannot start or
   automate their Fetch paths.
 - Editing, switching off, or deleting a trigger needs the same permissions as
   creating it.
@@ -61,12 +135,9 @@ administrators.
 
 ## Current Behavior
 
-- **Fetch** has Run options for one work code and an enabled compatible remote
-  source. Under **Filter**, select the file extensions to exclude or enter
-  additional extensions separated by commas. Nothing is excluded by default.
-  **Run** opens the Fetch preview; review the files and destination before
-  **Publish Fetch** queues the run. The exclusions also apply when switching
-  language editions. Fetch runs manually and has no automation triggers.
+- **Fetch** starts from a work's [detail page](work-detail.md), including a
+  work the library does not have, which Quick actions opens by its code. It
+  runs manually and has no automation triggers.
 - Local scan records folder discovery and local source presence without waiting
   for a metadata provider. Metadata sync, source availability, remote sync,
   cache, fetch, cleanup, circle refresh, and bulk remote actions record separate
@@ -82,26 +153,16 @@ administrators.
   workflow results, such as Fetch) and, for workflow operators, the runs that
   **Need attention**, with the newest running job above both. Fetch
   notifications open the local work detail and can be dismissed independently
-  for the signed-in user; a translation that needs attention opens the
+  for the signed-in user. A Fetch or Track that succeeds on retry notifies
+  again, even after its failure was dismissed; a translation that needs attention opens the
   Translation page's **Stopped** view, and a transcription its work;
-  **Open Activity** opens Activity on the Workflows page.
-- The workflow list groups every workflow by category: Basic (local scan, local
-  files, metadata sync, and Learn tag names), Catalog sync (the catalog sync
-  presets), Remote (Fetch and Check works on a source), and Discover (**Pull
-  remote source rankings**, **Pull DLsite rankings**, Availability Watch, and
-  **Refresh subscriptions**, which are configured on the
-  [Discover](discover.md) page), each in a fixed order. Every entry is one
-  line: a dot on its icon shows the latest run's status, and small icons mark
-  an enabled Startup trigger, schedule, or folder watcher. The latest run's
-  time is on the selected workflow's **Latest run** card. Wide layouts keep the
-  list beside the selected workflow; **Hide tab names** below it collapses the
-  list to its icons, and **Show tab names** expands it again. The page remembers this choice. On
-  phones the list is the landing view: tapping a workflow opens it, and the
-  header back button or the browser's Back returns to the list.
-  Definitions cannot be created, edited, or deleted from the page.
-- The selected workflow shows its name and description, its Run options, a
-  **Latest run** card, and its triggers. Each trigger states when it next
-  starts the workflow.
+  **Open Workflows** opens Workflows.
+- **Pull remote source rankings**, **Pull DLsite rankings**, Availability
+  Watch, and **Refresh subscriptions** are run and configured on the
+  [Discover](discover.md) page, and Learn tag names runs on its own; they have
+  no card. History lists their runs, and its workflow menu narrows the list to
+  one of them. The operations cannot be created, edited, or deleted from the
+  page.
 - Needs attention collects unresolved candidates, metadata issues, and
   unacknowledged failures. Resolving or dismissing recorded issues clears the
   corresponding dedicated metadata-run notice. Other failures can be marked
@@ -110,14 +171,11 @@ administrators.
   unavailable, such as delisted works, can be marked reviewed while those
   issues stay in Metadata. This acknowledgement is per user. History keeps the
   original outcome, including failed, partial, and cancelled runs.
-- Metadata owns pending-work recovery and the DLsite proxy shortcut. Its
-  metadata sync shortcut selects the existing workflow here.
-- Built-in local scan and metadata sync support editable interval triggers;
-  local scan also supports a Startup trigger. Local scan does not check remote
-  availability or synchronize metadata. Manual, Startup, and interval scans expose a
-  disabled-by-default `Follow-up run`; enabling it queues an independent
-  metadata run after the scan finishes. Metadata sync has no Startup trigger,
-  so it cannot compete with a scan follow-up.
+- Metadata owns pending-work recovery and the DLsite proxy shortcut.
+- Local scan does not check remote availability or synchronize metadata.
+  Metadata sync follows a scan only through its own **After a scan adds
+  works** trigger, which starts it once the scan has finished; it has no
+  Startup trigger, so it never competes with a scan at startup.
 - Local scan has one Startup trigger and one fixed folder watcher. On a new
   install both start off, and library setup offers to turn them on. The
   watcher can be paused,
@@ -130,69 +188,47 @@ administrators.
   affected work roots. Removed files and folders become `missing`; database
   records are retained. Watcher errors, oversized event batches, root
   invalidation, and duplicate roots automatically use a full scan. Fetch
-  registers its own published locations directly; Manual, Startup, and interval
-  scans always inspect the complete data tree. Changes during an active run
+  registers its own published locations directly; manual, startup, and interval
+  scans always inspect the complete data tree. In Scan's triggers, the
+  watcher's switch pauses it, and while it is on, **Incremental** and **Full**
+  beside it choose how it scans. Changes during an active run
   produce at most one follow-up scan. Paused events are discarded; offline
   changes rely on the Startup scan.
-- **Refresh local work files** sits second, after the local scan. It indexes the
-  media files inside local work folders that a scan has already discovered, so
-  opening a work does not index a large folder on demand. **Incremental** (the
-  default) covers only folders whose files were never indexed; **Full**
-  re-indexes every available local work. One run is queued or running at a
-  time, and starting another returns the active run. It supports Startup and
-  interval triggers that store the mode, and ships without a default trigger.
-- **Check works on a source** sits in Remote, after Fetch. It asks one remote
-  source whether library works exist there and records the answer on each
-  work, as checking availability on a work does; it never adds works. Its
-  options choose the source, the works (**Local library**, the default, or
-  **All works in database**), a filter (**No remote source**, the default, for
-  works that no remote source currently provides, or **All**), and **Works per
-  run** (50 to 1000, default 100). Without an enabled compatible remote source,
-  the workflow is covered by a prompt to configure one. Each work is one lookup on the source. When more works match,
-  the ones this source has never checked come first, then the ones checked
-  longest ago, so repeated runs cover the whole library. The run first checks
-  the source's health, as **Check health** in source settings does, and stops
+- **Index** (Refresh local work files) indexes the media files inside local
+  work folders that a scan has already discovered, so opening a work does not
+  index a large folder on demand. Incremental covers only folders whose files
+  were never indexed; Full re-indexes every available local work. One run is
+  queued or running at a time, and starting another returns the active run.
+  It runs after a complete scan that leaves folders unindexed, or on an
+  interval that can store Full, and ships without a default trigger.
+- **Check works on a source** asks one remote source whether library works
+  exist there and records the answer on each work, as checking availability
+  on a work does; it never adds works. It runs and is scheduled from the
+  source in [Library](settings.md#library) settings, and Workflows lists its
+  runs. Each work is one lookup on the source. When more works match than
+  one run checks, the ones this source has never checked come first, then the
+  ones checked longest ago, so repeated runs cover the whole library. The run
+  first checks the source's health, as **Check health** does, and stops
   without recording any work when the source is unavailable; it is partial
-  when some lookups failed. One run per source is active at a time. It
-  supports Startup and interval triggers that store these options and ships
-  without a default trigger. Running it requires permission to manage sources.
-- Workflows with run parameters show them in a **Run options** form below the
-  summary. The form ends in a bar with `Run` and, when `Run` is unavailable,
-  the reason, such as a missing required input. While a long form scrolls, the
-  bar stays at the bottom of the screen, above the phone navigation and the
-  player. Options apply to the next manual run only and reset when another
-  workflow is selected.
-  Local scan shows its follow-up option there; built-in workflows without run
-  parameters show `Run` in their header instead.
-- The **Latest run** card follows the form. Its first line states the latest
-  run's status, number, time, and duration; select it to open that run in
-  Activity. Below it are the run's stages and its log, side by side when there
-  is room. The log stays folded after a successful run and opens by itself
-  while a run is active and after a failed or partial one; **Show log** and
-  **Hide log** fold it by hand. Starting a run keeps its workflow open, and
-  the card reports the new run. While a run is active, new log lines stream in
-  and the log follows the latest output unless you scroll up. Select a stage to
-  show only its lines.
-- A bar chart of the latest 20 runs' durations, oldest first, closes the card.
-  Ordinary successes stay neutral so failures and partial runs stand out; hover
-  a bar for its details and select it to open the run. **All runs** opens
-  Activity with only this workflow's runs; select the workflow's name below
-  the Activity heading to show every workflow again.
+  when some lookups failed. One run per source is active at a time.
 - Availability Watch, **Refresh subscriptions**, **Pull DLsite rankings**, and
   **Pull remote source rankings** are configured on the
   [Discover](discover.md) page, where the watch keeps its source setting
   and its pool is the **Watch** view, the subscription refresh
   its schedule, and
-  each ranking its own pull schedule. Here they show their **Latest run** card,
-  link to that page, and have no Run options or
-  triggers of their own.
+  each ranking its own pull schedule. History narrowed to one of them says
+  where it is configured and links there.
 - Sync a circle catalog, Sync a series catalog, and Sync a voice actor catalog
-  (tabs **Circle catalog**, **Series catalog**, and **VA catalog**) are preset
-  workflows that run on demand. Their Run options have three sections:
+  are preset workflows that run on demand from their target:
+  **Sync catalog…** in a circle's or voice actor's **More** menu, and **Sync
+  series catalog…** in a circle's while one of its series is shown; see
+  [Circles](circles.md) and [Voice actors](voices.md). Each opens its Run
+  options in a dialog with the target filled in, and **Run** queues the sync,
+  closes the dialog, and links to the run. The Run options have
+  three sections:
   **Input** (the target and the catalog refresh, Incremental or Full),
   **Filter** (a release date range and a work limit), and **Actions** (Sync
-  metadata, the tag template, and for circles Check remote sources). On a wide
-  screen the three sections sit side by side as columns.
+  metadata, the tag template, and for circles Check remote sources).
   Circle and series targets accept up to 20 comma-separated IDs, whose catalogs
   are combined before filtering. The voice actor target is one picked voice
   actor; its catalog is refreshed on the checked remote sources with the
@@ -207,44 +243,36 @@ administrators.
   Catalog sync does not Track or Fetch; use a remote source's works, the
   Watch view in Discover, or a work's detail page for that.
 - The catalog sync presets have no triggers. To follow new works on a schedule,
-  subscribe to the circle, series, or voice actor instead; the preset's
-  triggers section links to [Discover](discover.md).
-- Metadata sync refreshes works in the library; Selected works can also add
-  works the library does not have yet. Its Run options choose
-  **Works** (All works, one circle, one voice actor, or Selected works),
-  **Metadata source** tabs, and **Refresh** (Missing or outdated, or All metadata).
-  All works and Selected works default to DLsite and can select an enabled
-  metadata-capable remote source. Circle shows only DLsite. Voice actor shows
-  only remote sources and is unavailable until one is configured and enabled.
-  Selected works accepts up to 100 codes separated by spaces, commas or
-  newlines and defaults to All metadata. With DLsite, a code the library does
-  not have adds that work and its language editions, and a code DLsite does not
-  list counts as unavailable; a remote source refreshes only works already in
-  the library. With DLsite selected, Run options also show the
-  [remote metadata fallback](settings.md#remote-metadata-fallback) and
-  [purchase bonus linking](settings.md#purchase-bonuses). These choices apply
-  to this run, and retries keep them. Interval triggers store the same options
-  for All works, a circle, or a voice actor; Selected works runs only on
-  demand, and a trigger that still holds Selected works switches itself off
-  when it fires.
-  Remote refresh preserves manual edits and DLsite precedence; Missing or
-  outdated checks metadata from the selected source. The source selector and
-  fallback controls are hidden when no capable enabled remote is configured.
+  subscribe to the circle, series, or voice actor instead; see
+  [Discover](discover.md).
+- Metadata sync refreshes works in the library. The **Metadata** card syncs
+  every work from DLsite with the fallback and bonus linking its options set.
+  A sync of one work, circle, or voice actor starts from
+  that work, circle, or voice actor. A metadata sync run also accepts one
+  circle, one voice actor, or up to 100 selected works, a remote source in
+  place of DLsite, the [remote metadata fallback](settings.md#remote-metadata-fallback),
+  and [purchase bonus linking](settings.md#purchase-bonuses); retries keep a
+  run's choices, and an edited trigger keeps the ones it stores. With DLsite,
+  a selected code the library does not have adds that work and its language
+  editions, and a code DLsite does not list counts as unavailable; a remote
+  source refreshes only works already in the library. A trigger that holds
+  selected works switches itself off when it fires. Remote refresh preserves
+  manual edits and DLsite precedence.
 - Workflows are built in; users cannot author their own. Custom workflows
   preserved from an older installation are reviewed during library setup,
   where exact preset matches can become subscriptions of the reviewing
   administrator and others can be exported; see [Getting started](getting-started.md). Their earlier runs stay
-  in Activity history.
+  in History.
 - **Pull DLsite rankings** pulls every DLsite ranking that is due, in each of
   its orders, in one run, and **Pull remote source rankings** one remote
   source's popular list per run; see [Rankings](discover.md#rankings). Neither adds works to the library,
   syncs their metadata, tracks, fetches, or tags them. Popular collection runs
-  that tagged, tracked, or fetched works stay readable in Activity and cannot
+  that tagged, tracked, or fetched works stay readable in History and cannot
   be retried.
 - A queued or running Fetch is unique per canonical work. Repeated Fetch
   requests reuse that run instead of downloading the same work twice, and every
   requesting user receives the shared run's terminal notification.
-- Fetch Activity reports byte-level remote-transfer progress, the observed
+- A Fetch run reports byte-level remote-transfer progress, the observed
   transfer rate, and the estimated time remaining. Unknown-size files stay
   explicit and suppress percentage and remaining-time presentation until their
   actual size is known.
@@ -252,12 +280,12 @@ administrators.
   top with its own progress bar, and the full list marks each file as done,
   waiting, or where the run failed or paused.
 - Each Fetch run is named after its work, such as `Fetch RJ00000001`, and
-  Activity search finds a Fetch by its work code. Fetches queued by a bulk
+  History's search finds a Fetch by its work code. Fetches queued by a bulk
   action, including one started from the Watch view, record that origin as
   their trigger reason.
 - Runs that act on one work, circle, series, voice actor, or remote source add
-  it to their title, such as `Sync a circle catalog · RG00000000`, and Activity
-  search finds them by it.
+  it to their title, such as `Sync a circle catalog · RG00000000`, and
+  History's search finds them by it.
 - A scan never marks works missing in a place it cannot see: an unmounted data
   folder or offline storage pool, folders deeper than the scan depth, folders
   it has no permission to read, and the recycle bins and snapshots that NAS

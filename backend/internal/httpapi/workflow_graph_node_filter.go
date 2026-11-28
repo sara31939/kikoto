@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/yexca/kikoto/backend/internal/personal"
 )
 
 func (s *Server) executeGraphFilterWorks(ctx context.Context, userID int64, node workflowGraphNode, inputs map[string]graphPortValue) (graphNodeExecution, error) {
@@ -100,10 +102,28 @@ type graphWorkFilterMetadata struct {
 	UserTags     []string
 }
 
+// workDLsiteMetadataSettledSQL is true when the work aliased workAlias needs no
+// DLsite metadata request: it has a DLsite snapshot, or DLsite reported it as
+// not found, so a scheduled follow does not request it again on every run.
+func workDLsiteMetadataSettledSQL(workAlias string) string {
+	return `(
+		EXISTS (
+			SELECT 1
+			FROM metadata_snapshot AS snapshot
+			INNER JOIN metadata_provider AS provider ON provider.id = snapshot.provider_id
+			WHERE snapshot.work_id = ` + workAlias + `.id AND provider.code = 'dlsite'
+		)
+		OR EXISTS (
+			SELECT 1
+			FROM work_metadata_provider_state AS state
+			INNER JOIN metadata_provider AS provider ON provider.id = state.provider_id
+			WHERE state.work_id = ` + workAlias + `.id AND provider.code = 'dlsite' AND state.status = 'not_found'
+		)
+	)`
+}
+
 // graphWorkMissingMetadata reports whether a catalog code still needs DLsite
-// metadata: it has no work, or its work has no DLsite snapshot. A work the
-// provider reported as not found is skipped so a scheduled follow does not
-// request it again on every run.
+// metadata: it has no work, or its work's DLsite metadata is not settled.
 func (s *Server) graphWorkMissingMetadata(ctx context.Context, code string) (bool, error) {
 	var synced bool
 	err := s.db.QueryRowContext(ctx, `
@@ -111,20 +131,7 @@ func (s *Server) graphWorkMissingMetadata(ctx context.Context, code string) (boo
 			SELECT 1
 			FROM work
 			WHERE UPPER(work.primary_code) = UPPER(?)
-				AND (
-					EXISTS (
-						SELECT 1
-						FROM metadata_snapshot AS snapshot
-						INNER JOIN metadata_provider AS provider ON provider.id = snapshot.provider_id
-						WHERE snapshot.work_id = work.id AND provider.code = 'dlsite'
-					)
-					OR EXISTS (
-						SELECT 1
-						FROM work_metadata_provider_state AS state
-						INNER JOIN metadata_provider AS provider ON provider.id = state.provider_id
-						WHERE state.work_id = work.id AND provider.code = 'dlsite' AND state.status = 'not_found'
-					)
-				)
+				AND `+workDLsiteMetadataSettledSQL("work")+`
 		)
 	`, code).Scan(&synced)
 	return !synced, err
@@ -166,7 +173,8 @@ func (s *Server) graphWorkFilterMetadata(ctx context.Context, userID int64, code
 	}{
 		{&metadata.VoiceNames, `SELECT DISTINCT person.display_name FROM work_credit INNER JOIN person ON person.id = work_credit.person_id WHERE work_credit.work_id = ? AND work_credit.role = 'voice_actor' ORDER BY person.display_name`, []any{workID}},
 		{&metadata.MetadataTags, `SELECT DISTINCT tag.display_name FROM work_tag INNER JOIN tag ON tag.id = work_tag.tag_id WHERE work_tag.work_id = ? ORDER BY tag.display_name`, []any{workID}},
-		{&metadata.UserTags, `SELECT DISTINCT user_tag.name FROM user_work_tag INNER JOIN user_tag ON user_tag.id = user_work_tag.user_tag_id WHERE user_work_tag.work_id = ? AND user_work_tag.user_id = ? ORDER BY user_tag.name`, []any{workID, userID}},
+		// Personal tags live on the family's canonical work.
+		{&metadata.UserTags, `SELECT DISTINCT user_tag.name FROM user_work_tag INNER JOIN user_tag ON user_tag.id = user_work_tag.user_tag_id WHERE user_work_tag.work_id = ` + personal.CanonicalWorkIDSQL("?") + ` AND user_work_tag.user_id = ? ORDER BY user_tag.name`, []any{workID, workID, userID}},
 	}
 	for _, query := range queries {
 		rows, err := s.db.QueryContext(ctx, query.SQL, query.Args...)

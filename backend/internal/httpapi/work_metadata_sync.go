@@ -14,6 +14,7 @@ import (
 
 	"github.com/yexca/kikoto/backend/internal/dlsite"
 	"github.com/yexca/kikoto/backend/internal/metasync"
+	"github.com/yexca/kikoto/backend/internal/personal"
 	"github.com/yexca/kikoto/backend/internal/remotemetadata"
 	"github.com/yexca/kikoto/backend/internal/workcode"
 	"github.com/yexca/kikoto/backend/internal/workflow"
@@ -43,7 +44,7 @@ func (s *Server) createWorkMetadataSyncRun(w http.ResponseWriter, r *http.Reques
 	}
 	workID, err := parseInt64PathValue(r, "id")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid work id"})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid work id", false)
 		return
 	}
 	var options struct {
@@ -81,7 +82,7 @@ func (s *Server) createWorkMetadataSyncRun(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "work not found"})
+			writeAPIError(w, http.StatusNotFound, "not_found", "work not found", false)
 			return
 		}
 		writeError(w, err)
@@ -243,13 +244,13 @@ func (s *Server) activeWorkMetadataSync(ctx context.Context, payload workMetadat
 func (s *Server) executeWorkMetadataSyncJob(ctx context.Context, job workflowJobRecord) error {
 	var payload workMetadataSyncPayload
 	if err := decodeWorkflowJobPayload(job.PayloadJSON, &payload); err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	if payload.SourceID != 0 {
 		return s.executeRemoteWorkMetadataSyncJob(ctx, job, payload)
 	}
-	_ = s.updateWorkflowJobCheckpoint(ctx, job.ID, "syncing", map[string]any{"familyCode": payload.FamilyCode}, 0, 1)
+	s.checkpointJobOrLog(ctx, job, "syncing", map[string]any{"familyCode": payload.FamilyCode}, 0, 1)
 	autoLink := true
 	if payload.PurchaseBonusAutoLink != nil {
 		autoLink = *payload.PurchaseBonusAutoLink
@@ -267,19 +268,19 @@ func (s *Server) executeWorkMetadataSyncJob(ctx context.Context, job workflowJob
 			fallback, fallbackErr := s.runRemoteMetadataFallbackWithSettings(ctx, payload.WorkID, payload.PrimaryCode, settings)
 			if fallbackErr != nil {
 				if ctx.Err() != nil {
-					_ = s.failClaimedWorkflowJob(ctx, job, fallbackErr.Error())
+					s.failJobOrLog(ctx, job, fallbackErr.Error())
 					return fallbackErr
 				}
 				slog.Warn("remote metadata fallback failed", "work_id", payload.WorkID, "error", fallbackErr)
 				fallback.Status = remoteFallbackFailed
 			}
 			if finishErr := s.finishUnavailableWorkMetadataSyncJob(ctx, job, payload, family, err.Error(), fallback); finishErr != nil {
-				_ = s.failClaimedWorkflowJob(ctx, job, finishErr.Error())
+				s.failJobOrLog(ctx, job, finishErr.Error())
 				return finishErr
 			}
 			return nil
 		}
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	status := "succeeded"
@@ -296,7 +297,7 @@ func (s *Server) executeWorkMetadataSyncJob(ctx context.Context, job workflowJob
 		summary["purchase_bonus_parent"] = family.PurchaseBonusParent
 	}
 	if err := s.finishWorkMetadataSyncJob(ctx, job, status, level, summary, len(family.SyncedCodes)); err != nil {
-		_ = s.failClaimedWorkflowJob(ctx, job, err.Error())
+		s.failJobOrLog(ctx, job, err.Error())
 		return err
 	}
 	return nil
@@ -377,10 +378,10 @@ func (s *Server) finishWorkMetadataSyncJob(ctx context.Context, job workflowJobR
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE workflow_job SET status = 'succeeded', progress_current = 1, progress_total = 1,
-		locked_by = '', locked_at = NULL, heartbeat_at = NULL, checkpoint_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, mustJSON(map[string]any{"phase": "completed", "detail": summary, "progressCurrent": 1, "progressTotal": 1}), job.ID); err != nil {
+		locked_by = '', locked_at = NULL, heartbeat_at = NULL, checkpoint_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'cancelled'`, mustJSON(map[string]any{"phase": "completed", "detail": summary, "progressCurrent": 1, "progressTotal": 1}), job.ID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE workflow_run SET status = ?, summary_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?`, status, mustJSON(summary), job.RunID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_run SET status = ?, summary_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND status <> 'cancelled'`, status, mustJSON(summary), job.RunID); err != nil {
 		return err
 	}
 	eventType, message := "metadata.family_synced", fmt.Sprintf("Refreshed metadata for %d family editions", syncedCodes)
@@ -407,18 +408,18 @@ func (s *Server) createDLsiteSyncRun(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&options); err != nil && !errors.Is(err, io.EOF) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body", false)
 			return
 		}
 		var extra any
 		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			writeAPIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body", false)
 			return
 		}
 	}
 	options, err := s.validateMetadataSyncOptions(r.Context(), options)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), false)
 		return
 	}
 	result, err := s.enqueueScopedDLsiteMetadataSync(r.Context(), "manual", "manual", 0, options)
@@ -438,11 +439,21 @@ func (s *Server) newDLsiteMetadataSyncer(ctx context.Context) *metasync.DLsiteSy
 		WithMetadataPriority(s.instanceMetadataLanguages(ctx)).
 		WithLanguages(dlsiteLanguageFallbacksForLanguages(s.instanceMetadataLanguages(ctx))).
 		WithPurchaseBonusLinking(s.settingBoolContext(ctx, purchaseBonusAutoLinkSetting, true), false).
+		WithFamilyStoredHandler(s.consolidateFamilyPersonalState).
 		WithRequestPacing(
 			durationFromSettingSeconds(s.settingFloatContext(ctx, "remote_request_delay_base_seconds", 0.5)),
 			durationFromSettingSeconds(s.settingFloatContext(ctx, "remote_rate_limit_backoff_seconds", 30)),
 			durationFromSettingSeconds(s.settingFloatContext(ctx, "remote_max_backoff_seconds", 300)),
 		)
+}
+
+// consolidateFamilyPersonalState moves personal state onto the family's
+// canonical work after metadata sync stored the family. A failure is logged
+// and repaired at the next start.
+func (s *Server) consolidateFamilyPersonalState(ctx context.Context, logicalWorkID int64) {
+	if err := personal.ConsolidateFamily(ctx, s.db, logicalWorkID); err != nil {
+		slog.Error("move personal state to the canonical work", "logical_work_id", logicalWorkID, "error", err)
+	}
 }
 
 func durationFromSettingSeconds(value float64) time.Duration {

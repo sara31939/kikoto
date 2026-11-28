@@ -12,8 +12,9 @@ Circles represent makers, circles, and related party catalog state.
 - Keeps search, one-tap view chips, and the page-size action on one wrapping
   toolbar row. The chips are `All circles`, `Favorite`, `Tagged`,
   `Available`, `Local`, `Remote`, `Missing`, and `Attention`, and the
-  pressed chip names the current view. On a phone the search field keeps its
-  own row with page size beside it, and the chips scroll sideways below.
+  pressed chip names the current view. On a phone the chips scroll sideways
+  with **Search** and page size at the row's end; **Search** opens the search
+  field above the row, and closing it clears the search.
 - Shows each circle as a cover tile: the circle's cover with a `No cover`
   fallback, the favorite control on the cover, the name, the latest release
   date, and personal tags. Tiles fill the row on wide layouts and form two
@@ -45,45 +46,48 @@ Circles represent makers, circles, and related party catalog state.
   Library. This applies to both circle detail and circle series;
   the separate circle-entity list keeps its own controls. Selecting a DLsite
   tag or personal tag on a work card opens a local Library search for it.
-- Shows the circle detail summary on a cover-tinted panel with the circle's
-  aliases and personal tags. Its **Available**, **Local**, **Remote**, and
-  **Unavailable** counts sit beside an availability bar and describe the whole
-  catalog, whatever the works below are filtered to.
-  A circle that was never pulled states that only works the library already
-  knows are listed; otherwise the summary shows when the catalog was last
-  synced. Series cards carry the same availability bar.
-- Keeps the common refresh actions in the detail summary: **First pull** for a
-  circle that was never pulled, then **Refresh circle**, which also checks the
-  remote sources. **Retry metadata** appears only while catalog works still
-  lack metadata and fills just those. Each action queues a Sync a circle catalog run
-  without a filter or tag and returns at once; the button shows
-  **Refreshing** until the run settles, and the run is visible in Activity.
-- The bell beside **Favorite** subscribes to the circle's new works, and the
-  bell beside a series' DLsite link to that series; see
-  [Discover](discover.md#subscribing). A series of a subscribed circle is already
-  included.
-- The **More** menu holds **Change cover…** and **Sync this circle's catalog…**,
-  the Sync a circle catalog preset with this circle filled in, for every other
-  combination of catalog refresh, filter, metadata, tag, and source check. To
-  refresh metadata the circle's works already have, run Metadata sync with the
-  circle scope. Demo offers both: **Change cover…** saves no cover, and the
-  preset opens read-only.
-- Shortens the common detail actions on mobile, keeps icon-only Favorite,
-  More, and DLsite controls accessible by name, and places DLsite last.
-- Uses the Library-style works toolbar on wide layouts: the Works/Series switch
-  and a bounded search on the left, then the sort button that names the
-  current order, display options, the availability filter, and selection on
-  the right. Display options hold the **Cards** choice of **Full**,
-  **Compact**, and **Mini** shared with the Library, the columns, and the page
-  size; a newly chosen card mode starts from its
-  [preset](library.md#current-behavior). The shared collection pagination sits
-  above and below the grid.
-- Keeps mobile work controls to the Works/Series switch with the sort button
-  beside it and one Catalog options action. Search, availability, the card
-  mode, mobile columns, page size, and selection mode live in that sheet, and
-  the series view keeps its search inline;
-  wide layouts retain inline controls. The series overview lists series and
-  offers no order.
+- Shows the circle detail summary on the cover's tint without a frame: the
+  portrait; one line with the circle code linking to DLsite followed by the
+  catalog's **Local**, **Remote**, and **Unavailable** counts; the name and
+  aliases; and the personal tags with the button that edits them. A count of
+  zero is left out, the **Works** tab below states the catalog's size, and
+  the counts describe the whole catalog, whatever the works below are
+  filtered to. Series cards carry an availability bar.
+- Keeps the summary's actions quiet: **Favorite**, the subscribe bell, the
+  catalog refresh, and **More**. The page has no primary button. On a phone
+  the actions show as icons named for assistive technology.
+- The bell subscribes to the circle's new works, and the bell beside a series'
+  DLsite link to that series; see [Discover](discover.md#subscribing). A
+  series of a subscribed circle is already included.
+- For users who may refresh catalogs, the button before **More** reads
+  **First pull** for a circle that was never pulled, which reads the whole
+  catalog, and **Refresh** after that, which also checks the remote sources;
+  its tooltip names when the catalog was last synced. Either queues a Sync a
+  circle catalog run without a filter or tag and returns at once. Until the
+  run settles the button reads **Refreshing** and opens the run in Workflows.
+- The **More** menu holds **Change cover…** and, for users who may refresh
+  catalogs, **Retry metadata** only while catalog works still lack metadata,
+  which fills just those, and **Sync catalog…**, which opens the Sync a
+  circle catalog preset in a dialog with this circle filled in, for every
+  other combination of catalog refresh, filter, metadata, tag, and source
+  check. While one of the circle's series is shown, **Sync series catalog…**
+  opens the Sync a series catalog preset for that series the same way. To
+  refresh metadata the circle's works already have, run Metadata sync with
+  the circle scope. A user without these permissions sees none of them. Demo
+  offers **Change cover…**, which saves no cover, and the preset, which opens
+  read-only.
+- Keeps the works toolbar to the Works/Series switch, a search field, the sort
+  button that names the current order, the availability filter, and **View**.
+  **View** holds the **Cards** choice of **Full**, **Simple**, **Compact**,
+  and **Mini** shared with the Library, the columns, the page size, and
+  **Select works**; a newly chosen card mode starts from its
+  [preset](library.md#current-behavior). The **Works** tab states the work
+  count; from tablet width a caption before the sort button names the page
+  when the works span more than one, and more pages add the shared pagination
+  below the grid. The series overview lists series and offers no order.
+- On a phone the Works/Series switch takes its own row, followed by
+  **Search**, the sort button, the filter, and **View**, which opens as a
+  sheet. **Search** opens the search field above that row.
 - Treats the mobile detail back control as Up to the last server-and-user-scoped
   Circles list location, including when the detail was opened from Library.
   Wide layouts keep the source-aware history return label and destination.
